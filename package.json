@@ -1,7 +1,7 @@
 {
   "name": "sqlite3",
   "description": "Asynchronous, non-blocking SQLite3 bindings. Forked from TryGhost/node-sqlite3",
-  "version": "5.2.0",
+  "version": "5.2.1",
   "homepage": "https://github.com/AppThreat/node-sqlite3",
   "author": {
     "name": "Mapbox",
@@ -43,8 +43,7 @@
   "dependencies": {
     "bindings": "^1.5.0",
     "node-addon-api": "^8.3.1",
-    "prebuild-install": "^7.1.3",
-    "tar": "^7.4.3"
+    "prebuild-install": "^7.1.3"
   },
   "devDependencies": {
     "eslint": "9.27.0",

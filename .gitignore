@@ -33,3 +33,4 @@ setup.sh
 package-lock.json
 yarn.lock
 prebuilds
+somefile

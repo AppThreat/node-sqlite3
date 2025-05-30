@@ -86,11 +86,6 @@ jobs:
           echo "CFLAGS=${CFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
           echo "CXXFLAGS=${CXXFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
 
-      - name: Downgrade sqlite to 3.48 on macos
-        if: contains(matrix.os, 'macos')
-        run: |
-          sed -i '' 's/3500000/3480000/g' deps/common-sqlite.gypi
-
       - name: Build binaries
         run: yarn prebuild -a ${{ env.TARGET }}
 
