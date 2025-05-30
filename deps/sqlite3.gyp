@@ -7,7 +7,13 @@
 
   'target_defaults': {
     'default_configuration': 'Release',
-    'cflags':[
+    "cflags": [
+      '-std=c17',
+      '-Wall',
+      '-Wextra',
+      '-O2'
+    ],
+    'cxxflags':[
       '-std=c++17',
       '-Wall',
       '-Wextra',
