@@ -32,6 +32,7 @@ jobs:
           - x64
         node:
           - 20
+          - 24
         include:
           - os: macos-latest
             node: 20
@@ -45,6 +46,19 @@ jobs:
             node: 20
             host: arm64
             target: arm64
+          - os: macos-latest
+            node: 24
+            host: arm64
+            target: arm64
+          - os: ubuntu-22.04-arm
+            node: 24
+            host: arm64
+            target: arm64
+          - os: windows-11-arm
+            node: 24
+            host: arm64
+            target: arm64
+
     name: ${{ matrix.os }} (host=${{ matrix.host }}, target=${{ matrix.target }})
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
@@ -103,7 +117,7 @@ jobs:
 
       - name: Upload binaries to commit artifacts
         uses: actions/upload-artifact@v4
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.node == 24 && matrix.os == 'ubuntu-22.04'
         with:
           name: prebuilt-binaries
           path: prebuilds/*
@@ -119,7 +133,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPMJS_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        if: matrix.os == 'ubuntu-22.04' && startsWith(github.ref, 'refs/tags/')
+        if: matrix.node == 24 && matrix.os == 'ubuntu-22.04' && startsWith(github.ref, 'refs/tags/')
   build-qemu:
     runs-on: ubuntu-24.04
     permissions:
@@ -132,6 +146,7 @@ jobs:
       matrix:
         node:
           - 20
+          - 24
         target:
           - linux/arm64
         variant:
@@ -142,6 +157,9 @@ jobs:
           - target: linux/amd64
             variant: alpine3.20
             node: 20
+          - target: linux/amd64
+            variant: alpine3.20
+            node: 24
     name: ${{ matrix.variant }} (node=${{ matrix.node }}, target=${{ matrix.target }})
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
@@ -168,7 +186,7 @@ jobs:
 
       - name: Upload binaries to commit artifacts
         uses: actions/upload-artifact@v4
-        if: matrix.os == 'ubuntu-24.04'
+        if: matrix.node == 24 && matrix.os == 'ubuntu-24.04'
         with:
           name: prebuilt-binaries
           path: prebuilds/*
