@@ -149,18 +149,16 @@ jobs:
         target:
           - linux/arm64
         variant:
-          - bookworm
           - alpine3.20
         include:
-          # bookworm node 24 arm64 build
-          - target: linux/arm64
-            variant: bookworm
-            node: 24
           # musl x64 builds
           - target: linux/amd64
             variant: alpine3.20
             node: 20
           - target: linux/amd64
+            variant: alpine3.21
+            node: 24
+          - target: linux/arm64
             variant: alpine3.21
             node: 24
     name: ${{ matrix.variant }} (node=${{ matrix.node }}, target=${{ matrix.target }})
