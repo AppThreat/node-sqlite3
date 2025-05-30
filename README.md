@@ -23,15 +23,15 @@ You can use [`npm`](https://github.com/npm/cli) or [`yarn`](https://github.com/y
 
 * (recommended) Latest published package:
 ```bash
-npm install sqlite3
+npm install @appthreat/sqlite3
 # or
-yarn add sqlite3
+yarn add @appthreat/sqlite3
 ```
 * GitHub's `master` branch: `npm install https://github.com/AppThreat/node-sqlite3/tarball/master`
 
 ### Prebuilt binaries
 
-`sqlite3` v5+ was rewritten to use [Node-API](https://nodejs.org/api/n-api.html) so prebuilt binaries do not need to be built for specific Node versions. `sqlite3` currently builds for both Node-API v3 and v6. Check the [Node-API version matrix](https://nodejs.org/api/n-api.html#node-api-version-matrix) to ensure your Node version supports one of these. The prebuilt binaries should be supported on Node v10+.
+`@appthreat/sqlite3` v6+ was rewritten to use [Node-API](https://nodejs.org/api/n-api.html) so prebuilt binaries do not need to be built for specific Node versions. `sqlite3` currently builds for both Node-API v3 and v6. Check the [Node-API version matrix](https://nodejs.org/api/n-api.html#node-api-version-matrix) to ensure your Node version supports one of these. The prebuilt binaries should be supported on Node v10+.
 
 The module uses [`prebuild-install`](https://github.com/prebuild/prebuild-install) to download the prebuilt binary for your platform, if it exists. These binaries are hosted on GitHub Releases for `sqlite3` versions above 5.0.2, and they are hosted on S3 otherwise. The following targets are currently provided:
 
@@ -244,4 +244,4 @@ We use [GitHub releases](https://github.com/AppThreat/node-sqlite3/releases) for
 
 Copyright (c) 2013-2025 Mapbox & Ghost Foundation
 
-`node-sqlite3` is [BSD licensed](https://github.com/AppThreat/node-sqlite3/raw/master/LICENSE).
+`@appthreat/sqlite3` is [BSD licensed](https://github.com/AppThreat/node-sqlite3/raw/master/LICENSE).
