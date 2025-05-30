@@ -25,7 +25,6 @@ jobs:
         os:
           - macos-13
           - ubuntu-22.04
-          - ubuntu-24.04
           - windows-latest
         host:
           - x64
@@ -43,10 +42,6 @@ jobs:
             host: arm64
             target: arm64
           - os: ubuntu-22.04-arm
-            node: 20
-            host: arm64
-            target: arm64
-          - os: ubuntu-24.04-arm
             node: 20
             host: arm64
             target: arm64
@@ -72,10 +67,6 @@ jobs:
         if: contains(matrix.os, 'windows')
         with:
           msbuild-architecture: ${{ matrix.target }}
-      - name: Use Node.js 20.x
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20.x'
       - name: Install dependencies
         run: yarn install --ignore-scripts
 
