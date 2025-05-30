@@ -146,7 +146,6 @@ jobs:
       matrix:
         node:
           - 20
-          - 24
         target:
           - linux/arm64
         variant:
@@ -158,7 +157,7 @@ jobs:
             variant: alpine3.20
             node: 20
           - target: linux/amd64
-            variant: alpine3.20
+            variant: alpine3.21
             node: 24
     name: ${{ matrix.variant }} (node=${{ matrix.node }}, target=${{ matrix.target }})
     steps:
