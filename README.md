@@ -4,6 +4,7 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
 
 [![Latest release](https://img.shields.io/github/release/AppThreat/node-sqlite3.svg)](https://www.npmjs.com/package/sqlite3)
 ![Build Status](https://github.com/AppThreat/node-sqlite3/workflows/CI/badge.svg?branch=master)
+![Node-API v9 Badge](https://github.com/nodejs/abi-stable-node/blob/doc/assets/Node-API%20v9%20Badge.svg)
 
 # Features
 
@@ -14,7 +15,7 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
  - [Extension support](https://github.com/AppThreat/node-sqlite3/wiki/API#databaseloadextensionpath-callback), including bundled support for the [json1 extension](https://www.sqlite.org/json1.html)
  - Big test suite
  - Written in modern C++ and tested for memory leaks
- - Bundles SQLite v3.50.0 (v3.48.0 on macOS), or you can build using a local SQLite
+ - Bundles SQLite v3.50.0, or you can build using a local SQLite [amalgamation](https://www.sqlite.org/amalgamation.html)
 
 # Installing
 
