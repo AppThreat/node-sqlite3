@@ -8,7 +8,10 @@
   'target_defaults': {
     'default_configuration': 'Release',
     'cflags':[
-      '-std=c99'
+      '-std=c++17',
+      '-Wall',
+      '-Wextra',
+      '-O2'
     ],
     'configurations': {
       'Debug': {
@@ -88,6 +91,8 @@
           'SQLITE_ENABLE_FTS4',
           'SQLITE_ENABLE_FTS5',
           'SQLITE_ENABLE_RTREE',
+          'SQLITE_ENABLE_SESSION',
+          'SQLITE_ENABLE_JSON',
           'SQLITE_ENABLE_DBSTAT_VTAB=1',
           'SQLITE_ENABLE_MATH_FUNCTIONS'
         ],
@@ -103,6 +108,8 @@
         'SQLITE_ENABLE_FTS4',
         'SQLITE_ENABLE_FTS5',
         'SQLITE_ENABLE_RTREE',
+        'SQLITE_ENABLE_SESSION',
+        'SQLITE_ENABLE_JSON',
         'SQLITE_ENABLE_DBSTAT_VTAB=1',
         'SQLITE_ENABLE_MATH_FUNCTIONS'
       ],
