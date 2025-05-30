@@ -1,6 +1,6 @@
 {
   "name": "sqlite3",
-  "description": "Asynchronous, non-blocking SQLite3 bindings. Forked from AppThreat/node-sqlite3",
+  "description": "Asynchronous, non-blocking SQLite3 bindings. Forked from TryGhost/node-sqlite3",
   "version": "5.2.0",
   "homepage": "https://github.com/AppThreat/node-sqlite3",
   "author": {
