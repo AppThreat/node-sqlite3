@@ -145,7 +145,6 @@ jobs:
       matrix:
         node:
           - 20
-          - 23
         target:
           - linux/arm64
         variant:
