@@ -150,6 +150,9 @@ jobs:
         variant:
           - alpine3.20
         include:
+          - target: linux/arm64
+            variant: alpine3.21
+            node: 22
           # musl x64 builds
           - target: linux/amd64
             variant: alpine3.20
