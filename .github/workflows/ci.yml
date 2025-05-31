@@ -181,14 +181,6 @@ jobs:
           CONTAINER_ID=$(docker create -it sqlite-builder)
           docker cp $CONTAINER_ID:/usr/src/build/prebuilds/ ./prebuilds
 
-      - name: Upload binaries to commit artifacts
-        uses: actions/upload-artifact@v4
-        if: matrix.node == 22
-        with:
-          name: prebuilt-binaries
-          path: prebuilds/*
-          retention-days: 14
-
       - name: Upload binaries to GitHub Release
         run: yarn install --ignore-scripts && yarn upload --upload-all ${{ github.token }}
         if: startsWith(github.ref, 'refs/tags/')
