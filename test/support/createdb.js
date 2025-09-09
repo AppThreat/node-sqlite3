@@ -43,8 +43,9 @@ function createdb(callback) {
   }
 }
 
-// Check if this file is being run directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === `file://${process.argv[1]}`.replaceAll('\\', '/')) {
+  createdb();
+} else if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   createdb();
 }
 
