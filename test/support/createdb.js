@@ -20,7 +20,6 @@ function randomString() {
 function createdb(callback) {
   const count = 1000000;
   const db_path = join(__dirname, 'big.db');
-  console.log("Created db in ", db_path);
   // Make sure the file exists and is also valid.
   if (existsSync(db_path) && statSync(db_path).size !== 0) {
     console.log('okay: database already created (' + db_path + ')');
