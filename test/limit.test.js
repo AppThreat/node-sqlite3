@@ -1,7 +1,7 @@
-var sqlite3 = require('..');
+import sqlite3 from '../lib/sqlite3.js';
 
 describe('limit', function() {
-    var db;
+    let db;
 
     before(function(done) {
         db = new sqlite3.Database(':memory:', done);
@@ -14,7 +14,7 @@ describe('limit', function() {
                 throw new Error('ATTACH should not succeed');
             }
             if (err.errno === sqlite3.ERROR &&
-                err.message === 'SQLITE_ERROR: too many attached databases - max 0') {
+        err.message === 'SQLITE_ERROR: too many attached databases - max 0') {
                 db.configure('limit', sqlite3.LIMIT_ATTACHED, 1);
                 db.exec("ATTACH 'test/support/prepare.db' AS zing", function(err) {
                     if (err) throw err;

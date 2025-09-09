@@ -1,11 +1,11 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('tracing', function() {
     it('Database tracing', function(done) {
-        var db = new sqlite3.Database(':memory:');
-        var create = false;
-        var select = false;
+        let db = new sqlite3.Database(':memory:');
+        let create = false;
+        let select = false;
 
         db.on('trace', function(sql) {
             if (sql.match(/^SELECT/)) {
@@ -38,7 +38,7 @@ describe('tracing', function() {
 
 
     it('test disabling tracing #1', function(done) {
-        var db = new sqlite3.Database(':memory:');
+        let db = new sqlite3.Database(':memory:');
 
         db.on('trace', function(sql) {});
         db.removeAllListeners('trace');
@@ -52,9 +52,9 @@ describe('tracing', function() {
 
 
     it('test disabling tracing #2', function(done) {
-        var db = new sqlite3.Database(':memory:');
+        let db = new sqlite3.Database(':memory:');
 
-        var trace = function(sql) {};
+        let trace = function(sql) {};
         db.on('trace', trace);
         db.removeListener('trace', trace);
         db._events['trace'] = function(sql) {

@@ -1,17 +1,17 @@
-var sqlite3 = require('..');
-var assert = require('assert');
-var helper = require('./support/helper');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
+import { ensureExists, deleteFile, fileExists } from './support/helper.js';
 
 describe('parallel', function() {
-    var db;
+    let db;
     before(function(done) {
-        helper.deleteFile('test/tmp/test_parallel_inserts.db');
-        helper.ensureExists('test/tmp');
+        deleteFile('test/tmp/test_parallel_inserts.db');
+        ensureExists('test/tmp');
         db = new sqlite3.Database('test/tmp/test_parallel_inserts.db', done);
     });
 
-    var columns = [];
-    for (var i = 0; i < 128; i++) {
+    let columns = [];
+    for (let i = 0; i < 128; i++) {
         columns.push('id' + i);
     }
 
@@ -20,7 +20,7 @@ describe('parallel', function() {
     });
 
     it('should insert in parallel', function(done) {
-        for (var i = 0; i < 1000; i++) {
+        for (let i = 0; i < 1000; i++) {
             for (var values = [], j = 0; j < columns.length; j++) {
                 values.push(i * j);
             }
@@ -35,10 +35,10 @@ describe('parallel', function() {
     });
 
     it('should verify that the database exists', function() {
-        assert.fileExists('test/tmp/test_parallel_inserts.db');
+        fileExists('test/tmp/test_parallel_inserts.db');
     });
 
     after(function() {
-        helper.deleteFile('test/tmp/test_parallel_inserts.db');
+        deleteFile('test/tmp/test_parallel_inserts.db');
     });
 });

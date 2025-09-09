@@ -1,10 +1,10 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('patching', function() {
     describe("Database", function() {
-        var db;
-        var originalFunctions = {};
+        let db;
+        let originalFunctions = {};
 
         before(function() {
             originalFunctions.close = sqlite3.Database.prototype.close;
@@ -18,10 +18,10 @@ describe('patching', function() {
         });
 
         it('allow patching native functions', function() {
-            var myFun = function myFunction() {
+            let myFun = function myFunction() {
                 return "Success";
-            }
-            
+            };
+
             assert.doesNotThrow(() => {
                 sqlite3.Database.prototype.close = myFun;
             });
@@ -74,9 +74,9 @@ describe('patching', function() {
     });
 
     describe('Statement', function() {
-        var db;
-        var statement;
-        var originalFunctions = {};
+        let db;
+        let statement;
+        let originalFunctions = {};
 
         before(function() {
             originalFunctions.bind = sqlite3.Statement.prototype.bind;
@@ -89,10 +89,10 @@ describe('patching', function() {
         });
 
         it('allow patching native functions', function() {
-            var myFun = function myFunction() {
+            let myFun = function myFunction() {
                 return "Success";
-            }
-            
+            };
+
             assert.doesNotThrow(() => {
                 sqlite3.Statement.prototype.bind = myFun;
             });
@@ -143,9 +143,9 @@ describe('patching', function() {
     });
 
     describe('Backup', function() {
-        var db;
-        var backup;
-        var originalFunctions = {};
+        let db;
+        let backup;
+        let originalFunctions = {};
 
         before(function() {
             originalFunctions.step = sqlite3.Backup.prototype.step;
@@ -153,10 +153,10 @@ describe('patching', function() {
         });
 
         it('allow patching native functions', function() {
-            var myFun = function myFunction() {
+            let myFun = function myFunction() {
                 return "Success";
-            }
-            
+            };
+
             assert.doesNotThrow(() => {
                 sqlite3.Backup.prototype.step = myFun;
             });

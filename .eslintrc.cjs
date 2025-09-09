@@ -1,5 +1,8 @@
 module.exports = {
     "extends": "eslint:recommended",
+    "parserOptions": {
+        "sourceType": "module"
+    },
     "env": {
         "es2017": true,
         "node": true

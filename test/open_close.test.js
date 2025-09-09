@@ -1,19 +1,18 @@
-var sqlite3 = require('..');
-var assert = require('assert');
-var fs = require('fs');
-var helper = require('./support/helper');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
+import { ensureExists, deleteFile, fileDoesNotExist, fileExists } from './support/helper.js';
 
 describe('open/close', function() {
     before(function() {
-        helper.ensureExists('test/tmp');
+        ensureExists('test/tmp');
     });
 
     describe('open and close non-existant database', function() {
         before(function() {
-            helper.deleteFile('test/tmp/test_create.db');
+            deleteFile('test/tmp/test_create.db');
         });
 
-        var db;
+        let db;
         it('should open the database', function(done) {
             db = new sqlite3.Database('test/tmp/test_create.db', done);
         });
@@ -23,20 +22,20 @@ describe('open/close', function() {
         });
 
         it('should have created the file', function() {
-            assert.fileExists('test/tmp/test_create.db');
+            fileExists('test/tmp/test_create.db');
         });
 
         after(function() {
-            helper.deleteFile('test/tmp/test_create.db');
+            deleteFile('test/tmp/test_create.db');
         });
     });
-    
+
     describe('open and close non-existant shared database', function() {
         before(function() {
-            helper.deleteFile('test/tmp/test_create_shared.db');
+            deleteFile('test/tmp/test_create_shared.db');
         });
 
-        var db;
+        let db;
         it('should open the database', function(done) {
             db = new sqlite3.Database('file:./test/tmp/test_create_shared.db', sqlite3.OPEN_URI | sqlite3.OPEN_SHAREDCACHE | sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, done);
         });
@@ -46,19 +45,19 @@ describe('open/close', function() {
         });
 
         it('should have created the file', function() {
-            assert.fileExists('test/tmp/test_create_shared.db');
+            fileExists('test/tmp/test_create_shared.db');
         });
 
         after(function() {
-            helper.deleteFile('test/tmp/test_create_shared.db');
+            deleteFile('test/tmp/test_create_shared.db');
         });
     });
 
 
     (sqlite3.VERSION_NUMBER < 3008000 ? describe.skip : describe)('open and close shared memory database', function() {
 
-        var db1;
-        var db2;
+        let db1;
+        let db2;
 
         it('should open the first database', function(done) {
             db1 = new sqlite3.Database('file:./test/tmp/test_memory.db?mode=memory', sqlite3.OPEN_URI | sqlite3.OPEN_SHAREDCACHE | sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, done);
@@ -90,9 +89,9 @@ describe('open/close', function() {
     });
 
     it('should not be unable to open an inaccessible database', function(done) {
-        // NOTE: test assumes that the user is not allowed to create new files
-        // in /usr/bin.
-        var db = new sqlite3.Database('/test/tmp/directory-does-not-exist/test.db', function(err) {
+    // NOTE: test assumes that the user is not allowed to create new files
+    // in /usr/bin.
+        let db = new sqlite3.Database('/test/tmp/directory-does-not-exist/test.db', function(err) {
             if (err && err.errno === sqlite3.CANTOPEN) {
                 done();
             } else if (err) {
@@ -106,7 +105,7 @@ describe('open/close', function() {
 
     describe('creating database without create flag', function() {
         before(function() {
-            helper.deleteFile('test/tmp/test_readonly.db');
+            deleteFile('test/tmp/test_readonly.db');
         });
 
         it('should fail to open the database', function(done) {
@@ -122,16 +121,16 @@ describe('open/close', function() {
         });
 
         it('should not have created the file', function() {
-            assert.fileDoesNotExist('test/tmp/test_readonly.db');
+            fileDoesNotExist('test/tmp/test_readonly.db');
         });
 
         after(function() {
-            helper.deleteFile('test/tmp/test_readonly.db');
+            deleteFile('test/tmp/test_readonly.db');
         });
     });
 
     describe('open and close memory database queuing', function() {
-        var db;
+        let db;
         it('should open the database', function(done) {
             db = new sqlite3.Database(':memory:', done);
         });
@@ -150,11 +149,11 @@ describe('open/close', function() {
     });
 
     describe('closing with unfinalized statements', function(done) {
-        var completed = false;
-        var completedSecond = false;
-        var closed = false;
+        let completed = false;
+        let completedSecond = false;
+        let closed = false;
 
-        var db;
+        let db;
         before(function() {
             db = new sqlite3.Database(':memory:', done);
         });
@@ -163,7 +162,7 @@ describe('open/close', function() {
             db.run("CREATE TABLE foo (id INT, num INT)", done);
         });
 
-        var stmt;
+        let stmt;
         it('should prepare/run a statement', function(done) {
             stmt = db.prepare('INSERT INTO foo VALUES (?, ?)');
             stmt.run(1, 2, done);

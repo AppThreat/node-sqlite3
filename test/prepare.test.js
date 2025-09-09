@@ -1,16 +1,16 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('prepare', function() {
     describe('invalid SQL', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
-        var stmt;
+        let stmt;
         it('should fail preparing a statement with invalid SQL', function(done) {
             stmt = db.prepare('CRATE TALE foo text bar)', function(err, statement) {
                 if (err && err.errno == sqlite3.ERROR &&
-                    err.message === 'SQLITE_ERROR: near "CRATE": syntax error') {
+          err.message === 'SQLITE_ERROR: near "CRATE": syntax error') {
                     done();
                 }
                 else throw err;
@@ -21,7 +21,7 @@ describe('prepare', function() {
     });
 
     describe('simple prepared statement', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
         it('should prepare, run and finalize the statement', function(done) {
@@ -34,21 +34,21 @@ describe('prepare', function() {
     });
 
     describe('inserting and retrieving rows', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
-        var inserted = 0;
-        var retrieved = 0;
+        let inserted = 0;
+        let retrieved = 0;
 
         // We insert and retrieve that many rows.
-        var count = 1000;
+        let count = 1000;
 
         it('should create the table', function(done) {
             db.prepare("CREATE TABLE foo (txt text, num int, flt float, blb blob)").run().finalize(done);
         });
 
         it('should insert ' + count + ' rows', function(done) {
-            for (var i = 0; i < count; i++) {
+            for (let i = 0; i < count; i++) {
                 db.prepare("INSERT INTO foo VALUES(?, ?, ?, ?)").run(
                     'String ' + i,
                     i,
@@ -66,12 +66,12 @@ describe('prepare', function() {
         });
 
         it('should prepare a statement and run it ' + (count + 5) + ' times', function(done) {
-            var stmt = db.prepare("SELECT txt, num, flt, blb FROM foo ORDER BY num", function(err) {
+            let stmt = db.prepare("SELECT txt, num, flt, blb FROM foo ORDER BY num", function(err) {
                 if (err) throw err;
                 assert.equal(stmt.sql, 'SELECT txt, num, flt, blb FROM foo ORDER BY num');
             });
 
-            for (var i = 0; i < count + 5; i++) (function(i) {
+            for (let i = 0; i < count + 5; i++) (function(i) {
                 stmt.get(function(err, row) {
                     if (err) throw err;
 
@@ -100,11 +100,11 @@ describe('prepare', function() {
     });
 
     describe('inserting with accidental undefined', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
-        var inserted = 0;
-        var retrieved = 0;
+        let inserted = 0;
+        let retrieved = 0;
 
         it('should create the table', function(done) {
             db.prepare("CREATE TABLE foo (num int)").run().finalize(done);
@@ -127,11 +127,11 @@ describe('prepare', function() {
         });
 
         it('should retrieve the data', function(done) {
-            var stmt = db.prepare("SELECT num FROM foo", function(err) {
+            let stmt = db.prepare("SELECT num FROM foo", function(err) {
                 if (err) throw err;
             });
 
-            for (var i = 0; i < 2; i++) (function(i) {
+            for (let i = 0; i < 2; i++) (function(i) {
                 stmt.get(function(err, row) {
                     if (err) throw err;
                     assert(row);
@@ -151,14 +151,14 @@ describe('prepare', function() {
     });
 
     describe('retrieving reset() function', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database('test/support/prepare.db', sqlite3.OPEN_READONLY, done); });
 
-        var retrieved = 0;
+        let retrieved = 0;
 
         it('should retrieve the same row over and over again', function(done) {
-            var stmt = db.prepare("SELECT txt, num, flt, blb FROM foo ORDER BY num");
-            for (var i = 0; i < 10; i++) {
+            let stmt = db.prepare("SELECT txt, num, flt, blb FROM foo ORDER BY num");
+            for (let i = 0; i < 10; i++) {
                 stmt.reset();
                 stmt.get(function(err, row) {
                     if (err) throw err;
@@ -180,18 +180,18 @@ describe('prepare', function() {
     });
 
     describe('multiple get() parameter binding', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database('test/support/prepare.db', sqlite3.OPEN_READONLY, done); });
 
-        var retrieved = 0;
+        let retrieved = 0;
 
         it('should retrieve particular rows', function(done) {
-            var stmt = db.prepare("SELECT txt, num, flt, blb FROM foo WHERE num = ?");
+            let stmt = db.prepare("SELECT txt, num, flt, blb FROM foo WHERE num = ?");
 
-            for (var i = 0; i < 10; i++) (function(i) {
+            for (let i = 0; i < 10; i++) (function(i) {
                 stmt.get(i * 10 + 1, function(err, row) {
                     if (err) throw err;
-                    var val = i * 10 + 1;
+                    let val = i * 10 + 1;
                     assert.equal(row.txt, 'String ' + val);
                     assert.equal(row.num, val);
                     assert.equal(row.flt, val * Math.PI);
@@ -211,10 +211,10 @@ describe('prepare', function() {
     });
 
     describe('prepare() parameter binding', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database('test/support/prepare.db', sqlite3.OPEN_READONLY, done); });
 
-        var retrieved = 0;
+        let retrieved = 0;
 
         it('should retrieve particular rows', function(done) {
             db.prepare("SELECT txt, num, flt, blb FROM foo WHERE num = ? AND txt = ?", 10, 'String 10')
@@ -237,17 +237,17 @@ describe('prepare', function() {
     });
 
     describe('all()', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database('test/support/prepare.db', sqlite3.OPEN_READONLY, done); });
 
-        var retrieved = 0;
-        var count = 1000;
+        let retrieved = 0;
+        let count = 1000;
 
         it('should retrieve particular rows', function(done) {
             db.prepare("SELECT txt, num, flt, blb FROM foo WHERE num < ? ORDER BY num", count)
                 .all(function(err, rows) {
                     if (err) throw err;
-                    for (var i = 0; i < rows.length; i++) {
+                    for (let i = 0; i < rows.length; i++) {
                         assert.equal(rows[i].txt, 'String ' + i);
                         assert.equal(rows[i].num, i);
                         assert.equal(rows[i].flt, i * Math.PI);
@@ -266,7 +266,7 @@ describe('prepare', function() {
     });
 
     describe('all()', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database('test/support/prepare.db', sqlite3.OPEN_READONLY, done); });
 
         it('should retrieve particular rows', function(done) {
@@ -282,34 +282,34 @@ describe('prepare', function() {
     });
 
     describe('high concurrency', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
         function randomString() {
-            var str = '';
-            for (var i = Math.random() * 300; i > 0; i--) {
+            let str = '';
+            for (let i = Math.random() * 300; i > 0; i--) {
                 str += String.fromCharCode(Math.floor(Math.random() * 256));
             }
             return str;
         }
 
         // Generate random data.
-        var data = [];
-        var length = Math.floor(Math.random() * 1000) + 200;
-        for (var i = 0; i < length; i++) {
+        let data = [];
+        let length = Math.floor(Math.random() * 1000) + 200;
+        for (let i = 0; i < length; i++) {
             data.push([ randomString(), i, i * Math.random(), null ]);
         }
 
-        var inserted = 0;
-        var retrieved = 0;
+        let inserted = 0;
+        let retrieved = 0;
 
         it('should create the table', function(done) {
             db.prepare("CREATE TABLE foo (txt text, num int, flt float, blb blob)").run().finalize(done);
         });
 
         it('should insert all values', function(done) {
-            for (var i = 0; i < data.length; i++) {
-                var stmt = db.prepare("INSERT INTO foo VALUES(?, ?, ?, ?)");
+            for (let i = 0; i < data.length; i++) {
+                let stmt = db.prepare("INSERT INTO foo VALUES(?, ?, ?, ?)");
                 stmt.run(data[i][0], data[i][1], data[i][2], data[i][3], function(err) {
                     if (err) throw err;
                     inserted++;
@@ -325,7 +325,7 @@ describe('prepare', function() {
                 .all(function(err, rows) {
                     if (err) throw err;
 
-                    for (var i = 0; i < rows.length; i++) {
+                    for (let i = 0; i < rows.length; i++) {
                         assert.ok(data[rows[i].num] !== true);
 
                         assert.equal(rows[i].txt, data[rows[i].num][0]);
@@ -350,10 +350,10 @@ describe('prepare', function() {
 
 
     describe('test Database#get()', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database('test/support/prepare.db', sqlite3.OPEN_READONLY, done); });
 
-        var retrieved = 0;
+        let retrieved = 0;
 
         it('should get a row', function(done) {
             db.get("SELECT txt, num, flt, blb FROM foo WHERE num = ? AND txt = ?", 10, 'String 10', function(err, row) {
@@ -375,21 +375,21 @@ describe('prepare', function() {
     });
 
     describe('Database#run() and Database#all()', function() {
-        var db;
+        let db;
         before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
-        var inserted = 0;
-        var retrieved = 0;
+        let inserted = 0;
+        let retrieved = 0;
 
         // We insert and retrieve that many rows.
-        var count = 1000;
+        let count = 1000;
 
         it('should create the table', function(done) {
             db.run("CREATE TABLE foo (txt text, num int, flt float, blb blob)", done);
         });
 
         it('should insert ' + count + ' rows', function(done) {
-            for (var i = 0; i < count; i++) {
+            for (let i = 0; i < count; i++) {
                 db.run("INSERT INTO foo VALUES(?, ?, ?, ?)",
                     'String ' + i,
                     i,
@@ -407,7 +407,7 @@ describe('prepare', function() {
         it('should retrieve all rows', function(done) {
             db.all("SELECT txt, num, flt, blb FROM foo ORDER BY num", function(err, rows) {
                 if (err) throw err;
-                for (var i = 0; i < rows.length; i++) {
+                for (let i = 0; i < rows.length; i++) {
                     assert.equal(rows[i].txt, 'String ' + i);
                     assert.equal(rows[i].num, i);
                     assert.equal(rows[i].flt, i * Math.PI);

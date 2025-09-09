@@ -1,21 +1,21 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('rerunning statements', function() {
-    var db;
+    let db;
     before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
-    var count = 10;
-    var inserted = 0;
-    var retrieved = 0;
+    let count = 10;
+    let inserted = 0;
+    let retrieved = 0;
 
     it('should create the table', function(done) {
         db.run("CREATE TABLE foo (id int)", done);
     });
 
     it('should insert repeatedly, reusing the same statement', function(done) {
-        var stmt = db.prepare("INSERT INTO foo VALUES(?)");
-        for (var i = 5; i < count; i++) {
+        let stmt = db.prepare("INSERT INTO foo VALUES(?)");
+        for (let i = 5; i < count; i++) {
             stmt.run(i, function(err) {
                 if (err) throw err;
                 inserted++;
@@ -25,9 +25,9 @@ describe('rerunning statements', function() {
     });
 
     it('should retrieve repeatedly, resuing the same statement', function(done) {
-        var collected = [];
-        var stmt = db.prepare("SELECT id FROM foo WHERE id = ?");
-        for (var i = 0; i < count; i++) {
+        let collected = [];
+        let stmt = db.prepare("SELECT id FROM foo WHERE id = ?");
+        for (let i = 0; i < count; i++) {
             stmt.get(i, function(err, row) {
                 if (err) throw err;
                 if (row) collected.push(row);

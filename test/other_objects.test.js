@@ -1,8 +1,8 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('data types', function() {
-    var db;
+    let db;
     before(function(done) {
         db = new sqlite3.Database(':memory:');
         db.run("CREATE TABLE txt_table (txt TEXT)");
@@ -16,7 +16,7 @@ describe('data types', function() {
     });
 
     it('should serialize Date()', function(done) {
-        var date = new Date();
+        let date = new Date();
         db.run("INSERT INTO int_table VALUES(?)", date, function (err) {
             if (err) throw err;
             db.get("SELECT int FROM int_table", function(err, row) {
@@ -28,7 +28,7 @@ describe('data types', function() {
     });
 
     it('should serialize RegExp()', function(done) {
-        var regexp = /^f\noo/;
+        let regexp = /^f\noo/;
         db.run("INSERT INTO txt_table VALUES(?)", regexp, function (err) {
             if (err) throw err;
             db.get("SELECT txt FROM txt_table", function(err, row) {

@@ -1,7 +1,6 @@
-var sqlite3 = require('..');
-var assert = require('assert');
-var fs = require('fs');
-var helper = require('./support/helper');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
+import { ensureExists, deleteFile, fileDoesNotExist, fileExists } from './support/helper.js';
 
 // Check that the number of rows in two tables matches.
 function assertRowsMatchDb(db1, table1, db2, table2, done) {
@@ -17,7 +16,7 @@ function assertRowsMatchDb(db1, table1, db2, table2, done) {
 
 // Check that the number of rows in the table "foo" is preserved in a backup.
 function assertRowsMatchFile(db, backupName, done) {
-    var db2 = new sqlite3.Database(backupName, sqlite3.OPEN_READONLY, function(err) {
+    let db2 = new sqlite3.Database(backupName, sqlite3.OPEN_READONLY, function(err) {
         if (err) throw err;
         assertRowsMatchDb(db, 'foo', db2, 'foo', function() {
             db2.close(done);
@@ -27,13 +26,13 @@ function assertRowsMatchFile(db, backupName, done) {
 
 describe('backup', function() {
     before(function() {
-        helper.ensureExists('test/tmp');
+        ensureExists('test/tmp');
     });
 
-    var db;
+    let db;
     beforeEach(function(done) {
-        helper.deleteFile('test/tmp/backup.db');
-        helper.deleteFile('test/tmp/backup2.db');
+        deleteFile('test/tmp/backup.db');
+        deleteFile('test/tmp/backup2.db');
         db = new sqlite3.Database('test/support/prepare.db', sqlite3.OPEN_READONLY, done);
     });
 
@@ -43,21 +42,21 @@ describe('backup', function() {
     });
 
     it ('output db created once step is called', function(done) {
-        var backup = db.backup('test/tmp/backup.db', function(err) {
+        let backup = db.backup('test/tmp/backup.db', function(err) {
             if (err) throw err;
             backup.step(1, function(err) {
                 if (err) throw err;
-                assert.fileExists('test/tmp/backup.db');
+                fileExists('test/tmp/backup.db');
                 backup.finish(done);
             });
         });
     });
 
     it ('copies source fully with step(-1)', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         backup.step(-1, function(err) {
             if (err) throw err;
-            assert.fileExists('test/tmp/backup.db');
+            fileExists('test/tmp/backup.db');
             backup.finish(function(err) {
                 if (err) throw err;
                 assertRowsMatchFile(db, 'test/tmp/backup.db', done);
@@ -66,16 +65,16 @@ describe('backup', function() {
     });
 
     it ('backup db not created if finished immediately', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         backup.finish(function(err) {
             if (err) throw err;
-            assert.fileDoesNotExist('test/tmp/backup.db');
+            fileDoesNotExist('test/tmp/backup.db');
             done();
         });
     });
 
     it ('error closing db if backup not finished', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         db.close(function(err) {
             db = null;
             if (!err) throw new Error('should have an error');
@@ -87,13 +86,13 @@ describe('backup', function() {
     });
 
     it ('using the backup after finished is an error', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         backup.finish(function(err) {
             if (err) throw err;
             backup.step(1, function(err) {
                 if (!err) throw new Error('should have an error');
                 if (err.errno == sqlite3.MISUSE &&
-                    err.message === 'SQLITE_MISUSE: Backup is already finished') {
+          err.message === 'SQLITE_MISUSE: Backup is already finished') {
                     done();
                 }
                 else throw err;
@@ -102,14 +101,14 @@ describe('backup', function() {
     });
 
     it ('remaining/pageCount are available after call to step', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         backup.step(0, function(err) {
             if (err) throw err;
             assert.equal(typeof this.pageCount, 'number');
             assert.equal(typeof this.remaining, 'number');
             assert.equal(this.remaining, this.pageCount);
-            var prevRemaining = this.remaining;
-            var prevPageCount = this.pageCount;
+            let prevRemaining = this.remaining;
+            let prevPageCount = this.pageCount;
             backup.step(1, function(err) {
                 if (err) throw err;
                 assert.notEqual(this.remaining, prevRemaining);
@@ -120,14 +119,14 @@ describe('backup', function() {
     });
 
     it ('backup works if database is modified half-way through', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         backup.step(-1, function(err) {
             if (err) throw err;
             backup.finish(function(err) {
                 if (err) throw err;
-                var db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
+                let db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
                     if (err) throw err;
-                    var backup2 = db2.backup('test/tmp/backup2.db');
+                    let backup2 = db2.backup('test/tmp/backup2.db');
                     backup2.step(1, function(err, completed) {
                         if (err) throw err;
                         assert.equal(completed, false);  // Page size for the test db
@@ -156,13 +155,13 @@ describe('backup', function() {
             if (err) throw err;
             db.exec("INSERT INTO space(txt) VALUES('monkey')", function(err) {
                 if (err) throw err;
-                var backup = db.backup('test/tmp/backup.db', 'temp', 'main', true, function(err) {
+                let backup = db.backup('test/tmp/backup.db', 'temp', 'main', true, function(err) {
                     if (err) throw err;
                     backup.step(-1, function(err) {
                         if (err) throw err;
                         backup.finish(function(err) {
                             if (err) throw err;
-                            var db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
+                            let db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
                                 if (err) throw err;
                                 db2.get("SELECT * FROM space", function(err, row) {
                                     if (err) throw err;
@@ -178,7 +177,7 @@ describe('backup', function() {
     });
 
     (sqlite3.VERSION_NUMBER < 3026000 ? it.skip : it) ('can backup from main to temp', function(done) {
-        var backup = db.backup('test/support/prepare.db', 'main', 'temp', false, function(err) {
+        let backup = db.backup('test/support/prepare.db', 'main', 'temp', false, function(err) {
             if (err) throw err;
             backup.step(-1, function(err) {
                 if (err) throw err;
@@ -191,11 +190,11 @@ describe('backup', function() {
     });
 
     it ('cannot backup to a locked db', function(done) {
-        var db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
+        let db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
             db2.exec("PRAGMA locking_mode = EXCLUSIVE");
             db2.exec("BEGIN EXCLUSIVE", function(err) {
                 if (err) throw err;
-                var backup = db.backup('test/tmp/backup.db');
+                let backup = db.backup('test/tmp/backup.db');
                 backup.step(-1, function(stepErr) {
                     db2.close(function(err) {
                         if (err) throw err;
@@ -210,8 +209,8 @@ describe('backup', function() {
     });
 
     it ('fuss-free incremental backups work', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
-        var timer;
+        let backup = db.backup('test/tmp/backup.db');
+        let timer;
         function makeProgress() {
             if (backup.idle) {
                 backup.step(1);
@@ -227,7 +226,7 @@ describe('backup', function() {
     });
 
     it ('setting retryErrors to empty disables automatic finishing', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         backup.retryErrors = [];
         backup.step(-1, function(err) {
             if (err) throw err;
@@ -241,7 +240,7 @@ describe('backup', function() {
     });
 
     it ('setting retryErrors enables automatic finishing', function(done) {
-        var backup = db.backup('test/tmp/backup.db');
+        let backup = db.backup('test/tmp/backup.db');
         backup.retryErrors = [sqlite3.OK];
         backup.step(-1, function(err) {
             if (err) throw err;
@@ -254,11 +253,11 @@ describe('backup', function() {
     });
 
     it ('default retryErrors will retry on a locked/busy db', function(done) {
-        var db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
+        let db2 = new sqlite3.Database('test/tmp/backup.db', function(err) {
             db2.exec("PRAGMA locking_mode = EXCLUSIVE");
             db2.exec("BEGIN EXCLUSIVE", function(err) {
                 if (err) throw err;
-                var backup = db.backup('test/tmp/backup.db');
+                let backup = db.backup('test/tmp/backup.db');
                 backup.step(-1, function(stepErr) {
                     db2.close(function(err) {
                         if (err) throw err;

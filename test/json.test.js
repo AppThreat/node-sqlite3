@@ -1,4 +1,4 @@
-var sqlite3 = require('..');
+import sqlite3 from '../lib/sqlite3.js';
 
 if( process.env.NODE_SQLITE3_JSON1 === 'no' ){
     describe('json', function() {
@@ -9,7 +9,7 @@ if( process.env.NODE_SQLITE3_JSON1 === 'no' ){
     });
 } else {
     describe('json', function() {
-        var db;
+        let db;
 
         before(function(done) {
             db = new sqlite3.Database(':memory:', done);

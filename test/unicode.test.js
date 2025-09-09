@@ -1,8 +1,8 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('unicode', function() {
-    var first_values = [],
+    let first_values = [],
         trailing_values = [],
         chars = [],
         subranges = new Array(2),
@@ -41,7 +41,7 @@ describe('unicode', function() {
     }
 
     function random_utf8() {
-        var first = random_choice(first_values);
+        let first = random_choice(first_values);
 
         if (first < 0x80) {
             return String.fromCharCode(first);
@@ -57,7 +57,7 @@ describe('unicode', function() {
     }
 
     function randomString() {
-        var str = '',
+        let str = '',
             i;
 
         for (i = Math.random() * 300; i > 0; i--) {
@@ -69,22 +69,22 @@ describe('unicode', function() {
 
 
     // Generate random data.
-    var data = [];
-    var length = Math.floor(Math.random() * 1000) + 200;
-    for (var i = 0; i < length; i++) {
+    let data = [];
+    let length = Math.floor(Math.random() * 1000) + 200;
+    for (let i = 0; i < length; i++) {
         data.push(randomString());
     }
 
-    var inserted = 0;
-    var retrieved = 0;
+    let inserted = 0;
+    let retrieved = 0;
 
     it('should create the table', function(done) {
         db.run("CREATE TABLE foo (id int, txt text)", done);
     });
 
     it('should insert all values', function(done) {
-        var stmt = db.prepare("INSERT INTO foo VALUES(?, ?)");
-        for (var i = 0; i < data.length; i++) {
+        let stmt = db.prepare("INSERT INTO foo VALUES(?, ?)");
+        for (let i = 0; i < data.length; i++) {
             stmt.run(i, data[i], function(err) {
                 if (err) throw err;
                 inserted++;
@@ -97,7 +97,7 @@ describe('unicode', function() {
         db.all("SELECT txt FROM foo ORDER BY id", function(err, rows) {
             if (err) throw err;
 
-            for (var i = 0; i < rows.length; i++) {
+            for (let i = 0; i < rows.length; i++) {
                 assert.equal(rows[i].txt, data[i]);
                 retrieved++;
             }

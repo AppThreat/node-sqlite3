@@ -1,8 +1,6 @@
-"use strict"
-
-var sqlite3 = require('..');
-const assert = require("assert");
-const { createHook, executionAsyncId } = require("async_hooks");
+import sqlite3 from '../lib/sqlite3.js';
+import assert from "assert";
+import { createHook, executionAsyncId } from "async_hooks";
 
 
 describe('async_hooks', function() {

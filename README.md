@@ -66,9 +66,11 @@ See the [API documentation](https://github.com/AppThreat/node-sqlite3/wiki/API) 
 
 **Note:** the module must be [installed](#installing) before use.
 
+This package is now ESM only.
+
 ``` js
-const sqlite3 = require('sqlite3').verbose();
-const db = new sqlite3.Database(':memory:');
+import sqlite3 from 'sqlite3';
+const db = new sqlite3.verbose().Database(':memory:');
 
 db.serialize(() => {
     db.run("CREATE TABLE lorem (info TEXT)");
