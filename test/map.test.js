@@ -1,17 +1,17 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('map', function() {
     it('test Database#map() with two columns', function(done) {
-        var count = 10;
-        var inserted = 0;
+        let count = 10;
+        let inserted = 0;
 
-        var db = new sqlite3.Database(':memory:');
+        let db = new sqlite3.Database(':memory:');
         db.serialize(function() {
             db.run("CREATE TABLE foo (id INT, value TEXT)");
 
-            var stmt = db.prepare("INSERT INTO foo VALUES(?, ?)");
-            for (var i = 5; i < count; i++) {
+            let stmt = db.prepare("INSERT INTO foo VALUES(?, ?)");
+            for (let i = 5; i < count; i++) {
                 stmt.run(i, 'Value for ' + i, function(err) {
                     if (err) throw err;
                     inserted++;
@@ -29,16 +29,16 @@ describe('map', function() {
     });
 
     it('test Database#map() with three columns', function(done) {
-        var db = new sqlite3.Database(':memory:');
+        let db = new sqlite3.Database(':memory:');
 
-        var count = 10;
-        var inserted = 0;
+        let count = 10;
+        let inserted = 0;
 
         db.serialize(function() {
             db.run("CREATE TABLE foo (id INT, value TEXT, other TEXT)");
 
-            var stmt = db.prepare("INSERT INTO foo VALUES(?, ?, ?)");
-            for (var i = 5; i < count; i++) {
+            let stmt = db.prepare("INSERT INTO foo VALUES(?, ?, ?)");
+            for (let i = 5; i < count; i++) {
                 stmt.run(i, 'Value for ' + i, null, function(err) {
                     if (err) throw err;
                     inserted++;

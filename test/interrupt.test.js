@@ -1,16 +1,16 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('interrupt', function() {
     it('should interrupt queries', function(done) {
-        var interrupted = false;
-        var saved = null;
+        let interrupted = false;
+        let saved = null;
 
-        var db = new sqlite3.Database(':memory:', function() {
+        let db = new sqlite3.Database(':memory:', function() {
             db.serialize();
 
-            var setup = 'create table t (n int);';
-            for (var i = 0; i < 8; i += 1) {
+            let setup = 'create table t (n int);';
+            for (let i = 0; i < 8; i += 1) {
                 setup += 'insert into t values (' + i + ');';
             }
 
@@ -19,8 +19,8 @@ describe('interrupt', function() {
                     return done(err);
                 }
 
-                var query = 'select last.n ' +
-                    'from t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t as last';
+                let query = 'select last.n ' +
+          'from t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t as last';
 
                 db.each(query, function(err) {
                     if (err) {
@@ -46,7 +46,7 @@ describe('interrupt', function() {
     });
 
     it('should throw if interrupt is called before open', function(done) {
-        var db = new sqlite3.Database(':memory:');
+        let db = new sqlite3.Database(':memory:');
 
         assert.throws(function() {
             db.interrupt();
@@ -57,7 +57,7 @@ describe('interrupt', function() {
     });
 
     it('should throw if interrupt is called after close', function(done) {
-        var db = new sqlite3.Database(':memory:');
+        let db = new sqlite3.Database(':memory:');
 
         db.close(function() {
             assert.throws(function() {
@@ -69,7 +69,7 @@ describe('interrupt', function() {
     });
 
     it('should throw if interrupt is called during close', function(done) {
-        var db = new sqlite3.Database(':memory:', function() {
+        let db = new sqlite3.Database(':memory:', function() {
             db.close();
             assert.throws(function() {
                 db.interrupt();

@@ -1,5 +1,5 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('constants', function() {
     it('should have the right OPEN_* flags', function() {

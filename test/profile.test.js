@@ -1,11 +1,11 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
+import assert from 'assert';
 
 describe('profiling', function() {
-    var create = false;
-    var select = false;
+    let create = false;
+    let select = false;
 
-    var db;
+    let db;
     before(function(done) {
         db = new sqlite3.Database(':memory:', done);
 

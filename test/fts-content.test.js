@@ -1,8 +1,7 @@
-var sqlite3 = require('..');
-var assert = require('assert');
+import sqlite3 from '../lib/sqlite3.js';
 
 describe('fts', function() {
-    var db;
+    let db;
     before(function(done) {
         db = new sqlite3.Database(':memory:', done);
     });

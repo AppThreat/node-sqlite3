@@ -114,6 +114,7 @@ jobs:
 
       - name: Run tests
         run: yarn test
+        shell: bash
 
       - name: Upload binaries to commit artifacts
         uses: actions/upload-artifact@v4

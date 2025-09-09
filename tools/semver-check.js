@@ -1,25 +1,30 @@
-const fs = require('fs');
-const path = require('path');
-const semver = require('semver');
+import fs from 'fs';
+import path from 'path';
+import semver from 'semver';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const supportedVersions = '20.19.0';
 
 function checkEngines(modulePath) {
-    const packageJsonPath = path.join(modulePath, 'package.json');
+  const packageJsonPath = path.join(modulePath, 'package.json');
 
-    if (!fs.existsSync(packageJsonPath)) return;
+  if (!fs.existsSync(packageJsonPath)) return;
 
-    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath));
-    const engines = packageJson.engines;
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath));
+  const engines = packageJson.engines;
 
-    if (engines && engines.node) {
-        const minVersion = semver.minVersion(engines.node);
+  if (engines && engines.node) {
+    const minVersion = semver.minVersion(engines.node);
 
-        if (semver.gt(minVersion, supportedVersions)) {
-            console.log(`${packageJson.name}@${packageJson.version} requires ${engines.node}`);
-            process.exit(1);
-        }
+    if (semver.gt(minVersion, supportedVersions)) {
+      console.log(`${packageJson.name}@${packageJson.version} requires ${engines.node}`);
+      process.exit(1);
     }
+  }
 }
 
 const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json')));
@@ -27,7 +32,6 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'packa
 const allDependencies = Object.keys(packageJson.dependencies || {}).concat(Object.keys(packageJson.optionalDependencies || {}));
 
 for (const dependency of allDependencies) {
-    const modulePath = path.join(__dirname, '..', 'node_modules', dependency);
-    checkEngines(modulePath);
+  const modulePath = path.join(__dirname, '..', 'node_modules', dependency);
+  checkEngines(modulePath);
 }
-
