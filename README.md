@@ -161,8 +161,6 @@ To run against SQLCipher, you need to compile `sqlite3` from source by passing b
 
 ```bash
 npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=/usr/
-
-node -e 'require("sqlite3")'
 ```
 
 If your SQLCipher is installed in a custom location (if you compiled and installed it yourself), you'll need to set some environment variables:
@@ -175,8 +173,6 @@ Set the location where `brew` installed it:
 export LDFLAGS="-L`brew --prefix`/opt/sqlcipher/lib"
 export CPPFLAGS="-I`brew --prefix`/opt/sqlcipher/include/sqlcipher"
 npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=`brew --prefix`
-
-node -e 'require("sqlite3")'
 ```
 
 ### On most Linuxes (including Raspberry Pi)
@@ -188,8 +184,6 @@ export LDFLAGS="-L/usr/local/lib"
 export CPPFLAGS="-I/usr/local/include -I/usr/local/include/sqlcipher"
 export CXXFLAGS="$CPPFLAGS"
 npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=/usr/local --verbose
-
-node -e 'require("sqlite3")'
 ```
 
 ### Custom builds and Electron
