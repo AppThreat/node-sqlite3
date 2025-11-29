@@ -1,7 +1,7 @@
 {
   "name": "@appthreat/sqlite3",
   "description": "Asynchronous, non-blocking SQLite3 bindings. Forked from TryGhost/node-sqlite3",
-  "version": "7.0.2",
+  "version": "7.0.3",
   "homepage": "https://github.com/AppThreat/node-sqlite3",
   "author": "Team AppThreat <cloud@appthreat.com>",
   "binary": {
@@ -42,8 +42,8 @@
     "prebuild-install": "^7.1.3"
   },
   "devDependencies": {
-    "eslint": "9.27.0",
-    "mocha": "11.5.0",
+    "eslint": "9.39.1",
+    "mocha": "11.7.5",
     "prebuild": "^13.0.1"
   },
   "peerDependencies": {
@@ -75,6 +75,6 @@
     "database"
   ],
   "type": "module",
-  "main": "./lib/sqlite3",
+  "main": "./lib/sqlite3.js",
   "types": "./lib/sqlite3.d.ts"
 }
