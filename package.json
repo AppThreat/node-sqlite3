@@ -42,12 +42,12 @@
     "prebuild-install": "^7.1.3"
   },
   "devDependencies": {
-    "eslint": "9.39.1",
+    "eslint": "9.39.2",
     "mocha": "11.7.5",
     "prebuild": "^13.0.1"
   },
   "peerDependencies": {
-    "node-gyp": "11.x"
+    "node-gyp": "12.x"
   },
   "peerDependenciesMeta": {
     "node-gyp": {
