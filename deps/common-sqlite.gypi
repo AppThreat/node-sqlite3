@@ -45,6 +45,8 @@
             '-O2'
           ],
           'GCC_OPTIMIZATION_LEVEL': '3',
+          'LLVM_LTO': 'YES',
+          'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES',
           'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
           'DEAD_CODE_STRIPPING': 'YES',
           'GCC_INLINES_ARE_PRIVATE_EXTERN': 'YES'
