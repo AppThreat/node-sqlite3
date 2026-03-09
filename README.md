@@ -8,26 +8,28 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
 
 # Features
 
- - Straightforward query and parameter binding interface
- - Full Buffer/Blob support
- - Extensive [debugging support](https://github.com/AppThreat/node-sqlite3/wiki/Debugging)
- - [Query serialization](https://github.com/AppThreat/node-sqlite3/wiki/Control-Flow) API
- - [Extension support](https://github.com/AppThreat/node-sqlite3/wiki/API#databaseloadextensionpath-callback), including bundled support for the [json1 extension](https://www.sqlite.org/json1.html)
- - Big test suite
- - Written in modern C++ and tested for memory leaks
- - Bundles SQLite v3.51.0, or you can build using a local SQLite [amalgamation](https://www.sqlite.org/amalgamation.html)
+- Straightforward query and parameter binding interface
+- Full Buffer/Blob support
+- Extensive [debugging support](https://github.com/AppThreat/node-sqlite3/wiki/Debugging)
+- [Query serialization](https://github.com/AppThreat/node-sqlite3/wiki/Control-Flow) API
+- [Extension support](https://github.com/AppThreat/node-sqlite3/wiki/API#databaseloadextensionpath-callback), including bundled support for the [json1 extension](https://www.sqlite.org/json1.html)
+- Big test suite
+- Written in modern C++ and tested for memory leaks
+- Bundles SQLite v3.52.0, or you can build using a local SQLite [amalgamation](https://www.sqlite.org/amalgamation.html)
 
 # Installing
 
 You can use [`npm`](https://github.com/npm/cli) or [`yarn`](https://github.com/yarnpkg/yarn) to install `sqlite3`:
 
-* (recommended) Latest published package:
+- (recommended) Latest published package:
+
 ```bash
 npm install @appthreat/sqlite3
 # or
 yarn add @appthreat/sqlite3
 ```
-* GitHub's `master` branch: `npm install https://github.com/AppThreat/node-sqlite3/tarball/master`
+
+- GitHub's `master` branch: `npm install https://github.com/AppThreat/node-sqlite3/tarball/master`
 
 ### Prebuilt binaries
 
@@ -35,14 +37,14 @@ yarn add @appthreat/sqlite3
 
 The module uses [`prebuild-install`](https://github.com/prebuild/prebuild-install) to download the prebuilt binary for your platform, if it exists. These binaries are hosted on GitHub Releases for `sqlite3` versions above 5.0.2, and they are hosted on S3 otherwise. The following targets are currently provided:
 
-* `darwin-arm64`
-* `darwin-x64`
-* `linux-arm64`
-* `linux-x64`
-* `linuxmusl-arm64`
-* `linuxmusl-x64`
-* `win32-ia32`
-* `win32-x64`
+- `darwin-arm64`
+- `darwin-x64`
+- `linux-arm64`
+- `linux-x64`
+- `linuxmusl-arm64`
+- `linuxmusl-x64`
+- `win32-ia32`
+- `win32-x64`
 
 Unfortunately, [prebuild](https://github.com/prebuild/prebuild/issues/174) cannot differentiate between `armv6` and `armv7`, and instead uses `arm` as the `{arch}`. Until that is fixed, you will still need to install `sqlite3` from [source](#source-install).
 
@@ -68,22 +70,22 @@ See the [API documentation](https://github.com/AppThreat/node-sqlite3/wiki/API) 
 
 This package is now ESM only.
 
-``` js
-import sqlite3 from 'sqlite3';
-const db = new sqlite3.verbose().Database(':memory:');
+```js
+import sqlite3 from "sqlite3";
+const db = new sqlite3.verbose().Database(":memory:");
 
 db.serialize(() => {
-    db.run("CREATE TABLE lorem (info TEXT)");
+  db.run("CREATE TABLE lorem (info TEXT)");
 
-    const stmt = db.prepare("INSERT INTO lorem VALUES (?)");
-    for (let i = 0; i < 10; i++) {
-        stmt.run("Ipsum " + i);
-    }
-    stmt.finalize();
+  const stmt = db.prepare("INSERT INTO lorem VALUES (?)");
+  for (let i = 0; i < 10; i++) {
+    stmt.run("Ipsum " + i);
+  }
+  stmt.finalize();
 
-    db.each("SELECT rowid AS id, info FROM lorem", (err, row) => {
-        console.log(row.id + ": " + row.info);
-    });
+  db.each("SELECT rowid AS id, info FROM lorem", (err, row) => {
+    console.log(row.id + ": " + row.info);
+  });
 });
 
 db.close();
@@ -121,7 +123,7 @@ The default sqlite file header is "SQLite format 3". You can specify a different
 npm install --build-from-source --sqlite_magic="MyCustomMagic15"
 ```
 
-Note that the magic *must* be exactly 15 characters long (16 bytes including null terminator).
+Note that the magic _must_ be exactly 15 characters long (16 bytes including null terminator).
 
 ## Building for node-webkit
 
@@ -129,7 +131,7 @@ Because of ABI differences, `sqlite3` must be built in a custom to be used with
 
 To build `sqlite3` for node-webkit:
 
-1. Install [`nw-gyp`](https://github.com/rogerwang/nw-gyp) globally: `npm install nw-gyp -g` *(unless already installed)*
+1. Install [`nw-gyp`](https://github.com/rogerwang/nw-gyp) globally: `npm install nw-gyp -g` _(unless already installed)_
 
 2. Build the module with the custom flags of `--runtime`, `--target_arch`, and `--target`:
 
@@ -146,10 +148,10 @@ npm install --build-from-source --runtime=node-webkit --target_arch=ia32 --targe
 
 Remember the following:
 
-* You must provide the right `--target_arch` flag. `ia32` is needed to target 32bit node-webkit builds, while `x64` will target 64bit node-webkit builds (if available for your platform).
+- You must provide the right `--target_arch` flag. `ia32` is needed to target 32bit node-webkit builds, while `x64` will target 64bit node-webkit builds (if available for your platform).
 
-* After the `sqlite3` package is built for node-webkit it cannot run in the vanilla Node.js (and vice versa).
-   * For example, `npm test` of the node-webkit's package would fail.
+- After the `sqlite3` package is built for node-webkit it cannot run in the vanilla Node.js (and vice versa).
+  - For example, `npm test` of the node-webkit's package would fail.
 
 Visit the “[Using Node modules](https://github.com/rogerwang/node-webkit/wiki/Using-Node-modules)” article in the node-webkit's wiki for more details.
 
@@ -208,21 +210,21 @@ npm test
 
 # Contributors
 
-* [Daniel Lockyer](https://github.com/daniellockyer)
-* [Konstantin Käfer](https://github.com/kkaefer)
-* [Dane Springmeyer](https://github.com/springmeyer)
-* [Will White](https://github.com/willwhite)
-* [Orlando Vazquez](https://github.com/orlandov)
-* [Artem Kustikov](https://github.com/artiz)
-* [Eric Fredricksen](https://github.com/grumdrig)
-* [John Wright](https://github.com/mrjjwright)
-* [Ryan Dahl](https://github.com/ry)
-* [Tom MacWright](https://github.com/tmcw)
-* [Carter Thaxton](https://github.com/carter-thaxton)
-* [Audrius Kažukauskas](https://github.com/audriusk)
-* [Johannes Schauer](https://github.com/pyneo)
-* [Mithgol](https://github.com/Mithgol)
-* [Kewde](https://github.com/kewde)
+- [Daniel Lockyer](https://github.com/daniellockyer)
+- [Konstantin Käfer](https://github.com/kkaefer)
+- [Dane Springmeyer](https://github.com/springmeyer)
+- [Will White](https://github.com/willwhite)
+- [Orlando Vazquez](https://github.com/orlandov)
+- [Artem Kustikov](https://github.com/artiz)
+- [Eric Fredricksen](https://github.com/grumdrig)
+- [John Wright](https://github.com/mrjjwright)
+- [Ryan Dahl](https://github.com/ry)
+- [Tom MacWright](https://github.com/tmcw)
+- [Carter Thaxton](https://github.com/carter-thaxton)
+- [Audrius Kažukauskas](https://github.com/audriusk)
+- [Johannes Schauer](https://github.com/pyneo)
+- [Mithgol](https://github.com/Mithgol)
+- [Kewde](https://github.com/kewde)
 
 # Acknowledgments
 
