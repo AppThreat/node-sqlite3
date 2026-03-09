@@ -2,8 +2,8 @@
 
 Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js](http://nodejs.org/). Forked from TryGhost/node-sqlite3.
 
+![NPM Downloads](https://img.shields.io/npm/dm/%40appthreat%2Fsqlite3)
 [![Latest release](https://img.shields.io/github/release/AppThreat/node-sqlite3.svg)](https://www.npmjs.com/package/@appthreat/sqlite3)
-![Build Status](https://github.com/AppThreat/node-sqlite3/workflows/CI/badge.svg?branch=master)
 ![Node-API v9 Badge](https://github.com/nodejs/abi-stable-node/blob/doc/assets/Node-API%20v9%20Badge.svg)
 
 # Features
