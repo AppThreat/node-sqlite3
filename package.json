@@ -44,7 +44,7 @@
   },
   "scripts": {
     "install": "node-gyp-build",
-    "prebuild": "prebuildify --target node@20.20.1 --no-napi --strip",
+    "prebuild": "prebuildify --napi --strip",
     "rebuild": "node-gyp rebuild",
     "test": "node test/support/createdb.js && mocha -R spec --timeout 480000"
   },
