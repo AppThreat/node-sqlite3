@@ -12,12 +12,16 @@ WORKDIR /usr/src/build
 COPY . .
 RUN npm install --ignore-scripts
 
-ENV CFLAGS="${CFLAGS:-} -include ../src/gcc-preinclude.h"
-ENV CXXFLAGS="${CXXFLAGS:-} -include ../src/gcc-preinclude.h"
-RUN npm run prebuild
+RUN if case $VARIANT in "alpine"*) true;; *) false;; esac; then \
+        npm run prebuild -- --tag-libc; \
+    else \
+        CFLAGS="${CFLAGS:-} -include ../src/gcc-preinclude.h" \
+        CXXFLAGS="${CXXFLAGS:-} -include ../src/gcc-preinclude.h" \
+        npm run prebuild -- --tag-libc; \
+    fi
 
-RUN if case $VARIANT in "alpine"*) false;; *) true;; esac; then ldd build/**/node_sqlite3.node; nm build/**/node_sqlite3.node | grep \"GLIBC_\" | c++filt || true ; fi
+RUN if case $VARIANT in "alpine"*) false;; *) true;; esac; then ldd prebuilds/*/*.node; nm prebuilds/*/*.node | grep \"GLIBC_\" | c++filt || true ; fi
 
-RUN npm run test
+RUN npm run test && ls -l prebuilds
 
 CMD ["sh"]

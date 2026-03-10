@@ -15,10 +15,6 @@ concurrency:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +57,7 @@ jobs:
 
     name: ${{ matrix.os }} (host=${{ matrix.host }}, target=${{ matrix.target }})
     steps:
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -102,41 +98,29 @@ jobs:
           echo "CXXFLAGS=${CXXFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
 
       - name: Build binaries
-        run: yarn prebuild -a ${{ env.TARGET }}
+        run: yarn prebuild --arch ${{ env.TARGET }} --tag-libc
 
       - name: Print binary info
         if: contains(matrix.os, 'ubuntu')
         run: |
-          ldd build/**/node_sqlite3.node
+          ldd prebuilds/*/*.node
           echo "---"
-          nm build/**/node_sqlite3.node | grep "GLIBC_" | c++filt || true
+          nm prebuilds/*/*.node | grep "GLIBC_" | c++filt || true
           echo "---"
-          file build/**/node_sqlite3.node
+          file prebuilds/*/*.node
 
       - name: Run tests
         run: yarn test
 
-      - name: Upload binaries to commit artifacts
+      - name: Upload prebuilds to artifacts
         uses: actions/upload-artifact@v4
-        if: matrix.node == 24 && matrix.os == 'ubuntu-22.04'
         with:
-          name: prebuilt-binaries
-          path: prebuilds/*
+          name: prebuilds-${{ matrix.os }}-${{ matrix.host }}-${{ matrix.target }}-${{ matrix.node }}
+          path: prebuilds/
           retention-days: 7
 
-      - name: Upload binaries to GitHub Release
-        run: yarn upload --upload-all ${{ github.token }}
-        if: startsWith(github.ref, 'refs/tags/')
-      - name: Publish
-        run: |
-          npm publish --provenance --access=public
-        if: matrix.node == 24 && matrix.os == 'ubuntu-22.04' && startsWith(github.ref, 'refs/tags/')
   build-qemu:
     runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +143,7 @@ jobs:
             node: 22
     name: ${{ matrix.variant }} (node=${{ matrix.node }}, target=${{ matrix.target }})
     steps:
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
+      - uses: actions/checkout@v4
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -180,7 +164,47 @@ jobs:
             .
           CONTAINER_ID=$(docker create -it sqlite-builder)
           docker cp $CONTAINER_ID:/usr/src/build/prebuilds/ ./prebuilds
+      - name: Sanitize target name for Artifact
+        run: |
+          SAFE_TARGET=$(echo "${{ matrix.target }}" | tr '/' '-')
+          echo "SAFE_TARGET=$SAFE_TARGET" >> $GITHUB_ENV
+      - name: Upload QEMU prebuilds to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilds-qemu-${{ matrix.variant }}-${{ env.SAFE_TARGET }}-${{ matrix.node }}
+          path: prebuilds/
+          retention-days: 7
 
-      - name: Upload binaries to GitHub Release
-        run: yarn install --ignore-scripts && yarn upload --upload-all ${{ github.token }}
+  publish:
+    needs: [build, build-qemu]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          scope: '@appthreat'
+
+      - name: Download and merge all prebuilds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: prebuilds-*
+          path: prebuilds/
+          merge-multiple: true
+
+      - name: Add yarn
+        run: npm install -g yarn
+
+      - name: Install dependencies
+        run: |
+          yarn install --ignore-scripts
+          npm publish --dry-run
+
+      - name: Publish to npm
+        run: npm publish --provenance --access=public
         if: startsWith(github.ref, 'refs/tags/')

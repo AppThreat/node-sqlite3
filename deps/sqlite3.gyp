@@ -8,12 +8,12 @@
   'target_defaults': {
     'default_configuration': 'Release',
     "cflags": [
-      '-O3', '-flto', '-pipe', '-ffunction-sections', '-fdata-sections'
+      '-O3', '-flto', '-pipe', '-ffunction-sections', '-fdata-sections', '-fvisibility=hidden'
     ],
     'cxxflags':[
-      '-O3', '-flto', '-pipe', '-ffunction-sections', '-fdata-sections'
+      '-O3', '-flto', '-pipe', '-ffunction-sections', '-fdata-sections', '-fvisibility=hidden'
     ],
-    'ldflags':   [ '-flto', '-Wl,--gc-sections','-s' ],
+    'ldflags':   [ '-flto', '-Wl,--gc-sections', '-s' ],
     'configurations': {
       'Debug': {
         'defines': [ 'DEBUG', '_DEBUG' ],
@@ -35,6 +35,8 @@
     'msvs_settings': {
       'VCCLCompilerTool': {
          'Optimization': 2,           # /O2
+         'FavorSizeOrSpeed': 1,       # /Ot (Favor fast code)
+         'StringPooling': 'true',     # /GF
          'EnableFunctionLevelLinking': 'true', # /Gy
          'EnableIntrinsicFunctions': 'true',
       },
