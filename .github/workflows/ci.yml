@@ -44,8 +44,8 @@ jobs:
 
     name: ${{ matrix.os }} (host=${{ matrix.host }}, target=${{ matrix.target }})
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
           node-version: ${{ matrix.node }}
           architecture: ${{ matrix.host }}
@@ -53,11 +53,11 @@ jobs:
       - name: Add yarn
         run: npm install -g yarn
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: 3.12
       - name: Add msbuild to PATH
-        uses: microsoft/setup-msbuild@v1.3
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57  # v3
         if: contains(matrix.os, 'windows')
         with:
           msbuild-architecture: ${{ matrix.target }}
@@ -100,7 +100,7 @@ jobs:
         run: yarn test
 
       - name: Upload prebuilds to artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
           name: prebuilds-${{ matrix.os }}-${{ matrix.host }}-${{ matrix.target }}-${{ matrix.node }}
           path: prebuilds/
@@ -124,13 +124,13 @@ jobs:
             node: 20
     name: ${{ matrix.variant }} (node=${{ matrix.node }}, target=${{ matrix.target }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a  # v4.0.0
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
 
       - name: Build binaries and test
         run: |
@@ -150,7 +150,7 @@ jobs:
           SAFE_TARGET=$(echo "${{ matrix.target }}" | tr '/' '-')
           echo "SAFE_TARGET=$SAFE_TARGET" >> $GITHUB_ENV
       - name: Upload QEMU prebuilds to artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
           name: prebuilds-qemu-${{ matrix.variant }}-${{ env.SAFE_TARGET }}-${{ matrix.node }}
           path: prebuilds/
@@ -164,15 +164,15 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
           node-version: 24
           scope: '@appthreat'
 
       - name: Download and merge all prebuilds
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: prebuilds-*
           path: prebuilds/
