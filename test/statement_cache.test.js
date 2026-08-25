@@ -254,7 +254,16 @@ describe('statement cache', function () {
                     assert.ifError(err);
                     db.run('INSERT INTO u (x) VALUES (?)', 1, function (err) {
                         assert.ok(err);
-                        assert.strictEqual(err.code, 'SQLITE_CONSTRAINT');
+                        // v9 reports the extended code; the primary code
+                        // moved to err.primaryCode.
+                        assert.strictEqual(
+                            err.code,
+                            'SQLITE_CONSTRAINT_UNIQUE',
+                        );
+                        assert.strictEqual(
+                            err.primaryCode,
+                            'SQLITE_CONSTRAINT',
+                        );
                         db.run(
                             'INSERT INTO u (x) VALUES (?)',
                             2,

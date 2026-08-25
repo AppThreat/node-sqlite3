@@ -2,20 +2,53 @@
 // place decides what "every interesting JS value" means, so the bind,
 // column, and sync-path suites (D02/D06/D08) all assert the same
 // contract. `sqliteType` is the *expected* storage class after a
-// round-trip — not necessarily what the current code produces; the
-// consumers' job is to close that gap. Entries with `rejected: true`
-// must be refused by bind, never silently coerced.
+// round-trip. Entries with `rejected: true` must be refused by bind
+// (TypeError by default, RangeError for out-of-range BigInts), never
+// silently coerced.
 //
-// Note on the int64 boundary entries: 2**53+1, 2**63-1 and -(2**63) are
-// not all exactly representable as JS numbers (2**63-1 rounds up to
-// 2**63); they are included precisely because that neighbourhood is
-// where silent-coercion bugs live.
+// Notes on the boundary entries:
+// - 2**53+1, 2**63-1 and -(2**63) as *numbers* are not all exactly
+//   representable (2**63-1 rounds up to 2**63); they are included
+//   precisely because that neighbourhood is where silent-coercion bugs
+//   live. The double 2**63 clamps to INT64_MAX on bind.
+// - `undefined` binds as NULL (Deliverable 02 decision): object shorthand
+//   { $x: obj.maybeMissing } is a common call shape, and typo'd property
+//   names are caught by the named-parameter and arity checks instead.
+// - -0 binds as INTEGER 0: SQLite has no signed integer zero, and v8
+//   pinned the same behaviour (test/marshalling.test.js).
 
 /** @returns {Buffer} a deterministic blob of `n` bytes */
 function blob(n) {
     const b = Buffer.alloc(n);
     for (let i = 0; i < n; i++) b[i] = (i * 251) % 256;
     return b;
+}
+
+/** @returns {Uint8Array} a deterministic view of `n` bytes */
+function u8(n) {
+    return new Uint8Array(blob(n));
+}
+
+/**
+ * Builds typed-array/DataView/ArrayBuffer views over one deterministic
+ * 16-byte buffer so byteOffset handling is observable.
+ *
+ * @returns {{ plain: Uint8Array, offset: Uint8Array, dataview: DataView, arraybuffer: ArrayBuffer, shared: Uint8Array, u16: Uint16Array }}
+ */
+function views() {
+    const bytes = blob(16);
+    const plain = new Uint8Array(bytes);
+    const offset = new Uint8Array(bytes.buffer, 4, 8);
+    const dataview = new DataView(bytes.buffer, 2, 6);
+    const sab = new SharedArrayBuffer(16);
+    new Uint8Array(sab).set(bytes);
+    const shared = new Uint8Array(sab);
+    const u16 = new Uint16Array(
+        bytes.buffer.slice(0), // own copy: byte length must be even
+        0,
+        8,
+    );
+    return { plain, offset, dataview, arraybuffer: bytes.buffer, shared, u16 };
 }
 
 const FIXED_DATE = new Date('2026-08-25T12:34:56.789Z');
@@ -40,11 +73,29 @@ export const corpus = [
         sqliteType: 'INTEGER',
     },
     { label: '-(2**63)', value: -(2 ** 63), sqliteType: 'INTEGER' },
+    // BigInts: exact, no clamping.
+    { label: 'bigint one', value: 1n, sqliteType: 'INTEGER' },
+    {
+        label: 'bigint 2**53 + 1',
+        value: 9007199254740993n,
+        sqliteType: 'INTEGER',
+    },
+    {
+        label: 'bigint 2**63 - 1',
+        value: 9223372036854775807n,
+        sqliteType: 'INTEGER',
+    },
+    {
+        label: 'bigint -(2**63)',
+        value: -(2n ** 63n),
+        sqliteType: 'INTEGER',
+    },
     // Floats.
     { label: 'fraction', value: Math.PI, sqliteType: 'REAL' },
     { label: 'negative fraction', value: -0.5, sqliteType: 'REAL' },
     { label: 'large exponent', value: 1.5e300, sqliteType: 'REAL' },
-    { label: 'negative zero', value: -0, sqliteType: 'REAL' },
+    // -0 is INTEGER 0: no signed zero exists in SQLite integers.
+    { label: 'negative zero', value: -0, sqliteType: 'INTEGER' },
     // SQLite converts NaN to NULL on bind_double; Infinity stays REAL.
     { label: 'NaN', value: Number.NaN, sqliteType: 'NULL' },
     { label: 'Infinity', value: Number.POSITIVE_INFINITY, sqliteType: 'REAL' },
@@ -70,14 +121,41 @@ export const corpus = [
     { label: '4096-byte blob', value: blob(4096), sqliteType: 'BLOB' },
     { label: '4097-byte blob', value: blob(4097), sqliteType: 'BLOB' },
     { label: '1 MiB blob', value: blob(1024 * 1024), sqliteType: 'BLOB' },
+    // Typed-array views bind as blobs of their exact byte range.
+    { label: 'Uint8Array', value: u8(32), sqliteType: 'BLOB' },
+    {
+        label: 'Uint8Array with byteOffset',
+        value: views().offset,
+        sqliteType: 'BLOB',
+    },
+    {
+        label: 'DataView with byteOffset',
+        value: views().dataview,
+        sqliteType: 'BLOB',
+    },
+    { label: 'ArrayBuffer', value: views().arraybuffer, sqliteType: 'BLOB' },
+    {
+        label: 'Uint8Array over SharedArrayBuffer',
+        value: views().shared,
+        sqliteType: 'BLOB',
+    },
+    {
+        label: 'Uint16Array (raw bytes)',
+        value: views().u16,
+        sqliteType: 'BLOB',
+    },
     // Misc bindable types.
     { label: 'true', value: true, sqliteType: 'INTEGER' },
     { label: 'false', value: false, sqliteType: 'INTEGER' },
     { label: 'null', value: null, sqliteType: 'NULL' },
+    {
+        label: 'undefined (binds as NULL)',
+        value: undefined,
+        sqliteType: 'NULL',
+    },
     { label: 'Date (epoch ms)', value: FIXED_DATE, sqliteType: 'REAL' },
     { label: 'RegExp (toString)', value: /corpus[0-9]+/i, sqliteType: 'TEXT' },
-    // Values that bind must reject rather than coerce.
-    { label: 'undefined', value: undefined, sqliteType: null, rejected: true },
+    // Values that bind must refuse rather than coerce.
     {
         label: 'plain object',
         value: { nope: 1 },
@@ -104,6 +182,30 @@ export const corpus = [
         value: new Map([['a', 1]]),
         sqliteType: null,
         rejected: true,
+    },
+    {
+        label: 'class instance',
+        value: new (class Widget {
+            constructor() {
+                this.size = 1;
+            }
+        })(),
+        sqliteType: null,
+        rejected: true,
+    },
+    {
+        label: 'bigint 2**63 (out of int64 range)',
+        value: 2n ** 63n,
+        sqliteType: null,
+        rejected: true,
+        rejection: 'RangeError',
+    },
+    {
+        label: 'bigint -(2**63)-1 (out of int64 range)',
+        value: -(2n ** 63n) - 1n,
+        sqliteType: null,
+        rejected: true,
+        rejection: 'RangeError',
     },
 ];
 

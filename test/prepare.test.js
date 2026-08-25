@@ -74,7 +74,10 @@ describe('prepare', function () {
                         `String ${i}`,
                         i,
                         i * Math.PI,
-                        // null (SQLite sets this implicitly)
+                        // The 4th parameter is bound explicitly: v9 rejects
+                        // a parameter-count mismatch instead of silently
+                        // binding the missing ones as NULL.
+                        null,
                         function (err) {
                             if (err) throw err;
                             inserted++;
@@ -515,7 +518,10 @@ describe('prepare', function () {
                     `String ${i}`,
                     i,
                     i * Math.PI,
-                    // null (SQLite sets this implicitly)
+                    // The 4th parameter is bound explicitly: v9 rejects
+                    // a parameter-count mismatch instead of silently
+                    // binding the missing ones as NULL.
+                    null,
                     function (err) {
                         if (err) throw err;
                         inserted++;

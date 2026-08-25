@@ -95,27 +95,35 @@ describe('data types', function () {
         });
     });
 
-    it('should ignore faulty toString', function (_t, done) {
+    it('should reject faulty toString', function (_t, done) {
         const faulty = { toString: 23 };
+        // v8 bound this as "[object Object]"; v9 rejects non-serialisable
+        // objects. As a direct argument the object is a named-parameter
+        // map, so the unknown-parameter error reaches the callback.
         db.run('INSERT INTO txt_table VALUES(?)', faulty, function (err) {
             assert.notEqual(err, undefined);
+            assert.strictEqual(err.code, 'SQLITE_RANGE');
             done();
         });
     });
 
-    it('should ignore faulty toString in array', function (_t, done) {
+    it('should reject faulty toString in array', function () {
         const faulty = [[{ toString: null }], 1];
-        db.all(
-            'SELECT * FROM txt_table WHERE txt = ? LIMIT ?',
-            faulty,
+        // v8 bound the inner object as "[object Object]"; v9 throws a
+        // TypeError synchronously, naming the parameter index.
+        assert.throws(
+            function () {
+                db.all('SELECT * FROM txt_table WHERE txt = ? LIMIT ?', faulty);
+            },
             function (err) {
-                assert.equal(err, null);
-                done();
+                assert.ok(err instanceof TypeError);
+                assert.match(err.message, /Cannot bind parameter 1/);
+                return true;
             },
         );
     });
 
-    it('should ignore faulty toString set to function', function (_t, done) {
+    it('should reject faulty toString set to function', function () {
         const faulty = [
             [
                 {
@@ -126,12 +134,14 @@ describe('data types', function () {
             ],
             1,
         ];
-        db.all(
-            'SELECT * FROM txt_table WHERE txt = ? LIMIT ?',
-            faulty,
+        assert.throws(
+            function () {
+                db.all('SELECT * FROM txt_table WHERE txt = ? LIMIT ?', faulty);
+            },
             function (err) {
-                assert.equal(err, undefined);
-                done();
+                assert.ok(err instanceof TypeError);
+                assert.match(err.message, /Cannot bind parameter 1/);
+                return true;
             },
         );
     });

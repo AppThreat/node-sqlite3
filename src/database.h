@@ -26,6 +26,16 @@ public:
 #endif
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
 
+    // How INTEGER columns and lastID are converted to JS
+    // (configure('integerMode', mode)). 'number' throws a RangeError on
+    // values outside the safe-integer range rather than truncating;
+    // 'bigint' always returns BigInt; 'mixed' picks per value.
+    enum IntegerMode {
+        INTEGER_NUMBER = 0,
+        INTEGER_BIGINT = 1,
+        INTEGER_MIXED = 2
+    };
+
     static inline bool HasInstance(Napi::Value val) {
         auto env = val.Env();
         Napi::HandleScope scope(env);
@@ -149,6 +159,9 @@ protected:
     Napi::Value Configure(const Napi::CallbackInfo& info);
     Napi::Value Interrupt(const Napi::CallbackInfo& info);
 
+    /** Current integerMode as a string: 'number' | 'bigint' | 'mixed'. */
+    Napi::Value IntegerModeGetter(const Napi::CallbackInfo& info);
+
     // True while an exclusive operation (exec/close/wait/loadExtension) is
     // running or waiting in the database queue. The JS statement cache uses
     // it to fall back to the uncached path, whose prepare goes through
@@ -181,6 +194,10 @@ protected:
     unsigned int pending = 0;
 
     bool serialize = false;
+
+    // See IntegerMode above. Read by Statement when converting rows and
+    // lastID; only ever mutated on the main thread by configure().
+    int integer_mode = INTEGER_NUMBER;
 
     std::queue<Call*> queue;
 

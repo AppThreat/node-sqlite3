@@ -2,6 +2,8 @@ import assert from 'node:assert';
 import { before, beforeEach, describe, it } from 'node:test';
 
 import sqlite3 from '../lib/sqlite3.js';
+import { bindPaths } from './support/bindpaths.js';
+import { corpus } from './support/corpus.js';
 
 // Marshalling regression tests: pin down the exact JS<->SQLite value
 // conversion behaviour exercised by the performance work (flat fields,
@@ -216,28 +218,38 @@ describe('marshalling', function () {
             );
         });
 
-        it('serializes plain objects in arrays as [object Object]', function (_t, done) {
-            db.run(
-                'INSERT INTO types (txt_col) VALUES (?)',
-                [{ a: 1 }],
+        it('rejects plain objects in arrays instead of coercing them', function (_t, done) {
+            // v8 bound these as the literal string "[object Object]".
+            assert.throws(
+                function () {
+                    db.run('INSERT INTO types (txt_col) VALUES (?)', [
+                        { a: 1 },
+                    ]);
+                },
                 function (err) {
-                    assert.ifError(err);
-                    db.get('SELECT txt_col FROM types', function (err, row) {
-                        assert.ifError(err);
-                        assert.strictEqual(row.txt_col, '[object Object]');
-                        done();
-                    });
+                    assert.ok(err instanceof TypeError);
+                    assert.match(err.message, /Cannot bind parameter 1/);
+                    assert.match(err.message, /unsupported type Object/);
+                    return true;
                 },
             );
+            db.get('SELECT txt_col FROM types', function (err, row) {
+                assert.ifError(err);
+                assert.strictEqual(row, undefined);
+                done();
+            });
         });
 
-        it('treats direct plain objects as named-parameter maps (SQLITE_RANGE)', function (_t, done) {
+        it('treats direct plain objects as named-parameter maps (unknown parameter)', function (_t, done) {
             db.run(
                 'INSERT INTO types (txt_col) VALUES (?)',
                 { a: 1 },
                 function (err) {
                     assert.ok(err);
+                    // v8 surfaced this as a bare SQLITE_RANGE from
+                    // sqlite3_bind_text; v9 names the offending parameter.
                     assert.strictEqual(err.code, 'SQLITE_RANGE');
+                    assert.match(err.message, /unknown named parameter "a"/);
                     done();
                 },
             );
@@ -825,6 +837,585 @@ describe('marshalling', function () {
                 });
             };
             insertAndConsume();
+        });
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Deliverable 02: corpus round-trip property test.
+//
+// For every corpus value and every integer mode, each query path must
+// produce either the exact round-tripped value or an error — never a
+// silently wrong value. The async (Work_*) and sync (*Sync) marshalling
+// paths are separate native code and are exercised side by side on
+// purpose.
+
+/** Exact bytes a blob-ish corpus value must round-trip as. */
+function expectedBytes(value) {
+    assert.ok(
+        ArrayBuffer.isView(value) || value instanceof ArrayBuffer,
+        'expectedBytes only accepts blob-ish values',
+    );
+    if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer) {
+        return Buffer.from(value);
+    }
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+}
+
+/**
+ * The value the given corpus entry must read back as in the given
+ * integer mode: `{ value }`, `{ rangeError: true }` (the deliberate
+ * 'number'-mode throw), or `{ nullValue: true }`.
+ */
+function expectedRead(entry, mode) {
+    switch (entry.sqliteType) {
+        case 'INTEGER': {
+            let stored;
+            if (typeof entry.value === 'bigint') {
+                stored = entry.value;
+            } else if (typeof entry.value === 'boolean') {
+                stored = entry.value ? 1n : 0n;
+            } else if (Object.is(entry.value, -0)) {
+                stored = 0n;
+            } else {
+                // Numbers: whatever int64 the bind produced. The double
+                // 2**63 is the rounded form of 2**63-1 and clamps to
+                // INT64_MAX rather than wrapping.
+                const d = Math.trunc(entry.value);
+                stored = d >= 2 ** 63 ? 9223372036854775807n : BigInt(d);
+            }
+            const safe = stored >= -(2n ** 53n) + 1n && stored < 2n ** 53n;
+            if (mode === 'bigint') return { value: stored };
+            if (safe) return { value: Number(stored) };
+            if (mode === 'mixed') return { value: stored };
+            return { rangeError: true };
+        }
+        case 'REAL': {
+            const v = entry.value instanceof Date ? +entry.value : entry.value;
+            return { value: v, float: true };
+        }
+        case 'NULL':
+            return { nullValue: true };
+        case 'TEXT': {
+            if (entry.value instanceof RegExp)
+                return { value: String(entry.value) };
+            // Lone surrogates cannot survive the UTF-8 boundary: the JS
+            // engine replaces them with U+FFFD on the way in. Pinned here
+            // so a future WTF-8 round-trip fix must change this test
+            // consciously.
+            const replaced = entry.value
+                .replace(/\uD800/g, '\uFFFD')
+                .replace(/\uDC00/g, '\uFFFD');
+            return { value: replaced };
+        }
+        case 'BLOB':
+            return { bytes: expectedBytes(entry.value) };
+        default:
+            throw new Error(`unhandled sqliteType ${entry.sqliteType}`);
+    }
+}
+
+describe('corpus round-trip (Deliverable 02)', function () {
+    for (const mode of ['number', 'bigint', 'mixed']) {
+        describe(`integer mode '${mode}'`, function () {
+            it('configures and reports the mode', async function () {
+                const db = new sqlite3.Database(':memory:');
+                await new Promise((resolve) => db.exec('SELECT 1', resolve));
+                try {
+                    db.configure('integerMode', mode);
+                    assert.strictEqual(db.integerMode, mode);
+                } finally {
+                    await new Promise((resolve) => db.close(resolve));
+                }
+            });
+
+            for (const entry of corpus) {
+                it(`round-trips ${entry.label}`, async function () {
+                    const db = new sqlite3.Database(':memory:');
+                    try {
+                        await new Promise((resolve) =>
+                            db.exec('SELECT 1', resolve),
+                        );
+                        db.configure('integerMode', mode);
+
+                        const paths = bindPaths(db);
+                        assert.strictEqual(paths.length, 15);
+
+                        for (const path of paths) {
+                            const outcome = await path.run(entry.value);
+
+                            if (entry.rejected) {
+                                // Bind-side rejection: every path either
+                                // throws synchronously or reports err —
+                                // never a wrong value. (Array form, so a
+                                // plain object is a value, not a param map.)
+                                const rejection =
+                                    entry.rejection === 'RangeError'
+                                        ? RangeError
+                                        : TypeError;
+                                if (outcome.threw) {
+                                    assert.ok(
+                                        outcome.threw instanceof rejection,
+                                        `${path.name}: expected ${rejection.name}, got ${outcome.threw}`,
+                                    );
+                                    assert.match(
+                                        outcome.threw.message,
+                                        /Cannot bind parameter 1/,
+                                        `${path.name}: error must name the parameter`,
+                                    );
+                                } else {
+                                    assert.ok(
+                                        outcome.err,
+                                        `${path.name}: expected an error for rejected value`,
+                                    );
+                                }
+                                continue;
+                            }
+
+                            const expect = expectedRead(entry, mode);
+
+                            if (expect.rangeError) {
+                                if (!path.reads) {
+                                    // Bind-only paths (run) never convert
+                                    // row values: success is correct.
+                                    assert.ok(
+                                        !outcome.threw && !outcome.err,
+                                        `${path.name}: unexpected ${outcome.threw || outcome.err}`,
+                                    );
+                                    continue;
+                                }
+                                // 'number' mode and an unsafe int64: an
+                                // error, never a truncated double.
+                                const err = outcome.threw || outcome.err;
+                                assert.ok(
+                                    err instanceof RangeError,
+                                    `${path.name}: expected RangeError, got ${
+                                        JSON.stringify(
+                                            outcome.err?.message ??
+                                                outcome.threw?.message,
+                                        ) ?? 'no error'
+                                    }`,
+                                );
+                                continue;
+                            }
+
+                            assert.ok(
+                                !outcome.threw && !outcome.err,
+                                `${path.name}: unexpected ${outcome.threw || outcome.err}`,
+                            );
+                            if (!path.reads) continue;
+
+                            if (outcome.stringified) {
+                                // db.map reports the value as the
+                                // stringified result key.
+                                if (entry.sqliteType === 'BLOB') continue;
+                                const expectStr = expect.nullValue
+                                    ? 'null'
+                                    : String(expect.value);
+                                assert.strictEqual(
+                                    outcome.v,
+                                    expectStr,
+                                    `${path.name}: expected key ${expectStr}`,
+                                );
+                                continue;
+                            }
+
+                            if (expect.nullValue) {
+                                assert.strictEqual(
+                                    outcome.v,
+                                    null,
+                                    `${path.name}: expected NULL`,
+                                );
+                            } else if (expect.bytes) {
+                                assert.ok(
+                                    Buffer.isBuffer(outcome.v),
+                                    `${path.name}: expected a Buffer`,
+                                );
+                                assert.ok(
+                                    expect.bytes.equals(outcome.v),
+                                    `${path.name}: blob bytes differ`,
+                                );
+                            } else if (expect.float) {
+                                assert.ok(
+                                    Object.is(outcome.v, expect.value),
+                                    `${path.name}: expected ${expect.value}, got ${outcome.v}`,
+                                );
+                            } else {
+                                assert.ok(
+                                    Object.is(outcome.v, expect.value),
+                                    `${path.name}: expected ${String(
+                                        expect.value,
+                                    )}, got ${String(outcome.v)}`,
+                                );
+                            }
+                        }
+                    } finally {
+                        await new Promise((resolve) => db.close(resolve));
+                    }
+                });
+            }
+        });
+    }
+
+    describe('storage classes', function () {
+        it('stores every bindable corpus value with its declared type', async function () {
+            const db = new sqlite3.Database(':memory:');
+            try {
+                await new Promise((resolve) =>
+                    db.exec('CREATE TABLE t (v)', resolve),
+                );
+                const bindable = corpus.filter((e) => !e.rejected);
+                for (const entry of bindable) {
+                    if (entry.sqliteType === 'NULL') continue; // typeof() of a NULL cell is 'null'
+                    db.runSync('INSERT INTO t (v) VALUES (?)', [entry.value]);
+                    const row = db.getSync(
+                        'SELECT typeof(v) AS ty FROM t WHERE rowid = last_insert_rowid()',
+                    );
+                    assert.strictEqual(
+                        row.ty,
+                        entry.sqliteType.toLowerCase(),
+                        `${entry.label}: stored as ${row.ty}`,
+                    );
+                    db.runSync('DELETE FROM t');
+                }
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('binds 2**40 as a 64-bit INTEGER, not a REAL', async function () {
+            // The v8 bug: the Int32 round-trip classified anything above
+            // int32 as a float, so WHERE-matches on typed columns broke.
+            const db = new sqlite3.Database(':memory:');
+            try {
+                await new Promise((resolve) =>
+                    db.exec('CREATE TABLE t (a INTEGER STRICT)', resolve),
+                );
+                db.runSync('INSERT INTO t VALUES (?)', [2 ** 40]);
+                const row = db.getSync('SELECT typeof(a) AS ty, a FROM t');
+                assert.strictEqual(row.ty, 'integer');
+                assert.strictEqual(row.a, 2 ** 40);
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+    });
+
+    describe('parameter arity', function () {
+        it('rejects too few parameters on every path', async function () {
+            const db = new sqlite3.Database(':memory:');
+            try {
+                await new Promise((resolve) => db.exec('SELECT 1', resolve));
+                const paths = bindPaths(db);
+                for (const path of paths) {
+                    const out = await new Promise((resolve) => {
+                        if (path.name.includes('Sync')) {
+                            try {
+                                if (path.name === 'db.getSync') {
+                                    db.getSync('SELECT ? AS a, ? AS b', [1]);
+                                } else if (path.name === 'db.allSync') {
+                                    db.allSync('SELECT ? AS a, ? AS b', [1]);
+                                } else if (path.name === 'db.runSync') {
+                                    db.runSync('SELECT ? AS a, ? AS b', [1]);
+                                } else if (path.name === 'stmt.getSync') {
+                                    db.prepareSync(
+                                        'SELECT ? AS a, ? AS b',
+                                    ).getSync([1]);
+                                } else if (path.name === 'stmt.allSync') {
+                                    db.prepareSync(
+                                        'SELECT ? AS a, ? AS b',
+                                    ).allSync([1]);
+                                } else {
+                                    db.prepareSync(
+                                        'SELECT ? AS a, ? AS b',
+                                    ).runSync([1]);
+                                }
+                                resolve({});
+                            } catch (err) {
+                                resolve({ threw: err });
+                            }
+                        } else {
+                            db.get('SELECT ? AS a, ? AS b', [1], (err) =>
+                                resolve({ err }),
+                            );
+                        }
+                    });
+                    const err = out.threw || out.err;
+                    assert.ok(err, `${path.name}: expected an arity error`);
+                    assert.strictEqual(err.code, 'SQLITE_RANGE');
+                    assert.match(
+                        err.message,
+                        /supplied 1 parameter\(s\) but the statement takes 2/,
+                        `${path.name}`,
+                    );
+                }
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('rejects too many parameters', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) => db.exec('SELECT 1', resolve));
+            try {
+                assert.throws(
+                    () => db.getSync('SELECT ? AS a', 1, 2),
+                    /supplied 2 parameter\(s\) but the statement takes 1/,
+                );
+                const err = await new Promise((resolve) =>
+                    db.get('SELECT ? AS a', [1, 2], (e) => resolve(e)),
+                );
+                assert.strictEqual(err.code, 'SQLITE_RANGE');
+                assert.match(err.message, /supplied 2 parameter\(s\)/);
+                assert.throws(
+                    () => db.prepareSync('SELECT ? AS a').getSync(1, 2),
+                    /supplied 2 parameter\(s\) but the statement takes 1/,
+                );
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('rejects an empty bind argument for a parameterised statement', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) => db.exec('SELECT 1', resolve));
+            try {
+                assert.throws(
+                    () => db.getSync('SELECT ? AS a', []),
+                    /supplied 0 parameter\(s\) but the statement takes 1/,
+                );
+                const err = await new Promise((resolve) =>
+                    db.get('SELECT ? AS a', {}, (e) => resolve(e)),
+                );
+                assert.match(
+                    err.message,
+                    /supplied 0 parameter\(s\) but the statement takes 1/,
+                );
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('keeps the historical accidental-undefined shape for parameterless SQL', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) =>
+                db.exec('CREATE TABLE t (a)', resolve),
+            );
+            try {
+                db.runSync('INSERT INTO t VALUES (1)', undefined);
+                const row = db.getSync('SELECT COUNT(*) AS n FROM t');
+                assert.strictEqual(row.n, 1);
+                const err = await new Promise((resolve) =>
+                    db.run('INSERT INTO t VALUES (2)', undefined, (e) =>
+                        resolve(e),
+                    ),
+                );
+                assert.ifError(err);
+                assert.strictEqual(
+                    db.getSync('SELECT COUNT(*) AS n FROM t').n,
+                    2,
+                );
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('rejects a named parameter absent from the SQL', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) => db.exec('SELECT 1', resolve));
+            try {
+                assert.throws(
+                    () => db.getSync('SELECT $a AS v', { $b: 1 }),
+                    /unknown named parameter "\$b"/,
+                );
+                const err = await new Promise((resolve) =>
+                    db.get('SELECT $a AS v', { $b: 1 }, (e) => resolve(e)),
+                );
+                assert.strictEqual(err.code, 'SQLITE_RANGE');
+                assert.match(err.message, /unknown named parameter "\$b"/);
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('rejects extra named keys (typos) via the arity check', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) => db.exec('SELECT 1', resolve));
+            try {
+                const err = await new Promise((resolve) =>
+                    db.get('SELECT $a AS v', { $a: 1, $typo: 2 }, (e) =>
+                        resolve(e),
+                    ),
+                );
+                assert.strictEqual(err.code, 'SQLITE_RANGE');
+                assert.match(err.message, /supplied 2 parameter\(s\)/);
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+    });
+
+    describe('typed-array blob acceptance', function () {
+        it('honours byteOffset on a Uint8Array (the naive .Data() read is off by the offset)', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) =>
+                db.exec('CREATE TABLE t (b)', resolve),
+            );
+            try {
+                // Exact-size ArrayBuffer: Buffer pooling would give
+                // backing.buffer a non-zero offset of its own.
+                const backing = new Uint8Array(16).fill(0xee);
+                backing.fill(0xab, 4, 12); // the 8 visible bytes
+                const view = new Uint8Array(backing.buffer, 4, 8);
+                db.runSync('INSERT INTO t VALUES (?)', [view]);
+                const read = db.getSync('SELECT b FROM t').b;
+                assert.ok(Buffer.isBuffer(read));
+                assert.strictEqual(read.length, 8);
+                assert.ok(read.equals(Buffer.alloc(8, 0xab)));
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('honours byteOffset on a DataView', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) =>
+                db.exec('CREATE TABLE t (b)', resolve),
+            );
+            try {
+                const backing = Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+                const view = new DataView(backing.buffer, 2, 4);
+                db.runSync('INSERT INTO t VALUES (?)', [view]);
+                const read = db.getSync('SELECT b FROM t').b;
+                assert.ok(read.equals(Buffer.from([2, 3, 4, 5])));
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('binds Uint8Array views over SharedArrayBuffer', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) =>
+                db.exec('CREATE TABLE t (b)', resolve),
+            );
+            try {
+                const sab = new SharedArrayBuffer(4);
+                const view = new Uint8Array(sab);
+                view.set([0xde, 0xad, 0xbe, 0xef]);
+                db.runSync('INSERT INTO t VALUES (?)', [view]);
+                assert.ok(
+                    db
+                        .getSync('SELECT b FROM t')
+                        .b.equals(Buffer.from([0xde, 0xad, 0xbe, 0xef])),
+                );
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+    });
+
+    describe('blob boundary sizes and lifetime', function () {
+        for (const size of [4095, 4096, 4097]) {
+            it(`round-trips a ${size}-byte blob and keeps the returned buffer valid after finalize`, async function () {
+                const db = new sqlite3.Database(':memory:');
+                await new Promise((resolve) =>
+                    db.exec('CREATE TABLE t (b)', resolve),
+                );
+                try {
+                    // 4096 is the external-buffer threshold in RowToJS:
+                    // sizes on both sides and exactly on it must behave
+                    // identically.
+                    const src = Buffer.alloc(size);
+                    for (let i = 0; i < size; i++) src[i] = (i * 251) % 256;
+                    db.runSync('INSERT INTO t VALUES (?)', [src]);
+
+                    const stmt = db.prepareSync('SELECT b FROM t');
+                    const read = stmt.getSync().b;
+                    stmt.finalize();
+
+                    // The payload of an external buffer is owned by the
+                    // buffer itself: it must outlive the statement.
+                    assert.ok(Buffer.isBuffer(read));
+                    assert.strictEqual(read.length, size);
+                    assert.ok(src.equals(read));
+                    read[0] = (read[0] + 1) % 256; // still writable
+                } finally {
+                    await new Promise((resolve) => db.close(resolve));
+                }
+            });
+        }
+    });
+
+    describe('unsupported types never coerce', function () {
+        it('no row ever contains the string "[object Object]"', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) =>
+                db.exec('CREATE TABLE t (v TEXT)', resolve),
+            );
+            try {
+                for (const v of [{ a: 1 }, [1, 2], new Map()]) {
+                    assert.throws(
+                        () => db.runSync('INSERT INTO t VALUES (?)', [v]),
+                        TypeError,
+                    );
+                }
+                assert.strictEqual(
+                    db.getSync('SELECT COUNT(*) AS n FROM t').n,
+                    0,
+                );
+                // And nothing matched the old coercion, either.
+                assert.strictEqual(
+                    db.getSync(
+                        "SELECT COUNT(*) AS n FROM t WHERE v = '[object Object]'",
+                    ).n,
+                    0,
+                );
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('error names the parameter index and the constructor', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) => db.exec('SELECT 1', resolve));
+            try {
+                assert.throws(
+                    () => db.runSync('SELECT ? AS a, ? AS b', [1, new Map()]),
+                    /Cannot bind parameter 2: unsupported type Map/,
+                );
+                class Gadget {}
+                assert.throws(
+                    () => db.runSync('SELECT ? AS a', [new Gadget()]),
+                    /Cannot bind parameter 1: unsupported type Gadget/,
+                );
+                assert.throws(
+                    () => db.runSync('SELECT ? AS a', [Symbol('s')]),
+                    /Cannot bind parameter 1: unsupported type Symbol/,
+                );
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
+        });
+
+        it('BigInt outside int64 throws RangeError with the digits', async function () {
+            const db = new sqlite3.Database(':memory:');
+            await new Promise((resolve) => db.exec('SELECT 1', resolve));
+            try {
+                assert.throws(
+                    () => db.runSync('SELECT ? AS a', [2n ** 63n]),
+                    (err) =>
+                        err instanceof RangeError &&
+                        /BigInt 9223372036854775808/.test(err.message),
+                );
+                assert.throws(
+                    () => db.runSync('SELECT ? AS a', [-(2n ** 63n) - 1n]),
+                    (err) =>
+                        err instanceof RangeError &&
+                        /BigInt -9223372036854775809/.test(err.message),
+                );
+            } finally {
+                await new Promise((resolve) => db.close(resolve));
+            }
         });
     });
 });

@@ -25,13 +25,15 @@ describe('serialize() and parallelize()', function () {
         const stmt1 = db.prepare('INSERT INTO foo VALUES(?, ?, ?, ?)');
         const stmt2 = db.prepare('INSERT INTO foo VALUES(?, ?, ?, ?)');
         for (let i = 0; i < count; i++) {
-            // Interleaved inserts with two statements.
-            stmt1.run(`String ${i}`, i, i * Math.PI, function (err) {
+            // Interleaved inserts with two statements. The 4th parameter
+            // is bound explicitly: v9 rejects a parameter-count mismatch
+            // instead of silently binding the missing ones as NULL.
+            stmt1.run(`String ${i}`, i, i * Math.PI, null, function (err) {
                 if (err) throw err;
                 inserted1++;
             });
             i++;
-            stmt2.run(`String ${i}`, i, i * Math.PI, function (err) {
+            stmt2.run(`String ${i}`, i, i * Math.PI, null, function (err) {
                 if (err) throw err;
                 inserted2++;
             });
@@ -87,7 +89,8 @@ describe('serialize(fn)', function () {
 
             const stmt = db.prepare('INSERT INTO foo VALUES(?, ?, ?, ?)');
             for (let i = 0; i < count; i++) {
-                stmt.run(`String ${i}`, i, i * Math.PI, function (err) {
+                // 4th parameter bound explicitly; v9 rejects mismatches.
+                stmt.run(`String ${i}`, i, i * Math.PI, null, function (err) {
                     if (err) throw err;
                     inserted++;
                 });

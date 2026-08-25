@@ -26,7 +26,8 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("configure", &Database::Configure, napi_default_method),
         InstanceMethod("interrupt", &Database::Interrupt, napi_default_method),
         InstanceMethod("_queueBusy", &Database::QueueBusy, napi_default_method),
-        InstanceAccessor("open", &Database::Open, nullptr)
+        InstanceAccessor("open", &Database::Open, nullptr),
+        InstanceAccessor("integerMode", &Database::IntegerModeGetter, nullptr)
     });
 
 #if NAPI_VERSION < 6
@@ -182,6 +183,11 @@ void Database::Work_Open(napi_env e, void* data) {
     else {
         // Set default database handle values.
         sqlite3_busy_timeout(db->_handle, 1000);
+        // Extended result codes: step failures report e.g.
+        // SQLITE_CONSTRAINT_UNIQUE instead of bare SQLITE_CONSTRAINT. The
+        // JS error gains err.code (extended name), err.errno (extended
+        // int) and err.primaryCode (primary name).
+        sqlite3_extended_result_codes(db->_handle, 1);
     }
 }
 
@@ -224,6 +230,15 @@ Napi::Value Database::Open(const Napi::CallbackInfo& info) {
     auto env = this->Env();
     auto* db = this;
     return Napi::Boolean::New(env, db->open);
+}
+
+Napi::Value Database::IntegerModeGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    switch (integer_mode) {
+        case INTEGER_BIGINT: return Napi::String::New(env, "bigint");
+        case INTEGER_MIXED:  return Napi::String::New(env, "mixed");
+        default:             return Napi::String::New(env, "number");
+    }
 }
 
 Napi::Value Database::QueueBusy(const Napi::CallbackInfo& info) {
@@ -387,6 +402,32 @@ Napi::Value Database::Configure(const Napi::CallbackInfo& info) {
         int value = info[2].As<Napi::Number>().Int32Value();
         Baton* baton = new LimitBaton(db, handle, id, value);
         db->Schedule(SetLimit, baton);
+    }
+    else if (info[0].StrictEquals(Napi::String::New(env, "integerMode"))) {
+        // Pure JS-side marshalling state: applied immediately, no sqlite
+        // handle access, so unlike the other options it needs no baton.
+        if (!info[1].IsString()) {
+            Napi::TypeError::New(env,
+                "integerMode must be one of 'number', 'bigint', 'mixed'"
+            ).ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        std::string mode = info[1].As<Napi::String>().Utf8Value();
+        if (mode == "number") {
+            integer_mode = INTEGER_NUMBER;
+        }
+        else if (mode == "bigint") {
+            integer_mode = INTEGER_BIGINT;
+        }
+        else if (mode == "mixed") {
+            integer_mode = INTEGER_MIXED;
+        }
+        else {
+            Napi::TypeError::New(env,
+                "integerMode must be one of 'number', 'bigint', 'mixed'"
+            ).ThrowAsJavaScriptException();
+            return env.Null();
+        }
     }
     else if (info[0].StrictEquals(Napi::String::New(env, "change"))) {
        auto* baton = new Baton(db, handle);

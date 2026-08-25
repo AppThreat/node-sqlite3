@@ -152,6 +152,58 @@ old queue-jumping behaviour may see operations complete in a different
 order. Parallel throughput is unchanged: the queue is only non-empty once
 something has had to wait.
 
+## Value marshalling (v9)
+
+### Integer modes
+
+```js
+db.getSync("SELECT COUNT(*) AS n FROM t").n;   // number (default)
+db.configure("integerMode", "mixed");          // or 'number' | 'bigint'
+db.integerMode;                                // 'mixed'
+```
+
+Integers are stored as true 64-bit values on both the bind and the read
+path, and `BigInt` parameters bind exactly. Reads follow the configured
+mode:
+
+| Mode | INTEGER columns and `lastID` |
+|---|---|
+| `'number'` (default) | `number` when safely representable, otherwise a `RangeError` — never a silently truncated double |
+| `'bigint'` | always `BigInt` |
+| `'mixed'` | `number` when safe, `BigInt` otherwise — recommended for anything touching `rowid`s |
+
+`Statement#lastIDBigInt` returns the last insert rowid as a `BigInt` in
+every mode, so `'number'`-mode code can still read a large rowid without
+switching modes.
+
+### Accepted bind values
+
+`string`, `number` (integral values within the int64 range bind as
+INTEGER; the double `2**63` clamps to `2**63-1`), `bigint` (`RangeError`
+outside the signed 64-bit range), `boolean` (0/1), `null` and `undefined`
+(both NULL), `Date` (epoch milliseconds as REAL — documented, lossy in
+type), `RegExp` (its source string), and any binary view: Node `Buffer`,
+`Uint8Array`/`Float64Array`/… (byte range honoured), `DataView`
+(byte range honoured), `ArrayBuffer`.
+
+Everything else — plain objects, arrays, `Map`, class instances, symbols,
+functions — throws a `TypeError` naming the parameter index and the
+constructor. Bind the number of parameters the statement takes: too few
+(previously silently NULL) and too many (previously ignored) are both
+errors now, and a named parameter absent from the SQL (`sqlite3_bind_parameter_index`
+returning 0) throws as well.
+
+### Extended result codes
+
+Errors carry three properties: `err.code` (the extended name, e.g.
+`SQLITE_CONSTRAINT_UNIQUE`), `err.errno` (the extended number) and
+`err.primaryCode` (the primary name, e.g. `SQLITE_CONSTRAINT`). The
+`SQLITE_CONSTRAINT_*`, `SQLITE_BUSY_*`, `SQLITE_READONLY_*`,
+`SQLITE_IOERR_*`, `SQLITE_CANTOPEN_*`, `SQLITE_LOCKED_*`,
+`SQLITE_CORRUPT_*`, `SQLITE_ERROR_*`, `SQLITE_ABORT_ROLLBACK` and
+`SQLITE_AUTH_USER` constants are exported, as are the previously missing
+open flags `OPEN_NOMUTEX`, `OPEN_MEMORY` and `OPEN_EXRESCODE`.
+
 ## Source install
 
 To skip searching for pre-compiled binaries, and force a build from source, use

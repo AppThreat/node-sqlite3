@@ -166,7 +166,14 @@ describe('sync api', function () {
                     ins.runSync(1);
                 },
                 function (err) {
-                    assert.strictEqual(err.code, 'SQLITE_CONSTRAINT');
+                    // v9 reports the extended code; the primary code
+                    // moved to err.primaryCode. INTEGER PRIMARY KEY
+                    // conflicts report CONSTRAINT_PRIMARYKEY.
+                    assert.strictEqual(
+                        err.code,
+                        'SQLITE_CONSTRAINT_PRIMARYKEY',
+                    );
+                    assert.strictEqual(err.primaryCode, 'SQLITE_CONSTRAINT');
                     return true;
                 },
             );

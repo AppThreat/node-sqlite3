@@ -1,7 +1,9 @@
 #ifndef NODE_SQLITE3_SRC_MACROS_H
 #define NODE_SQLITE3_SRC_MACROS_H
 
-const char* sqlite_code_string(int code);
+#include <string>
+
+std::string sqlite_code_string(int code);
 const char* sqlite_authorizer_string(int type);
 #include <vector>
 
@@ -111,7 +113,9 @@ inline bool OtherIsInt(Napi::Number source) {
     Napi::Object name ##_obj = name.As<Napi::Object>();                        \
     (name ##_obj).Set( Napi::String::New(env, "errno"), Napi::Number::New(env, errno)); \
     (name ##_obj).Set( Napi::String::New(env, "code"),                         \
-        Napi::String::New(env, sqlite_code_string(errno)));
+        Napi::String::New(env, sqlite_code_string(errno)));                    \
+    (name ##_obj).Set( Napi::String::New(env, "primaryCode"),                  \
+        Napi::String::New(env, sqlite_code_string((errno) & 0xff)));
 
 
 #define EMIT_EVENT(obj, argc, argv)                                            \

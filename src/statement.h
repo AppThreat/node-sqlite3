@@ -27,6 +27,11 @@ namespace Values {
         unsigned short type;
         unsigned short index;
         std::string name;
+        // Set when the value came from an explicit `undefined` (as opposed
+        // to `null`): used only to recognise the historical
+        // "accidental undefined" call shape against statements without
+        // parameters.
+        bool from_undefined = false;
 
         virtual ~Field() = default;
     };
@@ -56,13 +61,14 @@ namespace Values {
         template <class T> inline Blob(T _name, size_t len, const void* val) :
                 Field(_name, SQLITE_BLOB), length(len) {
             value = new char[len];
-            assert(value != nullptr);
-            memcpy(value, val, len);
+            if (len > 0) {
+                memcpy(value, val, len);
+            }
         }
         inline virtual ~Blob() override {
             delete[] value;
         }
-        int length;
+        size_t length;
         char* value;
     };
 
@@ -124,6 +130,10 @@ public:
         Statement* stmt;
         Napi::FunctionReference callback;
         Parameters parameters;
+        // True when the call site passed a bind argument at all (possibly
+        // an empty array/object). False means "re-step with the previous
+        // bindings", which must skip the parameter-count check.
+        bool bind_supplied = false;
 
         Baton(Statement* stmt_, Napi::Function cb_) : stmt(stmt_) {
             stmt->Ref();
@@ -273,6 +283,13 @@ public:
     Napi::Value RunSync(const Napi::CallbackInfo& info);
     Napi::Value AllSync(const Napi::CallbackInfo& info);
 
+    // Mode-aware accessors for the result of the last run(). lastID throws
+    // a RangeError in 'number' mode when the rowid is not a safe integer;
+    // lastIDBigInt is exact in every mode. changes is always a safe number.
+    Napi::Value GetLastID(const Napi::CallbackInfo& info);
+    Napi::Value GetLastIDBigInt(const Napi::CallbackInfo& info);
+    Napi::Value GetChanges(const Napi::CallbackInfo& info);
+
 protected:
     static void Work_BeginPrepare(Database::Baton* baton);
     static void Work_Prepare(napi_env env, void* data);
@@ -286,13 +303,20 @@ protected:
 
     template <class T> inline std::unique_ptr<Values::Field> BindParameter(const Napi::Value source, T pos);
     template <class T> T* Bind(const Napi::CallbackInfo& info, int start = 0, int end = -1);
-    bool Bind(Parameters&& parameters);
+    bool Bind(Parameters&& parameters, bool supplied);
 
     static void GetRow(Row* row, sqlite3_stmt* stmt, Columns* columns);
     // Rebuilds the rooted JS key strings if `columns` differs from the set
     // they were built from. Call once per batch, before RowToJS.
     void SyncColumnKeys(Napi::Env env, const Columns& columns);
     Napi::Value RowToJS(Napi::Env env, Row* row);
+    // Converts an int64 cell/rowid according to the database's integer
+    // mode. Throws a RangeError in 'number' mode for unsafe values;
+    // callers must check env.IsExceptionPending() afterwards.
+    Napi::Value Int64ToJS(Napi::Env env, sqlite3_int64 value, const std::string& what);
+    // Stores the result of a completed run() for the lastID/lastIDBigInt/
+    // changes accessors.
+    void RecordRunResult(sqlite3_int64 id, int changes);
     void Schedule(Work_Callback callback, Baton* baton);
     void Process();
     void CleanQueue();
@@ -317,9 +341,11 @@ protected:
     bool locked = true;
     bool finalized = false;
 
-    // Lazily-created persistent keys for the run() result properties.
-    Napi::Reference<Napi::String> key_last_id;
-    Napi::Reference<Napi::String> key_changes;
+    // Result of the most recent run(), exposed through the lastID,
+    // lastIDBigInt and changes accessors.
+    sqlite3_int64 last_insert_id = 0;
+    int last_changes = 0;
+    bool has_run_result = false;
 
     // Payloads of the currently SQLITE_STATIC-bound text/blob parameters.
     // Owned until the next rebind or finalize so sqlite never sees a
