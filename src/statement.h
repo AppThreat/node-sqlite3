@@ -69,9 +69,48 @@ namespace Values {
     typedef Field Null;
 }
 
-typedef std::vector<std::unique_ptr<Values::Field> > Row;
-typedef std::vector<std::unique_ptr<Row> > Rows;
-typedef Row Parameters;
+// A converted result cell: a flat value type instead of a per-cell heap
+// object. TEXT payload and BLOB bytes live in `str` (binary-safe).
+struct Cell {
+    unsigned short type = SQLITE_NULL;
+    int64_t integer = 0;
+    double real = 0.;
+    std::string str;
+
+    Cell() = default;
+    explicit Cell(unsigned short t) : type(t) {}
+    Cell(const Cell&) = default;
+    Cell(Cell&&) = default;
+    Cell& operator=(const Cell&) = default;
+    Cell& operator=(Cell&&) = default;
+};
+
+typedef std::vector<Cell> Row;
+typedef std::vector<Row> Rows;
+typedef std::vector<std::unique_ptr<Values::Field>> Parameters;
+
+// Result column names captured from a prepared statement, shared by every
+// row of one batch instead of being stored per cell.
+//
+// The shape is fixed for one execution: sqlite3_prepare_v2 may re-prepare
+// transparently behind sqlite3_step() when the schema changed, but it keeps
+// the original result columns. Capturing once per call therefore stays
+// correct without relying on the names surviving across calls.
+struct Columns {
+    std::vector<std::string> names;
+
+    // Populates the names on first use. Called on the thread that steps the
+    // statement, once per execution.
+    inline void EnsureLoaded(sqlite3_stmt* stmt) {
+        if (!names.empty()) return;
+        int cols = sqlite3_column_count(stmt);
+        names.reserve(cols);
+        for (int i = 0; i < cols; i++) {
+            const char* name = sqlite3_column_name(stmt, i);
+            names.emplace_back(name != NULL ? name : "");
+        }
+    }
+};
 
 
 
@@ -102,6 +141,7 @@ public:
         RowBaton(Statement* stmt_, Napi::Function cb_) :
             Baton(stmt_, cb_) {}
         Row row;
+        Columns columns;
         virtual ~RowBaton() override = default;
     };
 
@@ -117,6 +157,7 @@ public:
         RowsBaton(Statement* stmt_, Napi::Function cb_) :
             Baton(stmt_, cb_) {}
         Rows rows;
+        Columns columns;
         virtual ~RowsBaton() override = default;
     };
 
@@ -162,6 +203,10 @@ public:
         uv_async_t watcher;
         Statement* stmt;
         Rows data;
+        // Column names for the rows currently in `data`. Written by the
+        // worker thread and read by the main thread, both under the mutex
+        // below, so a mid-stream re-prepare cannot be missed.
+        Columns columns;
         NODE_SQLITE3_MUTEX_t;
         bool completed;
         int retrieved;
@@ -204,6 +249,30 @@ public:
 
     Napi::Value Finalize_(const Napi::CallbackInfo& info);
 
+    // End-of-call bookkeeping for an asynchronous statement operation.
+    void EndCall();
+
+    // Runs EndCall() on every exit path from a Work_After* handler. This
+    // matters because TRY_CATCH_CALL returns early when a JS callback
+    // throws: doing the bookkeeping inline would then be skipped, leaving
+    // `locked` set and db->pending elevated forever. The statement's queue
+    // would never drain again and the sync fast path's idle gate could
+    // never pass, so one throwing callback would permanently disable
+    // getSync/runSync/allSync on that connection.
+    struct CallGuard {
+        Statement* stmt;
+        explicit CallGuard(Statement* s) : stmt(s) {}
+        ~CallGuard() { stmt->EndCall(); }
+        CallGuard(const CallGuard&) = delete;
+        CallGuard& operator=(const CallGuard&) = delete;
+    };
+
+    // Opt-in synchronous fast path. Only legal when the database is fully
+    // idle (no worker in flight, nothing queued); otherwise throws.
+    Napi::Value GetSync(const Napi::CallbackInfo& info);
+    Napi::Value RunSync(const Napi::CallbackInfo& info);
+    Napi::Value AllSync(const Napi::CallbackInfo& info);
+
 protected:
     static void Work_BeginPrepare(Database::Baton* baton);
     static void Work_Prepare(napi_env env, void* data);
@@ -217,14 +286,27 @@ protected:
 
     template <class T> inline std::unique_ptr<Values::Field> BindParameter(const Napi::Value source, T pos);
     template <class T> T* Bind(const Napi::CallbackInfo& info, int start = 0, int end = -1);
-    bool Bind(const Parameters &parameters);
+    bool Bind(Parameters&& parameters);
 
-    static void GetRow(Row* row, sqlite3_stmt* stmt);
-    static Napi::Value RowToJS(Napi::Env env, Row* row);
+    static void GetRow(Row* row, sqlite3_stmt* stmt, Columns* columns);
+    // Rebuilds the rooted JS key strings if `columns` differs from the set
+    // they were built from. Call once per batch, before RowToJS.
+    void SyncColumnKeys(Napi::Env env, const Columns& columns);
+    Napi::Value RowToJS(Napi::Env env, Row* row);
     void Schedule(Work_Callback callback, Baton* baton);
     void Process();
     void CleanQueue();
     template <class T> static void Error(T* baton);
+
+    // True when nothing anywhere on this database is in flight or queued,
+    // so sqlite can be driven from the main thread without racing the
+    // worker pool or breaking FIFO ordering.
+    bool IdleForInline();
+    // Throws the pending status/message as a JS error with errno/code.
+    void ThrowStatementError(Napi::Env env);
+    // Shared gate + argument extraction for the sync methods. Returns a
+    // prepared baton or NULL after throwing.
+    template <class T> T* BindSync(const Napi::CallbackInfo& info);
 
 protected:
     Database* db;
@@ -234,6 +316,20 @@ protected:
     bool prepared = false;
     bool locked = true;
     bool finalized = false;
+
+    // Lazily-created persistent keys for the run() result properties.
+    Napi::Reference<Napi::String> key_last_id;
+    Napi::Reference<Napi::String> key_changes;
+
+    // Payloads of the currently SQLITE_STATIC-bound text/blob parameters.
+    // Owned until the next rebind or finalize so sqlite never sees a
+    // dangling pointer when a statement is stepped again without rebinding.
+    Parameters bound_payloads;
+
+    // Rooted JS key strings used for row conversion, plus the column names
+    // they were built from so a schema change can invalidate them.
+    std::vector<std::string> column_keys_source;
+    std::vector<Napi::Reference<Napi::String>> column_keys;
 
     std::queue<Call*> queue;
     std::string message;

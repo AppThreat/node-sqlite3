@@ -22,6 +22,9 @@ Napi::Object Statement::Init(Napi::Env env, Napi::Object exports) {
       InstanceMethod("each", &Statement::Each, napi_default_method),
       InstanceMethod("reset", &Statement::Reset, napi_default_method),
       InstanceMethod("finalize", &Statement::Finalize_, napi_default_method),
+      InstanceMethod("getSync", &Statement::GetSync, napi_default_method),
+      InstanceMethod("runSync", &Statement::RunSync, napi_default_method),
+      InstanceMethod("allSync", &Statement::AllSync, napi_default_method),
     });
 
     exports.Set("Statement", t);
@@ -87,7 +90,10 @@ template <class T> void Statement::Error(T* baton) {
     }
 }
 
-// { Database db, String sql, Array params, Function callback }
+// { Database db, String sql, [Function callback], [Boolean sync] }
+// The trailing boolean is used by Database#prepareSync: it prepares the
+// statement inline instead of through the worker pool. The database must
+// be fully idle for that to be safe.
 Statement::Statement(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Statement>(info) {
     auto env = info.Env();
     int length = info.Length();
@@ -112,11 +118,44 @@ Statement::Statement(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Statemen
 
     info.This().As<Napi::Object>().DefineProperty(Napi::PropertyDescriptor::Value("sql", sql, napi_default));
 
+    std::string sql_str = sql.Utf8Value();
+    // Preserve the historical NUL-truncation semantics of c_str().
+    sql_str.resize(std::strlen(sql_str.c_str()));
 
     Statement* stmt = this;
 
+    if (length > 3 && info[3].IsBoolean() && info[3].As<Napi::Boolean>().Value()) {
+        // Synchronous prepare. The idle gate mirrors IdleForInline()
+        // (db->locked is sticky history, not an in-flight marker).
+        if (!db->IsOpen() || db->closing || db->pending > 0
+                || !db->queue.empty()) {
+            Napi::Error::New(env,
+                "database is busy: sync methods require a fully idle database"
+            ).ThrowAsJavaScriptException();
+            return;
+        }
+
+        sqlite3_mutex* mtx = sqlite3_db_mutex(db->_handle);
+        sqlite3_mutex_enter(mtx);
+        status = sqlite3_prepare_v2(db->_handle, sql_str.c_str(),
+            sql_str.size(), &_handle, NULL);
+        if (status != SQLITE_OK) {
+            message = std::string(sqlite3_errmsg(db->_handle));
+            _handle = NULL;
+        }
+        sqlite3_mutex_leave(mtx);
+
+        if (status != SQLITE_OK) {
+            ThrowStatementError(env);
+            return;
+        }
+        prepared = true;
+        locked = false; // no STATEMENT_END will run for this path
+        return;
+    }
+
     auto* baton = new PrepareBaton(this->db, info[2].As<Napi::Function>(), stmt);
-    baton->sql = std::string(sql.As<Napi::String>().Utf8Value().c_str());
+    baton->sql = std::move(sql_str);
     this->db->Schedule(Work_BeginPrepare, baton);
 }
 
@@ -152,12 +191,25 @@ void Statement::Work_Prepare(napi_env e, void* data) {
     sqlite3_mutex_leave(mtx);
 }
 
+void Statement::EndCall() {
+    assert(locked);
+    assert(db->pending);
+    locked = false;
+    db->pending--;
+    Process();
+    db->Process();
+}
+
 void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
     std::unique_ptr<PrepareBaton> baton(static_cast<PrepareBaton*>(data));
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
     Napi::HandleScope scope(env);
+
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
 
     if (stmt->status != SQLITE_OK) {
         Error(baton.get());
@@ -171,18 +223,14 @@ void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
             TRY_CATCH_CALL(stmt->Value(), cb, 1, argv);
         }
     }
-
-    STATEMENT_END();
 }
 
 template <class T> std::unique_ptr<Values::Field>
                    Statement::BindParameter(const Napi::Value source, T pos) {
+    // Order matters: cheap primitive checks run before the object checks
+    // (InstanceOf lookups hit the global object).
     if (source.IsString()) {
         std::string val = source.As<Napi::String>().Utf8Value();
-        return std::make_unique<Values::Text>(pos, val.length(), val.c_str());
-    }
-    else if (OtherInstanceOf(source.As<Object>(), "RegExp")) {
-        std::string val = source.ToString().Utf8Value();
         return std::make_unique<Values::Text>(pos, val.length(), val.c_str());
     }
     else if (source.IsNumber()) {
@@ -202,10 +250,14 @@ template <class T> std::unique_ptr<Values::Field>
         Napi::Buffer<char> buffer = source.As<Napi::Buffer<char>>();
         return std::make_unique<Values::Blob>(pos, buffer.Length(), buffer.Data());
     }
-    else if (OtherInstanceOf(source.As<Object>(), "Date")) {
-        return std::make_unique<Values::Float>(pos, source.ToNumber().DoubleValue());
+    else if (source.IsDate()) {
+        return std::make_unique<Values::Float>(pos, source.As<Napi::Date>().ValueOf());
     }
     else if (source.IsObject()) {
+        if (OtherInstanceOf(source.As<Object>(), "RegExp")) {
+            std::string val = source.ToString().Utf8Value();
+            return std::make_unique<Values::Text>(pos, val.length(), val.c_str());
+        }
         auto napiVal = Napi::String::New(source.Env(), "[object Object]");
         // Check whether toString returned a value that is not undefined.
         if(napiVal.Type() == 0) {
@@ -237,15 +289,20 @@ template <class T> T* Statement::Bind(const Napi::CallbackInfo& info, int start,
         if (info[start].IsArray()) {
             auto array = info[start].As<Napi::Array>();
             int length = array.Length();
+            baton->parameters.reserve(length);
             // Note: bind parameters start with 1.
             for (int i = 0, pos = 1; i < length; i++, pos++) {
                 baton->parameters.emplace_back(BindParameter((array).Get(i), i + 1));
             }
         }
-        else if (!info[start].IsObject() || OtherInstanceOf(info[start].As<Object>(), "RegExp") 
-                || OtherInstanceOf(info[start].As<Object>(), "Date") || info[start].IsBuffer()) {
+        // Cheap checks first; IsDate matches across realms, and the RegExp
+        // global lookup only runs once the value is known to be an object.
+        else if (!info[start].IsObject() || info[start].IsBuffer()
+                || info[start].IsDate()
+                || OtherInstanceOf(info[start].As<Object>(), "RegExp")) {
             // Parameters directly in array.
             // Note: bind parameters start with 1.
+            baton->parameters.reserve(last - start);
             for (int i = start, pos = 1; i < last; i++, pos++) {
                 baton->parameters.emplace_back(BindParameter(info[i], pos));
             }
@@ -254,6 +311,7 @@ template <class T> T* Statement::Bind(const Napi::CallbackInfo& info, int start,
             auto object = info[start].As<Napi::Object>();
             auto array = object.GetPropertyNames();
             int length = array.Length();
+            baton->parameters.reserve(length);
             for (int i = 0; i < length; i++) {
                 Napi::Value name = (array).Get(i);
                 Napi::Number num = name.ToNumber();
@@ -276,13 +334,19 @@ template <class T> T* Statement::Bind(const Napi::CallbackInfo& info, int start,
     return baton;
 }
 
-bool Statement::Bind(const Parameters & parameters) {
+bool Statement::Bind(Parameters&& parameters) {
     if (parameters.empty()) {
+        // Keep bound_payloads alive: the previous SQLITE_STATIC bindings are
+        // still referenced if the statement is stepped again without a rebind.
         return true;
     }
 
     sqlite3_reset(_handle);
     sqlite3_clear_bindings(_handle);
+
+    // Hold the previous payloads until every parameter has been rebound.
+    Parameters stale;
+    stale.swap(bound_payloads);
 
     for (auto& field : parameters) {
         if (field == NULL)
@@ -306,14 +370,18 @@ bool Statement::Bind(const Parameters & parameters) {
                     (static_cast<Values::Float*>(field.get()))->value);
             } break;
             case SQLITE_TEXT: {
+                // SQLITE_STATIC is safe: the payload is moved into
+                // bound_payloads below and stays alive until rebind/finalize.
+                auto* f = static_cast<Values::Text*>(field.get());
                 status = sqlite3_bind_text(_handle, pos,
-                    (static_cast<Values::Text*>(field.get()))->value.c_str(),
-                    (static_cast<Values::Text*>(field.get()))->value.size(), SQLITE_TRANSIENT);
+                    f->value.c_str(), f->value.size(), SQLITE_STATIC);
+                if (status == SQLITE_OK) bound_payloads.emplace_back(std::move(field));
             } break;
             case SQLITE_BLOB: {
+                auto* f = static_cast<Values::Blob*>(field.get());
                 status = sqlite3_bind_blob(_handle, pos,
-                    (static_cast<Values::Blob*>(field.get()))->value,
-                    (static_cast<Values::Blob*>(field.get()))->length, SQLITE_TRANSIENT);
+                    f->value, f->length, SQLITE_STATIC);
+                if (status == SQLITE_OK) bound_payloads.emplace_back(std::move(field));
             } break;
             case SQLITE_NULL: {
                 status = sqlite3_bind_null(_handle, pos);
@@ -321,6 +389,10 @@ bool Statement::Bind(const Parameters & parameters) {
         }
 
             if (status != SQLITE_OK) {
+                // Clear every binding so no stale SQLITE_STATIC pointer can
+                // dangle into the payloads we are about to release.
+                sqlite3_clear_bindings(_handle);
+                bound_payloads.clear();
                 message = std::string(sqlite3_errmsg(db->_handle));
                 return false;
             }
@@ -353,7 +425,7 @@ void Statement::Work_Bind(napi_env e, void* data) {
 
     STATEMENT_MUTEX(mtx);
     sqlite3_mutex_enter(mtx);
-    stmt->Bind(baton->parameters);
+    stmt->Bind(std::move(baton->parameters));
     sqlite3_mutex_leave(mtx);
 }
 
@@ -363,6 +435,10 @@ void Statement::Work_AfterBind(napi_env e, napi_status status, void* data) {
 
     auto env = stmt->Env();
     Napi::HandleScope scope(env);
+
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
 
     if (stmt->status != SQLITE_OK) {
         Error(baton.get());
@@ -375,8 +451,6 @@ void Statement::Work_AfterBind(napi_env e, napi_status status, void* data) {
             TRY_CATCH_CALL(stmt->Value(), cb, 1, argv);
         }
     }
-
-    STATEMENT_END();
 }
 
 
@@ -407,7 +481,7 @@ void Statement::Work_Get(napi_env e, void* data) {
         STATEMENT_MUTEX(mtx);
         sqlite3_mutex_enter(mtx);
 
-        if (stmt->Bind(baton->parameters)) {
+        if (stmt->Bind(std::move(baton->parameters))) {
             stmt->status = sqlite3_step(stmt->_handle);
 
             if (!(stmt->status == SQLITE_ROW || stmt->status == SQLITE_DONE)) {
@@ -419,7 +493,7 @@ void Statement::Work_Get(napi_env e, void* data) {
 
         if (stmt->status == SQLITE_ROW) {
             // Acquire one result row before returning.
-            GetRow(&baton->row, stmt->_handle);
+            GetRow(&baton->row, stmt->_handle, &baton->columns);
         }
     }
 }
@@ -431,6 +505,10 @@ void Statement::Work_AfterGet(napi_env e, napi_status status, void* data) {
     auto env = stmt->Env();
     Napi::HandleScope scope(env);
 
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
+
     if (stmt->status != SQLITE_ROW && stmt->status != SQLITE_DONE) {
         Error(baton.get());
     }
@@ -440,7 +518,8 @@ void Statement::Work_AfterGet(napi_env e, napi_status status, void* data) {
         if (IS_FUNCTION(cb)) {
             if (stmt->status == SQLITE_ROW) {
                 // Create the result array from the data we acquired.
-                Napi::Value argv[] = { env.Null(), RowToJS(env, &baton->row) };
+                stmt->SyncColumnKeys(env, baton->columns);
+                Napi::Value argv[] = { env.Null(), stmt->RowToJS(env, &baton->row) };
                 TRY_CATCH_CALL(stmt->Value(), cb, 2, argv);
             }
             else {
@@ -449,8 +528,6 @@ void Statement::Work_AfterGet(napi_env e, napi_status status, void* data) {
             }
         }
     }
-
-    STATEMENT_END();
 }
 
 Napi::Value Statement::Run(const Napi::CallbackInfo& info) {
@@ -483,7 +560,7 @@ void Statement::Work_Run(napi_env e, void* data) {
         sqlite3_reset(stmt->_handle);
     }
 
-    if (stmt->Bind(baton->parameters)) {
+    if (stmt->Bind(std::move(baton->parameters))) {
         stmt->status = sqlite3_step(stmt->_handle);
 
         if (!(stmt->status == SQLITE_ROW || stmt->status == SQLITE_DONE)) {
@@ -505,6 +582,10 @@ void Statement::Work_AfterRun(napi_env e, napi_status status, void* data) {
     auto env = stmt->Env();
     Napi::HandleScope scope(env);
 
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
+
     if (stmt->status != SQLITE_ROW && stmt->status != SQLITE_DONE) {
         Error(baton.get());
     }
@@ -512,15 +593,17 @@ void Statement::Work_AfterRun(napi_env e, napi_status status, void* data) {
         // Fire callbacks.
         Napi::Function cb = baton->callback.Value();
         if (IS_FUNCTION(cb)) {
-            (stmt->Value()).Set(Napi::String::New(env, "lastID"), Napi::Number::New(env, baton->inserted_id));
-            (stmt->Value()).Set( Napi::String::New(env, "changes"), Napi::Number::New(env, baton->changes));
+            if (stmt->key_last_id.IsEmpty()) {
+                stmt->key_last_id = Napi::Persistent(Napi::String::New(env, "lastID"));
+                stmt->key_changes = Napi::Persistent(Napi::String::New(env, "changes"));
+            }
+            (stmt->Value()).Set(stmt->key_last_id.Value(), Napi::Number::New(env, baton->inserted_id));
+            (stmt->Value()).Set(stmt->key_changes.Value(), Napi::Number::New(env, baton->changes));
 
             Napi::Value argv[] = { env.Null() };
             TRY_CATCH_CALL(stmt->Value(), cb, 1, argv);
         }
     }
-
-    STATEMENT_END();
 }
 
 Napi::Value Statement::All(const Napi::CallbackInfo& info) {
@@ -553,13 +636,11 @@ void Statement::Work_All(napi_env e, void* data) {
         sqlite3_reset(stmt->_handle);
     }
 
-    if (stmt->Bind(baton->parameters)) {
+    if (stmt->Bind(std::move(baton->parameters))) {
         while ((stmt->status = sqlite3_step(stmt->_handle)) == SQLITE_ROW) {
-            auto row = std::make_unique<Row>();
-            GetRow(row.get(), stmt->_handle);
-            baton->rows.emplace_back(std::move(row));
+            baton->rows.emplace_back();
+            GetRow(&baton->rows.back(), stmt->_handle, &baton->columns);
         }
-
         if (stmt->status != SQLITE_DONE) {
             stmt->message = std::string(sqlite3_errmsg(stmt->db->_handle));
         }
@@ -575,37 +656,44 @@ void Statement::Work_AfterAll(napi_env e, napi_status status, void* data) {
     auto env = stmt->Env();
     Napi::HandleScope scope(env);
 
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
+
     if (stmt->status != SQLITE_DONE) {
         Error(baton.get());
+        return;
     }
-    else {
-        // Fire callbacks.
-        Napi::Function cb = baton->callback.Value();
-        if (IS_FUNCTION(cb)) {
-            if (baton->rows.size()) {
-                // Create the result array from the data we acquired.
-                Napi::Array result(Napi::Array::New(env, baton->rows.size()));
-                auto it = static_cast<Rows::const_iterator>(baton->rows.begin());
-                decltype(it) end = baton->rows.end();
-                for (int i = 0; it < end; ++it, i++) {
-                    (result).Set(i, RowToJS(env, it->get()));
-                }
 
-                Napi::Value argv[] = { env.Null(), result };
-                TRY_CATCH_CALL(stmt->Value(), cb, 2, argv);
+    // Fire callbacks.
+    //
+    // Note: conversion is deliberately a single synchronous pass. Spreading
+    // it over several event-loop turns would release the statement lock
+    // early and let later-queued operations report before this one, which
+    // breaks the FIFO callback ordering that serialize() depends on.
+    Napi::Function cb = baton->callback.Value();
+
+    if (IS_FUNCTION(cb)) {
+        if (baton->rows.size()) {
+            // Create the result array from the data we acquired.
+            stmt->SyncColumnKeys(env, baton->columns);
+            Napi::Array result(Napi::Array::New(env, baton->rows.size()));
+            for (size_t i = 0; i < baton->rows.size(); i++) {
+                (result).Set(i, stmt->RowToJS(env, &baton->rows[i]));
             }
-            else {
-                // There were no result rows.
-                Napi::Value argv[] = {
-                    env.Null(),
-                    Napi::Array::New(env, 0)
-                };
-                TRY_CATCH_CALL(stmt->Value(), cb, 2, argv);
-            }
+
+            Napi::Value argv[] = { env.Null(), result };
+            TRY_CATCH_CALL(stmt->Value(), cb, 2, argv);
+        }
+        else {
+            // There were no result rows.
+            Napi::Value argv[] = {
+                env.Null(),
+                Napi::Array::New(env, 0)
+            };
+            TRY_CATCH_CALL(stmt->Value(), cb, 2, argv);
         }
     }
-
-    STATEMENT_END();
 }
 
 Napi::Value Statement::Each(const Napi::CallbackInfo& info) {
@@ -654,27 +742,39 @@ void Statement::Work_Each(napi_env e, void* data) {
         sqlite3_reset(stmt->_handle);
     }
 
-    if (stmt->Bind(baton->parameters)) {
+    sqlite3_mutex_enter(mtx);
+    bool bound = stmt->Bind(std::move(baton->parameters));
+    sqlite3_mutex_leave(mtx);
+
+    if (bound) {
         while (true) {
+            // Reacquire per row rather than holding the connection mutex for
+            // the whole result set: other statements on this database must
+            // still make progress while a long each() streams.
+            //
+            // GetRow stays inside the lock, since sqlite3_column_* reads the
+            // statement's own state and is not safe to run concurrently with
+            // another thread using the same connection.
             sqlite3_mutex_enter(mtx);
             stmt->status = sqlite3_step(stmt->_handle);
-            if (stmt->status == SQLITE_ROW) {
-                sqlite3_mutex_leave(mtx);
-                auto row = std::make_unique<Row>();
-                GetRow(row.get(), stmt->_handle);
-                NODE_SQLITE3_MUTEX_LOCK(&async->mutex)
-                async->data.emplace_back(std::move(row));
-                NODE_SQLITE3_MUTEX_UNLOCK(&async->mutex)
-
-                uv_async_send(&async->watcher);
-            }
-            else {
+            if (stmt->status != SQLITE_ROW) {
                 if (stmt->status != SQLITE_DONE) {
                     stmt->message = std::string(sqlite3_errmsg(stmt->db->_handle));
                 }
                 sqlite3_mutex_leave(mtx);
                 break;
             }
+
+            NODE_SQLITE3_MUTEX_LOCK(&async->mutex)
+            async->data.emplace_back();
+            GetRow(&async->data.back(), stmt->_handle, &async->columns);
+            NODE_SQLITE3_MUTEX_UNLOCK(&async->mutex)
+            sqlite3_mutex_leave(mtx);
+
+            // uv_async_send already coalesces: it is a cheap atomic test when
+            // a wakeup is pending, so signalling per row costs almost nothing
+            // and keeps each() streaming instead of batching to the end.
+            uv_async_send(&async->watcher);
         }
     }
 
@@ -698,8 +798,10 @@ void Statement::AsyncEach(uv_async_t* handle) {
     while (true) {
         // Get the contents out of the data cache for us to process in the JS callback.
         Rows rows;
+        Columns columns;
         NODE_SQLITE3_MUTEX_LOCK(&async->mutex)
         rows.swap(async->data);
+        columns = async->columns;
         NODE_SQLITE3_MUTEX_UNLOCK(&async->mutex)
 
         if (rows.empty()) {
@@ -711,8 +813,9 @@ void Statement::AsyncEach(uv_async_t* handle) {
             Napi::Value argv[2];
             argv[0] = env.Null();
 
-            for(auto& row : rows) {
-                argv[1] = RowToJS(env,row.get());
+            async->stmt->SyncColumnKeys(env, columns);
+            for (auto& row : rows) {
+                argv[1] = async->stmt->RowToJS(env, &row);
                 async->retrieved++;
                 TRY_CATCH_CALL(async->stmt->Value(), cb, 2, argv);
             }
@@ -740,11 +843,13 @@ void Statement::Work_AfterEach(napi_env e, napi_status status, void* data) {
     auto env = stmt->Env();
     Napi::HandleScope scope(env);
 
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
+
     if (stmt->status != SQLITE_DONE) {
         Error(baton.get());
     }
-
-    STATEMENT_END();
 }
 
 Napi::Value Statement::Reset(const Napi::CallbackInfo& info) {
@@ -777,14 +882,193 @@ void Statement::Work_AfterReset(napi_env e, napi_status status, void* data) {
     auto env = stmt->Env();
     Napi::HandleScope scope(env);
 
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
+
     // Fire callbacks.
     Napi::Function cb = baton->callback.Value();
     if (IS_FUNCTION(cb)) {
         Napi::Value argv[] = { env.Null() };
         TRY_CATCH_CALL(stmt->Value(), cb, 1, argv);
     }
+}
 
-    STATEMENT_END();
+// --- Synchronous fast path ---------------------------------------------
+//
+// The gate is the whole safety story: JS is single-threaded, pending and
+// locked/db-queue state only mutate on the main thread, and the gate
+// requires every queue to be empty and no worker in flight. Between the
+// check and the sqlite calls nothing else can therefore touch this
+// connection, and no queued operation can be overtaken (FIFO intact).
+
+bool Statement::IdleForInline() {
+    // db->locked is deliberately not consulted: it is sticky history of
+    // the last dispatched call's exclusivity, not an in-flight marker.
+    // pending == 0 plus an empty queue is the actual "nothing running or
+    // deferred" condition.
+    return prepared && !locked && !finalized && queue.empty()
+        && db->IsOpen() && !db->closing
+        && db->pending == 0 && db->queue.empty();
+}
+
+void Statement::ThrowStatementError(Napi::Env env) {
+    EXCEPTION(Napi::String::New(env, message.c_str()), status, exception);
+    exception.As<Napi::Error>().ThrowAsJavaScriptException();
+}
+
+template <class T> T* Statement::BindSync(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+
+    if (finalized) {
+        Napi::Error::New(env, "Statement is already finalized")
+            .ThrowAsJavaScriptException();
+        return NULL;
+    }
+    if (!IdleForInline()) {
+        Napi::Error::New(env,
+            "database is busy: sync methods require a fully idle database"
+        ).ThrowAsJavaScriptException();
+        return NULL;
+    }
+
+    T* baton = Bind<T>(info);
+    if (baton == NULL) {
+        Napi::TypeError::New(env, "Data type is not supported")
+            .ThrowAsJavaScriptException();
+        return NULL;
+    }
+    if (IS_FUNCTION(baton->callback.Value())) {
+        delete baton;
+        Napi::TypeError::New(env, "Sync methods do not take a callback")
+            .ThrowAsJavaScriptException();
+        return NULL;
+    }
+    return baton;
+}
+
+Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Statement* stmt = this;
+
+    RowBaton* baton = BindSync<RowBaton>(info);
+    if (baton == NULL) return env.Null();
+    std::unique_ptr<RowBaton> holder(baton);
+
+    // Mirrors Work_Get: step unless the cursor is already exhausted and
+    // no new parameters were supplied.
+    if (stmt->status != SQLITE_DONE || holder->parameters.size()) {
+        if (!stmt->Bind(std::move(holder->parameters))) {
+            stmt->ThrowStatementError(env);
+            return env.Null();
+        }
+        stmt->status = sqlite3_step(stmt->_handle);
+        if (!(stmt->status == SQLITE_ROW || stmt->status == SQLITE_DONE)) {
+            stmt->message = std::string(sqlite3_errmsg(stmt->db->_handle));
+            stmt->ThrowStatementError(env);
+            return env.Null();
+        }
+    }
+
+    if (stmt->status == SQLITE_ROW) {
+        Row row;
+        Columns columns;
+        GetRow(&row, stmt->_handle, &columns);
+        stmt->SyncColumnKeys(env, columns);
+        return stmt->RowToJS(env, &row);
+    }
+    return env.Undefined();
+}
+
+Napi::Value Statement::RunSync(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Statement* stmt = this;
+
+    RunBaton* baton = BindSync<RunBaton>(info);
+    if (baton == NULL) return env.Null();
+    std::unique_ptr<RunBaton> holder(baton);
+
+    // Mirrors Work_Run, including the explicit reset for parameterless
+    // re-execution.
+    if (!holder->parameters.size()) {
+        sqlite3_reset(stmt->_handle);
+    }
+
+    if (!stmt->Bind(std::move(holder->parameters))) {
+        stmt->ThrowStatementError(env);
+        return env.Null();
+    }
+    stmt->status = sqlite3_step(stmt->_handle);
+
+    if (!(stmt->status == SQLITE_ROW || stmt->status == SQLITE_DONE)) {
+        stmt->message = std::string(sqlite3_errmsg(stmt->db->_handle));
+        stmt->ThrowStatementError(env);
+        return env.Null();
+    }
+
+    sqlite3_int64 inserted_id = sqlite3_last_insert_rowid(stmt->db->_handle);
+    int changes = sqlite3_changes(stmt->db->_handle);
+
+    if (stmt->key_last_id.IsEmpty()) {
+        stmt->key_last_id = Napi::Persistent(Napi::String::New(env, "lastID"));
+        stmt->key_changes = Napi::Persistent(Napi::String::New(env, "changes"));
+    }
+    (stmt->Value()).Set(stmt->key_last_id.Value(), Napi::Number::New(env, inserted_id));
+    (stmt->Value()).Set(stmt->key_changes.Value(), Napi::Number::New(env, changes));
+
+    return info.This();
+}
+
+Napi::Value Statement::AllSync(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Statement* stmt = this;
+
+    RowsBaton* baton = BindSync<RowsBaton>(info);
+    if (baton == NULL) return env.Null();
+    std::unique_ptr<RowsBaton> holder(baton);
+
+    if (!holder->parameters.size()) {
+        sqlite3_reset(stmt->_handle);
+    }
+
+    if (!stmt->Bind(std::move(holder->parameters))) {
+        stmt->ThrowStatementError(env);
+        return env.Null();
+    }
+
+    Rows rows;
+    Columns columns;
+    while ((stmt->status = sqlite3_step(stmt->_handle)) == SQLITE_ROW) {
+        rows.emplace_back();
+        GetRow(&rows.back(), stmt->_handle, &columns);
+    }
+    if (stmt->status != SQLITE_DONE) {
+        stmt->message = std::string(sqlite3_errmsg(stmt->db->_handle));
+        stmt->ThrowStatementError(env);
+        return env.Null();
+    }
+
+    stmt->SyncColumnKeys(env, columns);
+    Napi::Array result(Napi::Array::New(env, rows.size()));
+    for (size_t i = 0; i < rows.size(); i++) {
+        (result).Set(i, stmt->RowToJS(env, &rows[i]));
+    }
+    return result;
+}
+
+void Statement::SyncColumnKeys(Napi::Env env, const Columns& columns) {
+    // Root one JS string per column and reuse it for every row of the batch
+    // instead of re-creating a key per cell. Rebuilt only when the statement
+    // was re-prepared with a different result shape.
+    if (column_keys_source == columns.names) {
+        return;
+    }
+    column_keys.clear();
+    column_keys.reserve(columns.names.size());
+    for (const auto& name : columns.names) {
+        column_keys.emplace_back(Napi::Persistent(Napi::String::New(env, name)));
+    }
+    column_keys_source = columns.names;
 }
 
 Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {
@@ -792,68 +1076,116 @@ Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {
 
     auto result = Napi::Object::New(env);
 
-    for (auto& field : *row) {
-
+    size_t i = 0;
+    for (auto& cell : *row) {
         Napi::Value value;
 
-        switch (field->type) {
+        switch (cell.type) {
             case SQLITE_INTEGER: {
-                value = Napi::Number::New(env, (static_cast<Values::Integer*>(field.get()))->value);
+                value = Napi::Number::New(env, cell.integer);
             } break;
             case SQLITE_FLOAT: {
-                value = Napi::Number::New(env, (static_cast<Values::Float*>(field.get()))->value);
+                value = Napi::Number::New(env, cell.real);
             } break;
             case SQLITE_TEXT: {
-                value = Napi::String::New(env, (static_cast<Values::Text*>(field.get()))->value.c_str(), 
-                                               (static_cast<Values::Text*>(field.get()))->value.size());
+                value = Napi::String::New(env, cell.str.data(), cell.str.size());
             } break;
             case SQLITE_BLOB: {
-                value = Napi::Buffer<char>::Copy(env, (static_cast<Values::Blob*>(field.get()))->value, 
-                                                      (static_cast<Values::Blob*>(field.get()))->length);
+                // Zero-copy for large blobs: transfer ownership of the bytes
+                // to the Buffer finalizer. Small blobs are cheaper to copy
+                // (external-buffer bookkeeping outweighs the memcpy), and the
+                // copy fallback also covers environments without external
+                // buffer support (e.g. sandboxed renderers).
+                if (cell.str.size() >= 4096) {
+                    auto* payload = new std::string(std::move(cell.str));
+                    napi_value buf = NULL;
+                    napi_status st = napi_create_external_buffer(env,
+                        payload->size(), &(*payload)[0],
+                        [](napi_env, void*, void* hint) {
+                            delete static_cast<std::string*>(hint);
+                        },
+                        payload, &buf);
+                    if (st == napi_ok) {
+                        value = Napi::Buffer<char>(env, buf);
+                    }
+                    else {
+                        value = Napi::Buffer<char>::Copy(env,
+                            payload->data(), payload->size());
+                        delete payload;
+                    }
+                }
+                else {
+                    value = Napi::Buffer<char>::Copy(env,
+                        cell.str.data(), cell.str.size());
+                }
             } break;
             case SQLITE_NULL: {
                 value = env.Null();
             } break;
+            default:
+                value = env.Null();
         }
 
-        result.Set(field->name, value);
+        // The keys always cover the row: both are derived from the same
+        // sqlite3_column_count, and a mid-stream re-prepare refreshes them
+        // together. The bound is kept so a shape change that slipped through
+        // can never index out of range.
+        if (i < column_keys.size()) {
+            result.Set(column_keys[i].Value(), value);
+        }
+        i++;
     }
 
     return scope.Escape(result);
 }
 
-void Statement::GetRow(Row* row, sqlite3_stmt* stmt) {
+void Statement::GetRow(Row* row, sqlite3_stmt* stmt, Columns* columns) {
     int cols = sqlite3_column_count(stmt);
+
+    // Captured once per execution; the result shape cannot change between
+    // the rows of a single statement execution.
+    columns->EnsureLoaded(stmt);
+
+    row->clear();
+    row->reserve(cols);
 
     for (int i = 0; i < cols; i++) {
         int type = sqlite3_column_type(stmt, i);
-        const char* name = sqlite3_column_name(stmt, i);
-        if (name == NULL) {
-            assert(false);
-        }
 
         switch (type) {
             case SQLITE_INTEGER: {
-                row->emplace_back(std::make_unique<Values::Integer>(name, sqlite3_column_int64(stmt, i)));
+                Cell cell(SQLITE_INTEGER);
+                cell.integer = sqlite3_column_int64(stmt, i);
+                row->emplace_back(std::move(cell));
             }   break;
             case SQLITE_FLOAT: {
-                row->emplace_back(std::make_unique<Values::Float>(name, sqlite3_column_double(stmt, i)));
+                Cell cell(SQLITE_FLOAT);
+                cell.real = sqlite3_column_double(stmt, i);
+                row->emplace_back(std::move(cell));
             }   break;
             case SQLITE_TEXT: {
+                Cell cell(SQLITE_TEXT);
                 const char* text = (const char*)sqlite3_column_text(stmt, i);
                 int length = sqlite3_column_bytes(stmt, i);
-                row->emplace_back(std::make_unique<Values::Text>(name, length, text));
+                if (length > 0 && text != NULL) {
+                    cell.str.assign(text, length);
+                }
+                row->emplace_back(std::move(cell));
             } break;
             case SQLITE_BLOB: {
-                const void* blob = sqlite3_column_blob(stmt, i);
+                Cell cell(SQLITE_BLOB);
+                const char* blob = (const char*)sqlite3_column_blob(stmt, i);
                 int length = sqlite3_column_bytes(stmt, i);
-                row->emplace_back(std::make_unique<Values::Blob>(name, length, blob));
+                if (length > 0 && blob != NULL) {
+                    cell.str.assign(blob, length);
+                }
+                row->emplace_back(std::move(cell));
             }   break;
             case SQLITE_NULL: {
-                row->emplace_back(std::make_unique<Values::Null>(name));
+                row->emplace_back(Cell(SQLITE_NULL));
             }   break;
             default:
-                assert(false);
+                row->emplace_back(Cell(SQLITE_NULL));
         }
     }
 }
@@ -891,6 +1223,7 @@ void Statement::Finalize_() {
     // error events in case those failed.
     sqlite3_finalize(_handle);
     _handle = NULL;
+    bound_payloads.clear();
     db->Unref();
 }
 

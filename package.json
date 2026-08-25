@@ -1,7 +1,7 @@
 {
   "name": "@appthreat/sqlite3",
   "description": "Asynchronous, non-blocking SQLite3 bindings. Modern rewrite of TryGhost/node-sqlite3",
-  "version": "8.0.2",
+  "version": "8.0.3",
   "homepage": "https://github.com/AppThreat/node-sqlite3",
   "author": "Team AppThreat <cloud@appthreat.com>",
   "binary": {
@@ -20,7 +20,7 @@
     "url": "git+https://github.com/AppThreat/node-sqlite3.git"
   },
   "dependencies": {
-    "node-addon-api": "^8.7.0",
+    "node-addon-api": "^8.9.2",
     "node-gyp-build": "^4.8.0"
   },
   "devDependencies": {

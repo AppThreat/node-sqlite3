@@ -120,15 +120,23 @@ inline bool OtherIsInt(Napi::Number source) {
         argc, argv                                                             \
     );
 
-// The Mac OS compiler complains when argv is NULL unless we
-// first assign it to a locally defined variable.
+// argc is a literal at every call site, so the argument buffer is a plain
+// fixed-size stack array (no heap allocation); the static_assert enforces
+// that assumption. Napi::Value converts implicitly to napi_value.
+#define TRY_CATCH_CALL_MAX_ARGS 8
 #define TRY_CATCH_CALL(context, callback, argc, argv, ...)                     \
-    Napi::Value* passed_argv = argv;\
-    std::vector<napi_value> args;\
-    if ((argc != 0) && (passed_argv != NULL)) {\
-      args.assign(passed_argv, passed_argv + argc);\
-    }\
-    Napi::Value res = (callback).Call(Napi::Value(context), args);             \
+    static_assert((argc) >= 0 && (argc) <= TRY_CATCH_CALL_MAX_ARGS,            \
+        "TRY_CATCH_CALL argc must be a literal in [0, 8]");                    \
+    napi_value TRY_CATCH_CALL_args[TRY_CATCH_CALL_MAX_ARGS];                   \
+    /* via a pointer so that argc == 0 may pass a NULL argv */                 \
+    const Napi::Value* TRY_CATCH_CALL_src = (argv);                            \
+    for (size_t TRY_CATCH_CALL_i = 0;                                          \
+         TRY_CATCH_CALL_i < static_cast<size_t>(argc);                         \
+         TRY_CATCH_CALL_i++) {                                                 \
+        TRY_CATCH_CALL_args[TRY_CATCH_CALL_i] = TRY_CATCH_CALL_src[TRY_CATCH_CALL_i]; \
+    }                                                                          \
+    Napi::Value res = (callback).Call(Napi::Value(context),                    \
+        static_cast<size_t>(argc), TRY_CATCH_CALL_args);                       \
     if (res.IsEmpty()) return __VA_ARGS__;
 
 #define WORK_DEFINITION(name)                                                  \
@@ -173,13 +181,11 @@ inline bool OtherIsInt(Napi::Number source) {
     } \
     sqlite3_mutex* name = sqlite3_db_mutex(stmt->db->_handle);
 
+// Declares the guard that performs the end-of-call bookkeeping on every
+// exit path from a Work_After* handler, including TRY_CATCH_CALL's early
+// return when a JS callback throws. See Statement::CallGuard.
 #define STATEMENT_END()                                                        \
-    assert(stmt->locked);                                                      \
-    assert(stmt->db->pending);                                                 \
-    stmt->locked = false;                                                      \
-    stmt->db->pending--;                                                       \
-    stmt->Process();                                                           \
-    stmt->db->Process();
+    Statement::CallGuard statement_call_guard__(stmt);
 
 #define BACKUP_BEGIN(type)                                                     \
     assert(baton);                                                             \

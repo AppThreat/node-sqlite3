@@ -91,6 +91,15 @@ export class Statement extends events.EventEmitter {
     each<T>(callback?: (err: Error | null, row: T) => void, complete?: (err: Error | null, count: number) => void): this;
     each<T>(params: any, callback?: (this: RunResult, err: Error | null, row: T) => void, complete?: (err: Error | null, count: number) => void): this;
     each(...params: any[]): this;
+
+    /**
+     * Synchronous fast path. Throws when the database is not fully idle
+     * (async work in flight or queued) or when called from inside an async
+     * completion callback. Accepts no callback argument.
+     */
+    getSync<T>(...params: any[]): T | undefined;
+    runSync(...params: any[]): this;
+    allSync<T>(...params: any[]): T[];
 }
 
 export class Database extends events.EventEmitter {
@@ -120,6 +129,30 @@ export class Database extends events.EventEmitter {
     prepare(sql: string, callback?: (this: Statement, err: Error | null) => void): Statement;
     prepare(sql: string, params: any, callback?: (this: Statement, err: Error | null) => void): Statement;
     prepare(sql: string, ...params: any[]): Statement;
+
+    /**
+     * Prepares synchronously on the main thread. Throws when the database
+     * is not fully idle. The returned statement also supports the
+     * getSync/runSync/allSync fast path.
+     */
+    prepareSync(sql: string): Statement;
+
+    /**
+     * Opt-in LRU cache of prepared statements for run/get/all/each/map,
+     * keyed on the SQL string. Defaults to 64 entries. Cached statements
+     * are finalized by close(). Under serialize() the cache is bypassed to
+     * preserve strict FIFO ordering.
+     */
+    cacheStatements(maxEntries?: number): this;
+
+    /**
+     * Synchronous fast path. Throws when the database is not fully idle
+     * (async work in flight or queued) or when called from inside an async
+     * completion callback. Accepts no callback argument.
+     */
+    getSync<T>(sql: string, ...params: any[]): T | undefined;
+    runSync(sql: string, ...params: any[]): { lastID: number; changes: number };
+    allSync<T>(sql: string, ...params: any[]): T[];
 
     serialize(callback?: () => void): void;
     parallelize(callback?: () => void): void;

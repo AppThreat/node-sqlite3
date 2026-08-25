@@ -77,7 +77,9 @@
           'SQLITE_ENABLE_SESSION',
           'SQLITE_ENABLE_JSON',
           'SQLITE_ENABLE_DBSTAT_VTAB=1',
-          'SQLITE_ENABLE_MATH_FUNCTIONS'
+          'SQLITE_ENABLE_MATH_FUNCTIONS',
+          'SQLITE_ENABLE_STAT4',
+          'SQLITE_DEFAULT_MEMSTATUS=0'
         ],
       },
       'cflags_cc': [
@@ -94,7 +96,9 @@
         'SQLITE_ENABLE_SESSION',
         'SQLITE_ENABLE_JSON',
         'SQLITE_ENABLE_DBSTAT_VTAB=1',
-        'SQLITE_ENABLE_MATH_FUNCTIONS'
+        'SQLITE_ENABLE_MATH_FUNCTIONS',
+        'SQLITE_ENABLE_STAT4',
+        'SQLITE_DEFAULT_MEMSTATUS=0'
       ],
       'conditions': [
         ["sqlite_magic != ''", {

@@ -15,7 +15,7 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
 - [Extension support](https://github.com/AppThreat/node-sqlite3/wiki/API#databaseloadextensionpath-callback), including bundled support for the [json1 extension](https://www.sqlite.org/json1.html)
 - Big test suite
 - Written in modern C++ and tested for memory leaks
-- Bundles SQLite v3.53.0, or you can build using a local SQLite [amalgamation](https://www.sqlite.org/amalgamation.html)
+- Bundles SQLite v3.53.4, or you can build using a local SQLite [amalgamation](https://www.sqlite.org/amalgamation.html)
 
 # Installing
 
@@ -90,6 +90,59 @@ db.serialize(() => {
 
 db.close();
 ```
+
+## Performance options
+
+Two opt-in fast paths avoid the per-call prepare and threadpool round-trip
+costs. Both keep the default asynchronous behaviour untouched.
+
+### Statement cache
+
+```js
+db.cacheStatements();        // or db.cacheStatements(16) to cap the LRU size
+```
+
+`run/get/all/each/map` then reuse prepared statements (LRU, keyed on the SQL
+string, 64 entries by default). The cache is bypassed, falling back to a
+per-call prepare, whenever ordering guarantees would otherwise be lost: under
+`serialize()`, and while an exclusive operation (`exec`, `close`, `wait`,
+`loadExtension`) is running or queued. `close()` finalizes cached statements.
+
+A cached statement retains its most recently bound text/blob parameters until
+it is rebound or finalized, so a large blob bound through a cached statement
+stays resident while that entry lives in the cache.
+
+### Synchronous fast path
+
+```js
+db.cacheStatements();
+const row = db.getSync("SELECT * FROM t WHERE rowid = ?", 42);   // row | undefined
+const info = db.runSync("INSERT INTO t (a) VALUES (?)", 42);     // { lastID, changes }
+const rows = db.allSync("SELECT * FROM t");
+const stmt = db.prepareSync("SELECT ? AS v");                    // statement-level variants
+```
+
+`getSync/runSync/allSync` execute on the calling thread — roughly 6x faster
+than the async equivalents for interactive lookups. They throw when the
+database is not fully idle: async work in flight or queued, or when called
+from inside an async completion callback (defer with `setImmediate` or use
+`db.wait`). They accept no callback argument. Like any synchronous database
+API, a busy database file can block the event loop for up to the configured
+`busyTimeout`.
+
+Without `cacheStatements()` these methods prepare and finalize a statement
+per call; enabling the cache is what makes them fast.
+
+### Scheduling change
+
+The database queue is now strictly FIFO. Previously a non-exclusive call
+could dispatch immediately while an exclusive one (`exec`, `close`, `wait`,
+`loadExtension`) was still waiting in the queue, so it could overtake that
+call and run concurrently with it — for example a write landing outside a
+transaction opened by `exec("BEGIN")`. Code that implicitly relied on the
+old queue-jumping behaviour may see operations complete in a different
+order. Parallel throughput is unchanged: the queue is only non-empty once
+something has had to wait.
 
 ## Source install
 

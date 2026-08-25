@@ -25,6 +25,7 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("parallelize", &Database::Parallelize, napi_default_method),
         InstanceMethod("configure", &Database::Configure, napi_default_method),
         InstanceMethod("interrupt", &Database::Interrupt, napi_default_method),
+        InstanceMethod("_queueBusy", &Database::QueueBusy, napi_default_method),
         InstanceAccessor("open", &Database::Open, nullptr)
     });
 
@@ -108,7 +109,15 @@ void Database::Schedule(Work_Callback callback, Baton* baton, bool exclusive) {
         return;
     }
 
-    if (!open || ((locked || exclusive || serialize) && pending > 0)) {
+    // !queue.empty() keeps the database queue FIFO. Without it, a
+    // non-exclusive call dispatches immediately whenever locked is false,
+    // even while an exclusive call (exec/close/wait/loadExtension) is
+    // already waiting in the queue -- letting it overtake work it is
+    // supposed to run after, and run concurrently with it. Parallel
+    // throughput is unaffected: the queue is only non-empty once something
+    // has had to wait.
+    if (!open || !queue.empty()
+            || ((locked || exclusive || serialize) && pending > 0)) {
         queue.emplace(new Call(callback, baton, exclusive || serialize));
     }
     else {
@@ -215,6 +224,13 @@ Napi::Value Database::Open(const Napi::CallbackInfo& info) {
     auto env = this->Env();
     auto* db = this;
     return Napi::Boolean::New(env, db->open);
+}
+
+Napi::Value Database::QueueBusy(const Napi::CallbackInfo& info) {
+    // A cached statement operation bypasses Database::Schedule entirely, so
+    // it would otherwise run straight past anything waiting here.
+    bool busy = closing || !queue.empty() || (locked && pending > 0);
+    return Napi::Boolean::New(info.Env(), busy);
 }
 
 Napi::Value Database::Close(const Napi::CallbackInfo& info) {
@@ -429,6 +445,20 @@ void Database::SetLimit(Baton* b) {
     sqlite3_limit(baton->db->_handle, baton->id, baton->value);
 }
 
+// Recompute the sqlite3_trace_v2 mask from the registered JS hooks and
+// (un)install the single native callback accordingly.
+void Database::UpdateTraceMask(Database* db, sqlite3* handle) {
+    unsigned int mask = 0;
+    if (db->debug_trace != NULL)   mask |= SQLITE_TRACE_STMT;
+    if (db->debug_profile != NULL) mask |= SQLITE_TRACE_PROFILE;
+    if (mask != 0) {
+        sqlite3_trace_v2(handle, mask, Database::TraceV2Callback, db);
+    }
+    else {
+        sqlite3_trace_v2(handle, 0, NULL, NULL);
+    }
+}
+
 void Database::RegisterTraceCallback(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
     assert(baton->db->open);
@@ -438,20 +468,36 @@ void Database::RegisterTraceCallback(Baton* b) {
     if (db->debug_trace == NULL) {
         // Add it.
         db->debug_trace = new AsyncTrace(db, TraceCallback);
-        sqlite3_trace(db->_handle, TraceCallback, db);
     }
     else {
         // Remove it.
-        sqlite3_trace(db->_handle, NULL, NULL);
         db->debug_trace->finish();
         db->debug_trace = NULL;
     }
+    UpdateTraceMask(db, db->_handle);
 }
 
-void Database::TraceCallback(void* db, const char* sql) {
-    // Note: This function is called in the thread pool.
-    // Note: Some queries, such as "EXPLAIN" queries, are not sent through this.
-    static_cast<Database*>(db)->debug_trace->send(new std::string(sql));
+// Note: This function is called in the sqlite worker thread.
+int Database::TraceV2Callback(unsigned int type, void* ctx, void* p, void* x) {
+    auto* db = static_cast<Database*>(ctx);
+
+    if (type == SQLITE_TRACE_STMT && db->debug_trace != NULL) {
+        char* sql = sqlite3_expanded_sql(static_cast<sqlite3_stmt*>(p));
+        if (sql != NULL) {
+            db->debug_trace->send(new std::string(sql));
+            sqlite3_free(sql);
+        }
+    }
+    else if (type == SQLITE_TRACE_PROFILE && db->debug_profile != NULL) {
+        auto* info = new ProfileInfo();
+        char* sql = sqlite3_expanded_sql(static_cast<sqlite3_stmt*>(p));
+        info->sql = sql != NULL ? std::string(sql) : std::string();
+        if (sql != NULL) sqlite3_free(sql);
+        info->nsecs = *static_cast<sqlite3_int64*>(x);
+        db->debug_profile->send(info);
+    }
+
+    return SQLITE_OK;
 }
 
 void Database::TraceCallback(Database* db, std::string* s) {
@@ -476,23 +522,13 @@ void Database::RegisterProfileCallback(Baton* b) {
     if (db->debug_profile == NULL) {
         // Add it.
         db->debug_profile = new AsyncProfile(db, ProfileCallback);
-        sqlite3_profile(db->_handle, ProfileCallback, db);
     }
     else {
         // Remove it.
-        sqlite3_profile(db->_handle, NULL, NULL);
         db->debug_profile->finish();
         db->debug_profile = NULL;
     }
-}
-
-void Database::ProfileCallback(void* db, const char* sql, sqlite3_uint64 nsecs) {
-    // Note: This function is called in the thread pool.
-    // Note: Some queries, such as "EXPLAIN" queries, are not sent through this.
-    auto* info = new ProfileInfo();
-    info->sql = std::string(sql);
-    info->nsecs = nsecs;
-    static_cast<Database*>(db)->debug_profile->send(info);
+    UpdateTraceMask(db, db->_handle);
 }
 
 void Database::ProfileCallback(Database *db, ProfileInfo* i) {
