@@ -45,13 +45,25 @@ jobs:
     name: ${{ matrix.os }} (host=${{ matrix.host }}, target=${{ matrix.target }})
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+        # Reads the version from the packageManager field in package.json.
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
           node-version: ${{ matrix.node }}
           architecture: ${{ matrix.host }}
           scope: '@appthreat'
-      - name: Add yarn
-        run: npm install -g yarn
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "PNPM_STORE_PATH=$(pnpm store path)" >> $GITHUB_ENV
+      - name: Cache pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.PNPM_STORE_PATH }}
+          key: pnpm-store-${{ runner.os }}-${{ matrix.host }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ matrix.host }}-
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
@@ -62,7 +74,7 @@ jobs:
         with:
           msbuild-architecture: ${{ matrix.target }}
       - name: Install dependencies
-        run: yarn install --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Check Node compatibility
         run: node tools/semver-check.js
@@ -85,7 +97,7 @@ jobs:
           echo "CXXFLAGS=${CXXFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
 
       - name: Build binaries
-        run: yarn prebuild --arch ${{ env.TARGET }} --tag-libc
+        run: pnpm run prebuild --arch ${{ env.TARGET }} --tag-libc
 
       - name: Print binary info
         if: contains(matrix.os, 'ubuntu')
@@ -97,7 +109,7 @@ jobs:
           file prebuilds/*/*.node
 
       - name: Run tests
-        run: yarn test
+        run: pnpm run test
 
       - name: Upload prebuilds to artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
@@ -178,12 +190,13 @@ jobs:
           path: prebuilds/
           merge-multiple: true
 
-      - name: Add yarn
-        run: npm install -g yarn
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+        # Reads the version from the packageManager field in package.json.
 
       - name: Install dependencies
         run: |
-          yarn install --ignore-scripts
+          pnpm install --frozen-lockfile --ignore-scripts
           npm publish --dry-run
 
       - name: Publish to npm

@@ -26,7 +26,8 @@
   "devDependencies": {
     "eslint": "9.39.2",
     "mocha": "11.7.5",
-    "prebuildify": "^6.0.1"
+    "prebuildify": "^6.0.1",
+    "semver": "^7.8.5"
   },
   "peerDependencies": {
     "node-gyp": "12.x"
@@ -40,10 +41,13 @@
     "node-gyp": "12.x"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=24",
+    "pnpm": ">=11"
   },
+  "packageManager": "pnpm@11.21.0",
   "scripts": {
     "install": "node-gyp-build",
+    "install:frozen": "pnpm install --config.strict-dep-builds=true --frozen-lockfile --package-import-method copy",
     "prebuild": "prebuildify --napi --strip",
     "rebuild": "node-gyp rebuild",
     "test": "node test/support/createdb.js && mocha -R spec --timeout 480000"

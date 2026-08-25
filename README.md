@@ -19,38 +19,46 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
 
 # Installing
 
-You can use [`npm`](https://github.com/npm/cli) or [`yarn`](https://github.com/yarnpkg/yarn) to install `sqlite3`:
-
-- (recommended) Latest published package:
+Use whichever package manager you like:
 
 ```bash
 npm install @appthreat/sqlite3
 # or
+pnpm add @appthreat/sqlite3
+# or
 yarn add @appthreat/sqlite3
+# or
+bun add @appthreat/sqlite3
 ```
 
 - GitHub's `master` branch: `npm install https://github.com/AppThreat/node-sqlite3/tarball/master`
 
+Requires Node.js >= 24. See [docs/install.md](docs/install.md) for the full
+installation guide: prebuild coverage, source builds, custom SQLite/SQLCipher,
+and troubleshooting.
+
 ### Prebuilt binaries
 
-`@appthreat/sqlite3` v6+ was rewritten to use [Node-API](https://nodejs.org/api/n-api.html) so prebuilt binaries do not need to be built for specific Node versions. `sqlite3` currently builds for both Node-API v3 and v6. Check the [Node-API version matrix](https://nodejs.org/api/n-api.html#node-api-version-matrix) to ensure your Node version supports one of these. The prebuilt binaries should be supported on Node v10+.
-
-The module uses [`prebuild-install`](https://github.com/prebuild/prebuild-install) to download the prebuilt binary for your platform, if it exists. These binaries are hosted on GitHub Releases for `sqlite3` versions above 5.0.2, and they are hosted on S3 otherwise. The following targets are currently provided:
+`@appthreat/sqlite3` v6+ was rewritten to use [Node-API](https://nodejs.org/api/n-api.html), so a single prebuilt binary per platform covers every supported Node version — nothing is compiled or downloaded at install time for the platforms below:
 
 - `darwin-arm64`
 - `darwin-x64`
-- `linux-arm64`
-- `linux-x64`
-- `linuxmusl-arm64`
-- `linuxmusl-x64`
-- `win32-ia32`
+- `linux-arm64` (glibc and musl)
+- `linux-x64` (glibc and musl)
+- `win32-arm64`
 - `win32-x64`
 
-Unfortunately, [prebuild](https://github.com/prebuild/prebuild/issues/174) cannot differentiate between `armv6` and `armv7`, and instead uses `arm` as the `{arch}`. Until that is fixed, you will still need to install `sqlite3` from [source](#source-install).
+The prebuilds are bundled **inside the npm tarball** and resolved at
+**runtime**, not by an install script. In particular, **pnpm 10+ users need no
+`onlyBuiltDependencies` allowlist**: pnpm blocks dependencies' install scripts
+by default, and that block is a no-op here because `lib/sqlite3-binding.js`
+locates the prebuild itself when the module is first imported.
 
-Support for other platforms and architectures may be added in the future if CI supports building on them.
-
-If your environment isn't supported, it'll use `node-gyp` to build SQLite, but you will need to install a C++ compiler and linker.
+Support for other platforms and architectures may be added in the future if CI
+supports building on them. Everywhere else, `@appthreat/sqlite3` builds from
+source via `node-gyp` — see
+[docs/install.md](docs/install.md#source-builds) for the toolchain
+requirements and the pnpm specifics for source builds.
 
 ### Other ways to install
 
@@ -258,8 +266,25 @@ npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=`bre
 # Testing
 
 ```bash
-npm test
+pnpm run test
 ```
+
+# Developing
+
+Development of this repo itself requires **pnpm >= 11** (`corepack enable`, or a
+standalone install). Clone, then:
+
+```bash
+pnpm install          # also builds the native binding via the install script
+pnpm run rebuild      # recompile after changing C++ (node-gyp rebuild)
+pnpm run test
+pnpm run prebuild     # produce the shipping prebuilds/ artifacts
+```
+
+Always use `pnpm run rebuild`, never bare `pnpm rebuild` — the latter is a
+pnpm builtin that rebuilds *dependencies*, not this repo's `rebuild` script.
+See [docs/install.md](docs/install.md#development) for the full guide,
+including the stale-`prebuilds/` trap when iterating on C++.
 
 # Contributors
 
