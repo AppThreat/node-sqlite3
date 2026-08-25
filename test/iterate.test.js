@@ -67,10 +67,10 @@ describe('iterate', function () {
         await db.close();
     });
 
-    // A statement that never reached `prepared` drops its whole queue in
-    // Statement::CleanQueue without firing callbacks (src/statement.cc),
-    // so the finalize the iterator's teardown waits on never calls back.
-    // return() used to hang here forever.
+    // A statement that never reached `prepared` used to drop its whole
+    // queue in Statement::CleanQueue without firing callbacks, so the
+    // finalize the iterator's teardown waits on never called back and
+    // return() hung forever.
     it('return() after a failed prepare still settles', async function () {
         const db = await openDb();
         const iterator = db.iterate('SELECT * FROM nope');
@@ -78,6 +78,53 @@ describe('iterate', function () {
             assert.strictEqual(err.code, 'SQLITE_ERROR');
             return true;
         });
+        assert.deepStrictEqual(await iterator.return(), {
+            value: undefined,
+            done: true,
+        });
+        assert.deepStrictEqual(db.getSync('SELECT 1 AS x'), { x: 1 });
+        await db.close();
+    });
+
+    // The borrowed-statement twin of the case above: a user-supplied
+    // statement whose own prepare fails. The queued fetch/reset used to be
+    // deleted in silence, so both next() and return() hung.
+    it('iterating a borrowed statement whose prepare failed rejects and settles', async function () {
+        const db = await openDb();
+        const prepareErrors = [];
+        const stmt = db.prepare('SELECT * FROM nope');
+        stmt.on('error', (err) => prepareErrors.push(err));
+        const iterator = stmt.iterate();
+        await assert.rejects(iterator.next(), (err) => {
+            // The real prepare error, surfaced through the statement's
+            // 'error' event.
+            assert.strictEqual(err.code, 'SQLITE_ERROR');
+            return true;
+        });
+        assert.deepStrictEqual(await iterator.return(), {
+            value: undefined,
+            done: true,
+        });
+        // The prepare failure itself was reported exactly once.
+        assert.strictEqual(prepareErrors.length, 1);
+        assert.strictEqual(prepareErrors[0].code, 'SQLITE_ERROR');
+        assert.deepStrictEqual(db.getSync('SELECT 1 AS x'), { x: 1 });
+        await db.close();
+    });
+
+    // Same shape, but the prepare error went to a prepare callback (no
+    // 'error' event): teardown must still not hang on the dead statement.
+    it('return() settles when the borrowed statement died with a prepare callback', async function () {
+        const db = await openDb();
+        let prepareError = null;
+        const stmt = db.prepare('SELECT * FROM nope', function (err) {
+            prepareError = err;
+        });
+        const iterator = stmt.iterate();
+        // Give the failed prepare time to land, then break out.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.ok(prepareError);
+        assert.strictEqual(stmt.finalized, true);
         assert.deepStrictEqual(await iterator.return(), {
             value: undefined,
             done: true,

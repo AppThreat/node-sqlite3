@@ -59,6 +59,7 @@
         "lint:errors": "biome check --diagnostic-level=error",
         "lint:jsdoc": "node contrib/check-jsdoc.js",
         "test": "node test/support/createdb.js && node tools/check-no-only.js && node --test --test-reporter=spec --test-timeout=20000 'test/*.test.js'",
+        "bench": "node bench/bench.js",
         "gen-types": "node tools/gen-types.js",
         "test:types": "tsd && tsc --noEmit -p tsconfig.check.json"
     },

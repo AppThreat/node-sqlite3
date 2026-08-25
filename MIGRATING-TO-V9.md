@@ -157,6 +157,64 @@ extended code). The `SQLITE_CONSTRAINT_*`, `SQLITE_BUSY_*`,
 extended families are exported as constants, as are the previously
 missing open flags `OPEN_NOMUTEX`, `OPEN_MEMORY`, `OPEN_EXRESCODE`.
 
+## The connection state is native truth: `db.state`
+
+The internal scheduling state is now exposed read-only from the native
+side and the JS-side mirrors are gone:
+
+- `db.state` is a frozen snapshot `{ open, closing, locked, serialized,
+  pending, queued }`, computed on read; the same fields are also
+  individual read-only accessors (`db.serialized`, `db.closing`, ...).
+- `db._serialized` and `db._closing` (undocumented JS-side mirrors,
+  maintained by monkey-patching `serialize`/`parallelize`) **no longer
+  exist**. `serialize()`/`parallelize()` are now the native methods
+  directly — code that relied on the mirrors should read `db.state` or
+  the individual accessors.
+- The mirror deletion fixes a real bug: anything that reached the native
+  `serialize` other than through the patched prototype (a saved
+  prototype reference, `Reflect.apply`) desynchronised `_serialized`,
+  and the statement cache then kept taking its fast path while the
+  connection was serialized — silently breaking the FIFO guarantee
+  `serialize()` promises.
+- `db._queueBusy()` (undocumented, `@internal`) is **deprecated** in
+  favour of `db.state` and will be removed in a later minor release.
+- `stmt.finalized` is new read-only state: true once a statement was
+  finalized (explicitly, after a failed prepare, or by the GC safety
+  net).
+
+## Concurrent `transaction()` calls now fail loudly
+
+Nesting used to be tracked with a connection-wide counter, so a second
+transaction started *concurrently* (not nested inside the first's body)
+silently rode inside the first as a savepoint: its "commit" was a
+`RELEASE` the first transaction's rollback would have undone, and its
+work only persisted if the unrelated first transaction committed.
+Nesting is now tracked per async flow (`AsyncLocalStorage`): calls made
+from inside a transaction body — including across `await` — still nest
+via savepoints, but a concurrent top-level `BEGIN` rejects with
+`a transaction is already active on this connection`. Serialize
+concurrent flows yourself (or open a second connection).
+
+## A failed prepare no longer strands the calls queued behind it
+
+When preparing a statement failed, the calls already queued against that
+statement were discarded without their callbacks ever being invoked. In
+callback style the call simply never came back; in promise style the
+promise never settled. Those calls are now failed with the prepare's own
+error, so they reject (or call back) like any other failure.
+
+This is most visible with `AbortSignal`: `sqlite3_interrupt()` aborts a
+prepare just as readily as it aborts a running step, so an abort landing
+in that window used to wedge the connection. It also fixes
+`stmt.iterate()` on a statement whose own prepare failed, where `next()`
+waited forever on a dropped fetch and `return()` never settled.
+
+The statement still reports the failure on its own `'error'` event when
+the prepare was given no callback, so that surface is unchanged. `each()`
+delivers the error to its completion handler — or, if it was called
+without one, to its row callback; it is never handed to both, and the row
+callback is never invoked with a row-shaped call it has no row for.
+
 ## Minor notes
 
 - `Date` still binds as epoch milliseconds (REAL) and reads back as a

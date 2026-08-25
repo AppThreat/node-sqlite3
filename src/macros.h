@@ -7,12 +7,7 @@ std::string sqlite_code_string(int code);
 const char* sqlite_authorizer_string(int type);
 #include <vector>
 
-// TODO: better way to work around StringConcat?
 #include <napi.h>
-inline Napi::String StringConcat(Napi::Value str1, Napi::Value str2) {
-  return Napi::String::New(str1.Env(), str1.As<Napi::String>().Utf8Value() +
-                    str2.As<Napi::String>().Utf8Value() );
-}
 
 // A Napi substitute IsInt32()
 inline bool OtherIsInt(Napi::Number source) {
@@ -100,16 +95,13 @@ inline bool OtherIsInt(Napi::Number source) {
     Napi::PropertyDescriptor::Value(#name, Napi::String::New(env, constant),   \
         static_cast<napi_property_attributes>(napi_enumerable | napi_configurable)),
 
+// Builds the SqliteError value. `msg` is a UTF-8 const char*/std::string:
+// composing the message in C++ avoids the old three-pass UTF-8
+// round-trip through Napi::String (encode-decode-decode-encode) that
+// StringConcat used to force on every error construction.
 #define EXCEPTION(msg, errno, name)                                            \
     Napi::Value name = Napi::Error::New(env,                                   \
-        StringConcat(                                                          \
-            StringConcat(                                                      \
-                Napi::String::New(env, sqlite_code_string(errno)),             \
-                Napi::String::New(env, ": ")                                   \
-            ),                                                                 \
-            (msg)                                                              \
-        ).Utf8Value()                                                          \
-    ).Value();                                                                 \
+        std::string(sqlite_code_string(errno)) + ": " + (msg)).Value();        \
     Napi::Object name ##_obj = name.As<Napi::Object>();                        \
     (name ##_obj).Set( Napi::String::New(env, "errno"), Napi::Number::New(env, errno)); \
     (name ##_obj).Set( Napi::String::New(env, "code"),                         \
@@ -206,12 +198,11 @@ inline bool OtherIsInt(Napi::Number source) {
     type* baton = static_cast<type*>(data);                                    \
     Backup* backup = baton->backup;
 
+// Declares the guard that performs the end-of-call bookkeeping on every
+// exit path from a Work_After* handler, including TRY_CATCH_CALL's early
+// return when a JS callback throws. See Backup::CallGuard. Declared at
+// the top of the handler, like STATEMENT_END().
 #define BACKUP_END()                                                           \
-    assert(backup->locked);                                                    \
-    assert(backup->db->pending);                                               \
-    backup->locked = false;                                                    \
-    backup->db->pending--;                                                     \
-    backup->Process();                                                         \
-    backup->db->Process();
+    Backup::CallGuard backup_call_guard__(backup);
 
 #endif

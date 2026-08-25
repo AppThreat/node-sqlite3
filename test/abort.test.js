@@ -105,13 +105,17 @@ describe('abort', function () {
         await db.close();
     });
 
-    // sqlite3_interrupt aborts a prepare too, and an unprepared statement
-    // drops its whole queue without firing callbacks — including the
-    // finalize the iterator's teardown waits on. That made the test above
-    // hang roughly one run in three. The deterministic form of the same
-    // deadlock is pinned in iterate.test.js ("return() after a failed
-    // prepare still settles"); this repeats the racy shape to keep the
-    // interrupt-during-prepare window itself covered.
+    // sqlite3_interrupt aborts a prepare just as readily as a step, so an
+    // abort can land while the statement is still being prepared. An
+    // unprepared statement used to drop its whole queue without firing
+    // callbacks — including the fetch and the finalize the iterator's
+    // teardown waits on — so this hung. Rare on a fast machine and close
+    // to certain on a slow one: the prepare window is wider there, which
+    // is why CI's emulated and older runners failed every time while this
+    // passed locally. Statement::CleanQueue now fails those calls; the
+    // deterministic form is pinned in state_machine.test.js ("a prepare
+    // that fails with work queued behind it"), and this keeps the racy
+    // interrupt-during-prepare shape itself covered.
     it('aborting an iterator repeatedly never wedges the connection', {
         timeout: 30000,
     }, async function () {

@@ -52,9 +52,11 @@ export type {
 export type {
     BindParams,
     BindValue,
+    DatabaseState,
     IntegerMode,
     NativeBinding,
     Row,
     RunResult,
     SqliteError,
+    StatementRunSyncResult,
 } from './native.js';

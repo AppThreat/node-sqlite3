@@ -7,10 +7,6 @@
 
 using namespace node_sqlite3;
 
-#if NAPI_VERSION < 6
-Napi::FunctionReference Database::constructor;
-#endif
-
 Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
     Napi::HandleScope scope(env);
     // declare napi_default_method here as it is only available in Node v14.12.0+
@@ -27,17 +23,25 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("interrupt", &Database::Interrupt, napi_default_method),
         InstanceMethod("_queueBusy", &Database::QueueBusy, napi_default_method),
         InstanceAccessor("open", &Database::Open, nullptr),
-        InstanceAccessor("integerMode", &Database::IntegerModeGetter, nullptr)
+        InstanceAccessor("integerMode", &Database::IntegerModeGetter, nullptr),
+        InstanceAccessor("state", &Database::StateGetter, nullptr),
+        // Individual accessors for the statement cache's hot guard: the
+        // state object is fine for diagnostics, but constructing it on
+        // every cached call measured +46% on db.getSync cached (bench,
+        // Deliverable 05).
+        InstanceAccessor("closing", &Database::ClosingGetter, nullptr),
+        InstanceAccessor("locked", &Database::LockedGetter, nullptr),
+        InstanceAccessor("serialized", &Database::SerializedGetter, nullptr),
+        InstanceAccessor("pending", &Database::PendingGetter, nullptr),
+        InstanceAccessor("queued", &Database::QueuedGetter, nullptr)
     });
 
-#if NAPI_VERSION < 6
-    constructor = Napi::Persistent(t);
-    constructor.SuppressDestruct();
-#else
+    // The constructor rides per-env instance data (NAPI >= 6 only: the
+    // package declares napi_versions [10]). Allocated bare: node-addon-api
+    // takes ownership of instance data and deletes it at env teardown.
     Napi::FunctionReference* constructor = new Napi::FunctionReference();
     *constructor = Napi::Persistent(t);
     env.SetInstanceData<Napi::FunctionReference>(constructor);
-#endif
 
     exports.Set("Database", t);
     return exports;
@@ -47,8 +51,8 @@ void Database::Process() {
     auto env = this->Env();
     Napi::HandleScope scope(env);
 
-    if (!open && locked && !queue.empty()) {
-        EXCEPTION(Napi::String::New(env, "Database handle is closed"), SQLITE_MISUSE, exception);
+    if (db_state == DbState::Closed && !queue.empty()) {
+        EXCEPTION("Database handle is closed", SQLITE_MISUSE, exception);
         Napi::Value argv[] = { exception };
         bool called = false;
 
@@ -73,7 +77,7 @@ void Database::Process() {
         return;
     }
 
-    while (open && (!locked || pending == 0) && !queue.empty()) {
+    while (IsOpen() && (!exclusiveHeld || pending == 0) && !queue.empty()) {
         Call *c = queue.front();
 
         if (c->exclusive && pending > 0) {
@@ -82,10 +86,10 @@ void Database::Process() {
 
         queue.pop();
         std::unique_ptr<Call> call(c);
-        locked = call->exclusive;
+        exclusiveHeld = call->exclusive;
         call->callback(call->baton);
 
-        if (locked) break;
+        if (exclusiveHeld) break;
     }
 }
 
@@ -93,8 +97,8 @@ void Database::Schedule(Work_Callback callback, Baton* baton, bool exclusive) {
     auto env = this->Env();
     Napi::HandleScope scope(env);
 
-    if (!open && locked) {
-        EXCEPTION(Napi::String::New(env, "Database is closed"), SQLITE_MISUSE, exception);
+    if (IsClosed()) {
+        EXCEPTION("Database is closed", SQLITE_MISUSE, exception);
         Napi::Function cb = baton->callback.Value();
         // We don't call the actual callback, so we have to make sure that
         // the baton gets destroyed.
@@ -117,12 +121,12 @@ void Database::Schedule(Work_Callback callback, Baton* baton, bool exclusive) {
     // supposed to run after, and run concurrently with it. Parallel
     // throughput is unaffected: the queue is only non-empty once something
     // has had to wait.
-    if (!open || !queue.empty()
-            || ((locked || exclusive || serialize) && pending > 0)) {
+    if (!IsOpen() || !queue.empty()
+            || ((exclusiveHeld || exclusive || serialize) && pending > 0)) {
         queue.emplace(new Call(callback, baton, exclusive || serialize));
     }
     else {
-        locked = exclusive;
+        exclusiveHeld = exclusive;
         callback(baton);
     }
 }
@@ -201,11 +205,11 @@ void Database::Work_AfterOpen(napi_env e, napi_status status, void* data) {
 
     Napi::Value argv[1];
     if (baton->status != SQLITE_OK) {
-        EXCEPTION(Napi::String::New(env, baton->message.c_str()), baton->status, exception);
+        EXCEPTION(baton->message, baton->status, exception);
         argv[0] = exception;
     }
     else {
-        db->open = true;
+        db->db_state = DbState::Open;
         argv[0] = env.Null();
     }
 
@@ -214,12 +218,12 @@ void Database::Work_AfterOpen(napi_env e, napi_status status, void* data) {
     if (IS_FUNCTION(cb)) {
         TRY_CATCH_CALL(db->Value(), cb, 1, argv);
     }
-    else if (!db->open) {
+    else if (db->db_state != DbState::Open) {
         Napi::Value info[] = { Napi::String::New(env, "error"), argv[0] };
         EMIT_EVENT(db->Value(), 2, info);
     }
 
-    if (db->open) {
+    if (db->db_state == DbState::Open) {
         Napi::Value info[] = { Napi::String::New(env, "open") };
         EMIT_EVENT(db->Value(), 1, info);
         db->Process();
@@ -229,7 +233,7 @@ void Database::Work_AfterOpen(napi_env e, napi_status status, void* data) {
 Napi::Value Database::Open(const Napi::CallbackInfo& info) {
     auto env = this->Env();
     auto* db = this;
-    return Napi::Boolean::New(env, db->open);
+    return Napi::Boolean::New(env, db->IsOpen());
 }
 
 Napi::Value Database::IntegerModeGetter(const Napi::CallbackInfo& info) {
@@ -241,10 +245,44 @@ Napi::Value Database::IntegerModeGetter(const Napi::CallbackInfo& info) {
     }
 }
 
+Napi::Value Database::StateGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Napi::Object snapshot = Napi::Object::New(env);
+    snapshot.Set("open", Napi::Boolean::New(env, IsOpen()));
+    snapshot.Set("closing", Napi::Boolean::New(env, db_state == DbState::Closing));
+    snapshot.Set("locked", Napi::Boolean::New(env, exclusiveHeld));
+    snapshot.Set("serialized", Napi::Boolean::New(env, serialize));
+    snapshot.Set("pending", Napi::Number::New(env, pending));
+    snapshot.Set("queued", Napi::Number::New(env, static_cast<double>(queue.size())));
+    snapshot.Freeze();
+    return snapshot;
+}
+
+Napi::Value Database::ClosingGetter(const Napi::CallbackInfo& info) {
+    return Napi::Boolean::New(info.Env(), db_state == DbState::Closing);
+}
+
+Napi::Value Database::LockedGetter(const Napi::CallbackInfo& info) {
+    return Napi::Boolean::New(info.Env(), exclusiveHeld);
+}
+
+Napi::Value Database::SerializedGetter(const Napi::CallbackInfo& info) {
+    return Napi::Boolean::New(info.Env(), serialize);
+}
+
+Napi::Value Database::PendingGetter(const Napi::CallbackInfo& info) {
+    return Napi::Number::New(info.Env(), pending);
+}
+
+Napi::Value Database::QueuedGetter(const Napi::CallbackInfo& info) {
+    return Napi::Number::New(info.Env(), static_cast<double>(queue.size()));
+}
+
 Napi::Value Database::QueueBusy(const Napi::CallbackInfo& info) {
     // A cached statement operation bypasses Database::Schedule entirely, so
     // it would otherwise run straight past anything waiting here.
-    bool busy = closing || !queue.empty() || (locked && pending > 0);
+    bool busy = db_state == DbState::Closing || !queue.empty()
+        || (exclusiveHeld && pending > 0);
     return Napi::Boolean::New(info.Env(), busy);
 }
 
@@ -260,14 +298,14 @@ Napi::Value Database::Close(const Napi::CallbackInfo& info) {
 }
 
 void Database::Work_BeginClose(Baton* baton) {
-    assert(baton->db->locked);
-    assert(baton->db->open);
+    assert(baton->db->exclusiveHeld);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
     assert(baton->db->pending == 0);
 
     baton->db->pending++;
     baton->db->RemoveCallbacks();
-    baton->db->closing = true;
+    baton->db->db_state = DbState::Closing;
 
     auto env = baton->db->Env();
     CREATE_WORK("sqlite3.Database.Close", Work_Close, Work_AfterClose);
@@ -296,17 +334,19 @@ void Database::Work_AfterClose(napi_env e, napi_status status, void* data) {
     Napi::HandleScope scope(env);
 
     db->pending--;
-    db->closing = false;
+    // The exclusive close released the database either way.
+    db->exclusiveHeld = false;
 
     Napi::Value argv[1];
     if (baton->status != SQLITE_OK) {
-        EXCEPTION(Napi::String::New(env, baton->message.c_str()), baton->status, exception);
+        // The close failed (e.g. SQLITE_BUSY from outstanding
+        // statements): the connection is still open and usable.
+        db->db_state = DbState::Open;
+        EXCEPTION(baton->message, baton->status, exception);
         argv[0] = exception;
     }
     else {
-        db->open = false;
-        // Leave db->locked to indicate that this db object has reached
-        // the end of its life.
+        db->db_state = DbState::Closed;
         argv[0] = env.Null();
     }
 
@@ -316,12 +356,12 @@ void Database::Work_AfterClose(napi_env e, napi_status status, void* data) {
     if (IS_FUNCTION(cb)) {
         TRY_CATCH_CALL(db->Value(), cb, 1, argv);
     }
-    else if (db->open) {
+    else if (db->IsOpen()) {
         Napi::Value info[] = { Napi::String::New(env, "error"), argv[0] };
         EMIT_EVENT(db->Value(), 2, info);
     }
 
-    if (!db->open) {
+    if (!db->IsOpen()) {
         Napi::Value info[] = { Napi::String::New(env, "close") };
         EMIT_EVENT(db->Value(), 1, info);
         db->Process();
@@ -385,7 +425,7 @@ Napi::Value Database::Configure(const Napi::CallbackInfo& info) {
             return env.Null();
         }
        auto* baton = new Baton(db, handle);
-        baton->status = info[1].As<Napi::Number>().Int32Value();
+        baton->timeout = info[1].As<Napi::Number>().Int32Value();
         db->Schedule(SetBusyTimeout, baton);
     }
     else if (info[0].StrictEquals( Napi::String::New(env, "limit"))) {
@@ -434,13 +474,10 @@ Napi::Value Database::Configure(const Napi::CallbackInfo& info) {
         db->Schedule(RegisterUpdateCallback, baton);
     }
     else {
-        Napi::TypeError::New(env, (StringConcat(
-#if V8_MAJOR_VERSION > 6
-            info.GetIsolate(),
-#endif
-            info[0].As<Napi::String>(),
-            Napi::String::New(env, " is not a valid configuration option")
-        )).Utf8Value().c_str()).ThrowAsJavaScriptException();
+        Napi::TypeError::New(env,
+            info[0].As<Napi::String>().Utf8Value() +
+            " is not a valid configuration option"
+        ).ThrowAsJavaScriptException();
         return env.Null();
     }
 
@@ -453,12 +490,12 @@ Napi::Value Database::Interrupt(const Napi::CallbackInfo& info) {
     auto env = this->Env();
     auto* db = this;
 
-    if (!db->open) {
+    if (!db->IsOpen()) {
         Napi::Error::New(env, "Database is not open").ThrowAsJavaScriptException();
         return env.Null();
     }
 
-    if (db->closing) {
+    if (db->db_state == DbState::Closing) {
         Napi::Error::New(env, "Database is closing").ThrowAsJavaScriptException();
         return env.Null();
     }
@@ -470,17 +507,16 @@ Napi::Value Database::Interrupt(const Napi::CallbackInfo& info) {
 void Database::SetBusyTimeout(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
 
-    assert(baton->db->open);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
 
-    // Abuse the status field for passing the timeout.
-    sqlite3_busy_timeout(baton->db->_handle, baton->status);
+    sqlite3_busy_timeout(baton->db->_handle, baton->timeout);
 }
 
 void Database::SetLimit(Baton* b) {
     std::unique_ptr<LimitBaton> baton(static_cast<LimitBaton*>(b));
 
-    assert(baton->db->open);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
 
     sqlite3_limit(baton->db->_handle, baton->id, baton->value);
@@ -502,7 +538,7 @@ void Database::UpdateTraceMask(Database* db, sqlite3* handle) {
 
 void Database::RegisterTraceCallback(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
-    assert(baton->db->open);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
     auto* db = baton->db;
 
@@ -556,7 +592,7 @@ void Database::TraceCallback(Database* db, std::string* s) {
 
 void Database::RegisterProfileCallback(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
-    assert(baton->db->open);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
     auto* db = baton->db;
 
@@ -587,7 +623,7 @@ void Database::ProfileCallback(Database *db, ProfileInfo* i) {
 
 void Database::RegisterUpdateCallback(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
-    assert(baton->db->open);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
     auto* db = baton->db;
 
@@ -645,8 +681,8 @@ Napi::Value Database::Exec(const Napi::CallbackInfo& info) {
 }
 
 void Database::Work_BeginExec(Baton* baton) {
-    assert(baton->db->locked);
-    assert(baton->db->open);
+    assert(baton->db->exclusiveHeld);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
     assert(baton->db->pending == 0);
     baton->db->pending++;
@@ -678,6 +714,8 @@ void Database::Work_AfterExec(napi_env e, napi_status status, void* data) {
 
     auto* db = baton->db;
     db->pending--;
+    // The exclusive exec released the database.
+    db->exclusiveHeld = false;
 
     auto env = db->Env();
     Napi::HandleScope scope(env);
@@ -685,7 +723,7 @@ void Database::Work_AfterExec(napi_env e, napi_status status, void* data) {
     Napi::Function cb = baton->callback.Value();
 
     if (baton->status != SQLITE_OK) {
-        EXCEPTION(Napi::String::New(env, baton->message.c_str()), baton->status, exception);
+        EXCEPTION(baton->message, baton->status, exception);
 
         if (IS_FUNCTION(cb)) {
             Napi::Value argv[] = { exception };
@@ -722,10 +760,14 @@ void Database::Work_Wait(Baton* b) {
     auto env = baton->db->Env();
     Napi::HandleScope scope(env);
 
-    assert(baton->db->locked);
-    assert(baton->db->open);
+    assert(baton->db->exclusiveHeld);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
     assert(baton->db->pending == 0);
+
+    // The exclusive wait releases the database; Process sets it again
+    // when it dispatches the next exclusive call, if any.
+    baton->db->exclusiveHeld = false;
 
     Napi::Function cb = baton->callback.Value();
     if (IS_FUNCTION(cb)) {
@@ -750,8 +792,8 @@ Napi::Value Database::LoadExtension(const Napi::CallbackInfo& info) {
 }
 
 void Database::Work_BeginLoadExtension(Baton* baton) {
-    assert(baton->db->locked);
-    assert(baton->db->open);
+    assert(baton->db->exclusiveHeld);
+    assert(baton->db->IsOpen());
     assert(baton->db->_handle);
     assert(baton->db->pending == 0);
     baton->db->pending++;
@@ -786,6 +828,8 @@ void Database::Work_AfterLoadExtension(napi_env e, napi_status status, void* dat
 
     auto* db = baton->db;
     db->pending--;
+    // The exclusive loadExtension released the database.
+    db->exclusiveHeld = false;
 
     auto env = db->Env();
     Napi::HandleScope scope(env);
@@ -793,7 +837,7 @@ void Database::Work_AfterLoadExtension(napi_env e, napi_status status, void* dat
     Napi::Function cb = baton->callback.Value();
 
     if (baton->status != SQLITE_OK) {
-        EXCEPTION(Napi::String::New(env, baton->message.c_str()), baton->status, exception);
+        EXCEPTION(baton->message, baton->status, exception);
 
         if (IS_FUNCTION(cb)) {
             Napi::Value argv[] = { exception };

@@ -18,6 +18,7 @@ import type {
     sqlite3 as Sqlite3Namespace,
     SqliteError,
     Statement,
+    StatementRunSyncResult,
     TransactionOptions,
 } from '../lib/sqlite3.js';
 import sqlite3 from '../lib/sqlite3.js';
@@ -147,7 +148,8 @@ expectType<Database>(
 
 expectType<Row | undefined>(db.getSync('SELECT 1'));
 expectType<{ a: number } | undefined>(db.getSync<{ a: number }>('SELECT a'));
-expectType<{ lastID: number; changes: number }>(db.runSync('SELECT 1'));
+// lastID is number | bigint: it applies the connection's integer mode.
+expectType<StatementRunSyncResult>(db.runSync('SELECT 1'));
 expectType<Row[]>(db.allSync('SELECT 1'));
 expectType<{ a: number }[]>(db.allSync<{ a: number }>('SELECT a'));
 expectType<Statement>(db.prepareSync('SELECT 1'));

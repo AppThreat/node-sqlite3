@@ -21,9 +21,6 @@ class Database;
 
 class Database : public Napi::ObjectWrap<Database> {
 public:
-#if NAPI_VERSION < 6
-    static Napi::FunctionReference constructor;
-#endif
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
 
     // How INTEGER columns and lastID are converted to JS
@@ -36,18 +33,27 @@ public:
         INTEGER_MIXED = 2
     };
 
+    // The connection's lifecycle. Replaces the former overloaded `locked`
+    // bool, which meant "an exclusive call is in flight" while busy and
+    // "this object is dead" after a successful close — every consumer had
+    // to know which, and forgetting the tombstone reading was a bug class
+    // of its own.
+    enum class DbState {
+        Opening,  // constructor ran, sqlite3_open not yet completed
+        Open,     // handle live, no close in flight
+        Closing,  // sqlite3_close in flight on the worker
+        Closed    // close completed (or the object was never opened);
+                  // terminal for scheduling purposes
+    };
+
     static inline bool HasInstance(Napi::Value val) {
         auto env = val.Env();
         Napi::HandleScope scope(env);
         if (!val.IsObject()) return false;
         auto obj = val.As<Napi::Object>();
-#if NAPI_VERSION < 6
-        return obj.InstanceOf(constructor.Value());
-#else
         auto constructor =
             env.GetInstanceData<Napi::FunctionReference>();
         return obj.InstanceOf(constructor->Value());
-#endif
     }
 
     struct Baton {
@@ -56,6 +62,9 @@ public:
         Napi::FunctionReference callback;
         int status;
         std::string message;
+        // Payload for SetBusyTimeout (the only scheduled call that needs
+        // one); other work uses the fields of its derived baton.
+        int timeout = 0;
 
         Baton(Database* db_, Napi::Function cb_) :
                 db(db_), status(SQLITE_OK) {
@@ -123,8 +132,13 @@ public:
         sqlite3_int64 rowid;
     };
 
-    bool IsOpen() { return open; }
-    bool IsLocked() { return locked; }
+    // The sqlite handle exists and has not been closed. Note that Closing
+    // counts as open: work scheduled during a close waits behind it and is
+    // only failed (or runs) once the close's outcome is known. This is the
+    // old `open` bool's exact semantics.
+    bool IsOpen() { return db_state == DbState::Open || db_state == DbState::Closing; }
+    // Terminal: a close completed. The old `locked` tombstone.
+    bool IsClosed() { return db_state == DbState::Closed; }
 
     typedef Async<std::string, Database> AsyncTrace;
     typedef Async<ProfileInfo, Database> AsyncProfile;
@@ -139,7 +153,7 @@ public:
         RemoveCallbacks();
         sqlite3_close(_handle);
         _handle = NULL;
-        open = false;
+        db_state = DbState::Closed;
     }
 
 protected:
@@ -162,10 +176,24 @@ protected:
     /** Current integerMode as a string: 'number' | 'bigint' | 'mixed'. */
     Napi::Value IntegerModeGetter(const Napi::CallbackInfo& info);
 
+    // Read-only snapshot of the connection's scheduling state, computed
+    // on read from the authoritative fields; diagnostics and tests consume
+    // it. The statement cache's hot guard reads the individual accessors
+    // below instead (the per-call object construction measured +46% on
+    // db.getSync cached in bench, Deliverable 05).
+    Napi::Value StateGetter(const Napi::CallbackInfo& info);
+
+    // Individual read-only views of the same authoritative fields, for
+    // hot paths that must not pay for the state object's construction.
+    Napi::Value ClosingGetter(const Napi::CallbackInfo& info);
+    Napi::Value LockedGetter(const Napi::CallbackInfo& info);
+    Napi::Value SerializedGetter(const Napi::CallbackInfo& info);
+    Napi::Value PendingGetter(const Napi::CallbackInfo& info);
+    Napi::Value QueuedGetter(const Napi::CallbackInfo& info);
+
     // True while an exclusive operation (exec/close/wait/loadExtension) is
-    // running or waiting in the database queue. The JS statement cache uses
-    // it to fall back to the uncached path, whose prepare goes through
-    // Database::Schedule and therefore cannot overtake that operation.
+    // running or waiting in the database queue. Deprecated in favour of
+    // state; kept for one minor version as an alias.
     Napi::Value QueueBusy(const Napi::CallbackInfo& info);
 
     static void SetBusyTimeout(Baton* baton);
@@ -188,9 +216,13 @@ protected:
 protected:
     sqlite3* _handle = NULL;
 
-    bool open = false;
-    bool closing = false;
-    bool locked = false;
+    DbState db_state = DbState::Opening;
+    // True only while an exclusive call (exec/close/wait/loadExtension)
+    // holds the database: set when it is dispatched, cleared when it
+    // completes. The old sticky `locked` flag stayed true after an
+    // exclusive call finished (and forever after close); db.state exposes
+    // this one honestly.
+    bool exclusiveHeld = false;
     unsigned int pending = 0;
 
     bool serialize = false;

@@ -123,6 +123,7 @@ Napi::Object Statement::Init(Napi::Env env, Napi::Object exports) {
           static_cast<napi_property_attributes>(napi_configurable)),
       InstanceAccessor("changes", &Statement::GetChanges, nullptr,
           static_cast<napi_property_attributes>(napi_configurable)),
+      InstanceAccessor("finalized", &Statement::FinalizedGetter, nullptr),
     });
 
     exports.Set("Statement", t);
@@ -174,7 +175,7 @@ template <class T> void Statement::Error(T* baton) {
 
     // Fail hard on logic errors.
     assert(stmt->status != 0);
-    EXCEPTION(Napi::String::New(env, stmt->message.c_str()), stmt->status, exception);
+    EXCEPTION(stmt->message, stmt->status, exception);
 
     Napi::Function cb = baton->callback.Value();
 
@@ -223,9 +224,10 @@ Statement::Statement(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Statemen
     Statement* stmt = this;
 
     if (length > 3 && info[3].IsBoolean() && info[3].As<Napi::Boolean>().Value()) {
-        // Synchronous prepare. The idle gate mirrors IdleForInline()
-        // (db->locked is sticky history, not an in-flight marker).
-        if (!db->IsOpen() || db->closing || db->pending > 0
+        // Synchronous prepare. The idle gate mirrors IdleForInline():
+        // only DbState::Open (not Opening/Closing) with nothing in
+        // flight or queued.
+        if (db->db_state != Database::DbState::Open || db->pending > 0
                 || !db->queue.empty()) {
             Napi::Error::New(env,
                 "database is busy: sync methods require a fully idle database"
@@ -310,7 +312,38 @@ void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
     STATEMENT_END();
 
     if (stmt->status != SQLITE_OK) {
-        Error(baton.get());
+        // Who hears about a failed prepare? Normally the prepare's own
+        // callback, which every callback-style entry point supplies.
+        //
+        // When there is none -- the promise API's iterate()/fetch() path
+        // -- the error used to go to the statement's 'error' event while
+        // the calls queued behind the prepare were dropped in silence, so
+        // nothing ever settled their promises and the caller hung. That
+        // is the abort-during-prepare hang: sqlite3_interrupt() aborts a
+        // prepare just as readily as a step, so any abort landing in that
+        // window wedged the connection. Fail those calls instead; they
+        // are what the caller is actually waiting on.
+        //
+        // CleanQueue falls back to the 'error' event itself when the
+        // queue turns out to be empty, so nothing goes unreported.
+        Napi::Function prepare_cb = baton->callback.Value();
+        if ((IS_FUNCTION(prepare_cb)) || stmt->queue.empty()) {
+            Error(baton.get());
+        } else {
+            // Build the error before firing anything: a callback that
+            // throws leaves a pending exception, and constructing an
+            // Error while one is pending is a fatal napi error.
+            EXCEPTION(stmt->message, stmt->status, exception);
+            // Settle the queued calls first -- they are what the caller
+            // awaits -- then still report the failure on the statement
+            // itself, which is the documented surface for a prepare that
+            // was given no callback of its own.
+            stmt->FailQueue(exception, false);
+            Napi::Value info[] = {
+                Napi::String::New(env, "error"), exception
+            };
+            EMIT_EVENT(stmt->Value(), 2, info);
+        }
         stmt->Finalize_();
     }
     else {
@@ -656,15 +689,15 @@ bool Statement::Bind(Parameters&& parameters, bool supplied) {
             } break;
         }
 
-            if (status != SQLITE_OK) {
-                // Clear every binding so no stale SQLITE_STATIC pointer can
-                // dangle into the payloads we are about to release.
-                sqlite3_clear_bindings(_handle);
-                bound_payloads.clear();
-                message = std::string(sqlite3_errmsg(db->_handle));
-                return false;
-            }
+        if (status != SQLITE_OK) {
+            // Clear every binding so no stale SQLITE_STATIC pointer can
+            // dangle into the payloads we are about to release.
+            sqlite3_clear_bindings(_handle);
+            bound_payloads.clear();
+            message = std::string(sqlite3_errmsg(db->_handle));
+            return false;
         }
+    }
 
     return true;
 }
@@ -1340,17 +1373,17 @@ void Statement::Work_AfterFetch(napi_env e, napi_status status, void* data) {
 // connection, and no queued operation can be overtaken (FIFO intact).
 
 bool Statement::IdleForInline() {
-    // db->locked is deliberately not consulted: it is sticky history of
-    // the last dispatched call's exclusivity, not an in-flight marker.
     // pending == 0 plus an empty queue is the actual "nothing running or
-    // deferred" condition.
+    // deferred" condition. exclusiveHeld is not consulted: it says the
+    // last dispatched call was exclusive, not that anything is still
+    // running (pending and the queue say that).
     return prepared && !locked && !finalized && queue.empty()
-        && db->IsOpen() && !db->closing
+        && db->db_state == Database::DbState::Open
         && db->pending == 0 && db->queue.empty();
 }
 
 void Statement::ThrowStatementError(Napi::Env env) {
-    EXCEPTION(Napi::String::New(env, message.c_str()), status, exception);
+    EXCEPTION(message, status, exception);
     exception.As<Napi::Error>().ThrowAsJavaScriptException();
 }
 
@@ -1565,6 +1598,10 @@ Napi::Value Statement::GetChanges(const Napi::CallbackInfo& info) {
     return Napi::Number::New(env, last_changes);
 }
 
+Napi::Value Statement::FinalizedGetter(const Napi::CallbackInfo& info) {
+    return Napi::Boolean::New(info.Env(), finalized);
+}
+
 Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {
     Napi::EscapableHandleScope scope(env);
 
@@ -1701,6 +1738,37 @@ Napi::Value Statement::Finalize_(const Napi::CallbackInfo& info) {
     return stmt->db->Value();
 }
 
+// Finalize-on-GC safety net: a collected statement that was never
+// finalized is torn down here so a forgotten one degrades to "cleaned up
+// at the next GC" instead of blocking close() forever. This runs in the
+// ObjectWrap finalizer, so each step has to be safe there:
+//
+// - A statement with queued calls cannot reach this destructor: every
+//   queued Baton holds a Ref on it. CleanQueue therefore sees an empty
+//   queue and can never fire a JS callback from this context.
+// - sqlite3_finalize is pure C API and takes the connection mutex
+//   internally, so concurrent work on *other* statements of the same
+//   database is safe; a collected statement has no work of its own in
+//   flight.
+// - The Database cannot outlive this call: this statement holds a Ref on
+//   it, and its own handle cannot have been closed (sqlite3_close fails
+//   with SQLITE_BUSY while this statement was outstanding).
+// - db->Unref() is a reference-count operation, not a call into JS —
+//   the same class of work node-addon-api itself does in finalizers.
+//
+// db is NULL only when the constructor threw before validation finished;
+// then there is no handle, no Ref and nothing to release.
+Statement::~Statement() {
+    if (!finalized) {
+        finalized = true;
+        CleanQueue();
+        sqlite3_finalize(_handle);
+        _handle = NULL;
+        bound_payloads.clear();
+        if (db) db->Unref();
+    }
+}
+
 void Statement::Finalize_(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
     auto env = baton->stmt->Env();
@@ -1727,6 +1795,38 @@ void Statement::Finalize_() {
     db->Unref();
 }
 
+// Hands `error` to every call still queued on this statement, settling
+// each through whichever callback that kind of call settles through (see
+// Baton::Fail). Emits an 'error' event when nothing took it, unless the
+// caller reports the failure on the statement itself anyway.
+//
+// Callable from ~Statement: a queued Baton holds a Ref on the statement,
+// so a collected statement provably has an empty queue and nothing is
+// invoked from the finalizer.
+void Statement::FailQueue(Napi::Value error, bool emit_if_unhandled) {
+    auto env = this->Env();
+    Napi::HandleScope scope(env);
+
+    bool called = false;
+
+    // Clear out the queue so that this object can get GC'ed.
+    while (!queue.empty()) {
+        auto call = std::unique_ptr<Call>(queue.front());
+        queue.pop();
+
+        auto baton = std::unique_ptr<Baton>(call->baton);
+        if (baton->Fail(error)) called = true;
+    }
+
+    // When we couldn't call a callback function, emit an error on the
+    // Statement object.
+    if (!called && emit_if_unhandled) {
+        Napi::Value info[] = { Napi::String::New(env, "error"), error };
+        EMIT_EVENT(Value(), 2, info);
+    }
+
+}
+
 void Statement::CleanQueue() {
     auto env = this->Env();
     Napi::HandleScope scope(env);
@@ -1734,35 +1834,13 @@ void Statement::CleanQueue() {
     if (prepared && !queue.empty()) {
         // This statement has already been prepared and is now finalized.
         // Fire error for all remaining items in the queue.
-        EXCEPTION(Napi::String::New(env, "Statement is already finalized"), SQLITE_MISUSE, exception);
-        Napi::Value argv[] = { exception };
-        bool called = false;
-
-        // Clear out the queue so that this object can get GC'ed.
-        while (!queue.empty()) {
-            auto call = std::unique_ptr<Call>(queue.front());
-            queue.pop();
-
-            auto baton = std::unique_ptr<Baton>(call->baton);
-            Napi::Function cb = baton->callback.Value();
-
-            if (prepared && !cb.IsEmpty() &&
-                cb.IsFunction()) {
-                TRY_CATCH_CALL(Value(), cb, 1, argv);
-                called = true;
-            }
-        }
-
-        // When we couldn't call a callback function, emit an error on the
-        // Statement object.
-        if (!called) {
-            Napi::Value info[] = { Napi::String::New(env, "error"), exception };
-            EMIT_EVENT(Value(), 2, info);
-        }
+        EXCEPTION("Statement is already finalized", SQLITE_MISUSE, exception);
+        FailQueue(exception, true);
     }
     else while (!queue.empty()) {
-        // Just delete all items in the queue; we already fired an event when
-        // preparing the statement failed.
+        // Just delete all items in the queue; whatever is left here has
+        // already been reported -- either by the prepare's own callback,
+        // or by Work_AfterPrepare when there was none.
         auto call = std::unique_ptr<Call>(queue.front());
         queue.pop();
         // We don't call the actual callback, so we have to make sure that

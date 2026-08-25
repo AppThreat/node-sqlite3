@@ -184,6 +184,8 @@ export declare class Database extends EventEmitter {
      * is running or waiting on the queue. Used by the statement cache in
      * lib/sqlite3.js to avoid overtaking it.
      *
+     * @deprecated Use {@link Database.state} instead. Kept as an alias
+     *   for one minor version; removed in a future release.
      * @internal
      * @returns whether the database queue is busy.
      */
@@ -198,6 +200,115 @@ export declare class Database extends EventEmitter {
      * @since 9.0.0
      */
     readonly integerMode: IntegerMode;
+
+    /**
+     * A frozen snapshot of the connection's scheduling state, computed on
+     * read from the native side — the authoritative source, replacing the
+     * former JS-side `_serialized`/`_closing` mirrors (which could drift
+     * when `serialize()`/`parallelize()` was reached other than through
+     * the patched prototype).
+     *
+     * The individual fields are also exposed directly as accessors
+     * ({@link closing}, {@link locked}, {@link serialized},
+     * {@link pending}, {@link queued}) for hot paths: constructing the
+     * frozen object on every call measurably slows the statement cache.
+     *
+     * @since 9.0.0
+     */
+    readonly state: DatabaseState;
+
+    /**
+     * True while an asynchronous close is in flight; the snapshot field
+     * {@link DatabaseState.closing}. Also exposed individually because
+     * the statement cache reads it on every cached call.
+     *
+     * @since 9.0.0
+     */
+    readonly closing: boolean;
+
+    /**
+     * True while an exclusive operation (exec/close/wait/loadExtension)
+     * is running or waiting; the snapshot field
+     * {@link DatabaseState.locked}.
+     *
+     * @since 9.0.0
+     */
+    readonly locked: boolean;
+
+    /**
+     * True while the connection is in serialize mode (strict FIFO); the
+     * snapshot field {@link DatabaseState.serialized}.
+     *
+     * @since 9.0.0
+     */
+    readonly serialized: boolean;
+
+    /**
+     * Operations currently in flight on the connection; the snapshot
+     * field {@link DatabaseState.pending}. Statement work bypasses the
+     * database queue, so this is not the length of {@link queued}.
+     *
+     * @since 9.0.0
+     */
+    readonly pending: number;
+
+    /**
+     * Calls waiting in the database queue; the snapshot field
+     * {@link DatabaseState.queued}.
+     *
+     * @since 9.0.0
+     */
+    readonly queued: number;
+}
+
+/**
+ * The scheduling state of a connection, as a frozen object computed on
+ * read (`db.state`). Every field is main-thread state; the object is a
+ * snapshot, so fields are consistent with each other but may change
+ * immediately after the read.
+ *
+ * - `open`: the connection is open (true from open until close
+ *   completes).
+ * - `closing`: an asynchronous close is in flight.
+ * - `locked`: an exclusive operation (exec/close/wait/loadExtension) is
+ *   running or waiting; statement operations must not overtake it.
+ * - `serialized`: the connection is in serialize mode (strict FIFO).
+ * - `pending`: operations currently in flight on the connection
+ *   (statement work bypasses the database queue, so this is not the
+ *   length of `queued`).
+ * - `queued`: calls waiting in the database queue.
+ *
+ * @since 9.0.0
+ */
+export interface DatabaseState {
+    /** True from open until close completes. */
+    open: boolean;
+    /** True while an asynchronous close is in flight. */
+    closing: boolean;
+    /** True while an exclusive operation is running or waiting. */
+    locked: boolean;
+    /** True while the connection is in serialize mode. */
+    serialized: boolean;
+    /** Operations currently in flight on the connection. */
+    pending: number;
+    /** Calls waiting in the database queue. */
+    queued: number;
+}
+
+/**
+ * What `runSync()` resolves to on both `Database` and `Statement`.
+ * `changes` is a plain safe number; `lastID` applies the connection's
+ * integer mode (`number` or `bigint`). On the statement form `lastID`
+ * is lazy: the `'number'`-mode `RangeError` for an unsafe rowid fires
+ * when the field is read.
+ *
+ * @since 9.0.0
+ */
+export interface StatementRunSyncResult {
+    /** The inserted rowid, subject to the integer mode. */
+    lastID: number | bigint;
+    /** Rows changed by the statement. */
+    changes: number;
 }
 
 /**
@@ -268,8 +379,10 @@ export declare class Statement extends EventEmitter {
     /**
      * Synchronous fast path: steps once on the main thread and records
      * `lastID`/`changes`. Returns the statement itself (not a result
-     * object) — unlike `Database#runSync`, which cannot return its
-     * private statement; read `lastID`/`changes` off the statement.
+     * object) so calls chain, unlike `Database#runSync`, whose private
+     * statement it cannot return — read `lastID`/`changes` off the
+     * statement; they stay lazy, so the `'number'`-mode `RangeError`
+     * for an unsafe rowid fires on read.
      *
      * @param params parameters as one array/named object or variadic
      *   values.
@@ -313,6 +426,16 @@ export declare class Statement extends EventEmitter {
      * first run.
      */
     readonly changes: number | undefined;
+
+    /**
+     * True once the statement has been finalized: explicitly with
+     * `finalize()`, automatically after a failed prepare, or by the GC
+     * safety net. Operations on a finalized statement fail with
+     * `SQLITE_MISUSE`.
+     *
+     * @since 9.0.0
+     */
+    readonly finalized: boolean;
 }
 
 /**

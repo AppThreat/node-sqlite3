@@ -139,6 +139,23 @@ public:
             stmt->Ref();
             callback.Reset(cb_, 1);
         }
+
+        // Delivers `error` to whichever callback settles this call, used
+        // by CleanQueue when the statement is torn down with work still
+        // queued. Returns false when the call has no callback to settle,
+        // so the caller can fall back to an 'error' event. For most calls
+        // that callback is `callback`; each() overrides this, because
+        // there `callback` is the per-row callback and firing it would
+        // hand the caller a phantom row.
+        virtual bool Fail(Napi::Value error) {
+            Napi::Function cb = callback.Value();
+            if (cb.IsEmpty() || !cb.IsFunction()) return false;
+            Napi::Value argv[] = { error };
+            // A throwing callback still counts as settled: it ran.
+            TRY_CATCH_CALL(stmt->Value(), cb, 1, argv, true);
+            return true;
+        }
+
         virtual ~Baton() {
             parameters.clear();
             if (request) napi_delete_async_work(stmt->Env(), request);
@@ -192,6 +209,24 @@ public:
 
         EachBaton(Statement* stmt_, Napi::Function cb_) :
             Baton(stmt_, cb_) {}
+
+        // When each() was given a completion handler that handler settles
+        // the call, and takes (err, rowCount). Without one the per-row
+        // callback is the only thing the caller passed, so the error goes
+        // there instead — never to both, and never a row-shaped call with
+        // no error.
+        virtual bool Fail(Napi::Value error) override {
+            Napi::Function done = completed.Value();
+            if (!done.IsEmpty() && done.IsFunction()) {
+                Napi::Value argv[] = {
+                    error, Napi::Number::New(error.Env(), 0)
+                };
+                TRY_CATCH_CALL(stmt->Value(), done, 2, argv, true);
+                return true;
+            }
+            return Baton::Fail(error);
+        }
+
         virtual ~EachBaton() override {
             completed.Reset();
         }
@@ -206,7 +241,7 @@ public:
         }
         virtual ~PrepareBaton() override {
             stmt->Unref();
-            if (!db->IsOpen() && db->IsLocked()) {
+            if (db->IsClosed()) {
                 // The database handle was closed before the statement could be
                 // prepared.
                 stmt->Finalize_();
@@ -259,9 +294,11 @@ public:
 
     Statement(const Napi::CallbackInfo& info);
 
-    ~Statement() {
-        if (!finalized) Finalize_();
-    }
+    // Finalize-on-GC safety net: tears down a collected statement that
+    // was never finalized. Runs in the ObjectWrap finalizer, so it must
+    // not call into JS; see the definition in statement.cc for why each
+    // step is safe there.
+    ~Statement();
 
     WORK_DEFINITION(Bind)
     WORK_DEFINITION(Get)
@@ -303,6 +340,11 @@ public:
     Napi::Value GetLastID(const Napi::CallbackInfo& info);
     Napi::Value GetLastIDBigInt(const Napi::CallbackInfo& info);
     Napi::Value GetChanges(const Napi::CallbackInfo& info);
+
+    // True once the statement has been finalized: explicitly, after a
+    // failed prepare, or by the GC safety net. Operations on a finalized
+    // statement fail with SQLITE_MISUSE.
+    Napi::Value FinalizedGetter(const Napi::CallbackInfo& info);
 
 protected:
     static void Work_BeginPrepare(Database::Baton* baton);
@@ -346,8 +388,13 @@ protected:
     // prepared baton or NULL after throwing.
     template <class T> T* BindSync(const Napi::CallbackInfo& info);
 
+    void FailQueue(Napi::Value error, bool emit_if_unhandled = true);
+
+
 protected:
-    Database* db;
+    // NULL when the constructor threw before validation completed; every
+    // destructor path gates on it.
+    Database* db = NULL;
 
     sqlite3_stmt* _handle = NULL;
     int status = SQLITE_OK;

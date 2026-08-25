@@ -34,6 +34,7 @@ import type {
     RunResult,
     SqliteError,
     Statement,
+    StatementRunSyncResult,
 } from './native.js';
 import type {
     FetchCallback,
@@ -401,16 +402,15 @@ declare module './native.js' {
         getSync<T = Row>(sql: string, ...params: BindValue[]): T | undefined;
         /** Synchronous get with one array/named bind object. */
         getSync<T = Row>(sql: string, params: BindParams): T | undefined;
-        /** Synchronous run on the main thread; returns `{lastID, changes}`. */
-        runSync(
-            sql: string,
-            ...params: BindValue[]
-        ): { lastID: number; changes: number };
+        /**
+         * Synchronous run on the main thread; returns
+         * {@link StatementRunSyncResult} with `lastID` read eagerly
+         * (the `'number'`-mode `RangeError` for an unsafe rowid fires
+         * here).
+         */
+        runSync(sql: string, ...params: BindValue[]): StatementRunSyncResult;
         /** Synchronous run with one array/named bind object. */
-        runSync(
-            sql: string,
-            params: BindParams,
-        ): { lastID: number; changes: number };
+        runSync(sql: string, params: BindParams): StatementRunSyncResult;
         /** Synchronous all on the main thread. */
         allSync<T = Row>(sql: string, ...params: BindValue[]): T[];
         /** Synchronous all with one array/named bind object. */
@@ -466,10 +466,6 @@ declare module './native.js' {
         _stmtCache?: Map<string, Statement>;
         /** Statement cache capacity. @internal */
         _stmtCacheMax?: number;
-        /** Mirror of the native serialize state. @internal */
-        _serialized?: boolean;
-        /** True once close() started draining the cache. @internal */
-        _closing?: boolean;
         /** Sync-path statement resolver. @internal */
         _statementForSync(sql: string): {
             statement: Statement;

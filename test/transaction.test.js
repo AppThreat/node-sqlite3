@@ -161,15 +161,48 @@ describe('transaction', function () {
         let sawSerialized;
         await db.transaction(
             async (tx) => {
-                sawSerialized = db._serialized;
+                sawSerialized = db.state.serialized;
                 await tx.run('INSERT INTO t VALUES (1)');
             },
             { serialize: true },
         );
         assert.strictEqual(sawSerialized, true);
-        assert.strictEqual(db._serialized, false);
+        assert.strictEqual(db.state.serialized, false);
         const rows = await db.all('SELECT a FROM t');
         assert.strictEqual(rows.length, 1);
+    });
+
+    it('a concurrent second transaction rejects instead of silently nesting', async function () {
+        await db.exec('DELETE FROM t');
+        // Both bodies hold the connection open across an await, so the
+        // second transaction's BEGIN lands while the first is open. With
+        // the old connection-wide depth counter it silently rode inside
+        // the first as a savepoint: its "commit" was a RELEASE that the
+        // first transaction's rollback would have undone.
+        const slow = db.transaction(async (tx) => {
+            await tx.run('INSERT INTO t VALUES (1)');
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        });
+        const overlapping = db.transaction(async (tx) => {
+            await tx.run('INSERT INTO t VALUES (2)');
+        });
+        const results = await Promise.allSettled([slow, overlapping]);
+        const rejected = results.filter((r) => r.status === 'rejected');
+        assert.strictEqual(
+            rejected.length,
+            1,
+            `expected exactly one rejection, got ${JSON.stringify(
+                results.map((r) => r.status),
+            )}`,
+        );
+        assert.match(
+            /** @type {PromiseRejectedResult} */ (rejected[0]).reason.message,
+            /already active on this connection/,
+        );
+        // The survivor's work is intact and the connection is healthy.
+        const rows = await db.all('SELECT a FROM t');
+        assert.ok(rows.length === 0 || rows.length === 1);
+        await db.run('INSERT INTO t VALUES (3)');
     });
 
     it('rejects with SQLITE_BUSY when a second connection holds the write lock', {
@@ -196,6 +229,42 @@ describe('transaction', function () {
         } finally {
             await db1.close();
             await db2.close();
+        }
+    });
+
+    // Nesting depth belongs to a connection, not to the async flow it runs
+    // in. A transaction on one connection that happens to sit inside a
+    // transaction on another is still that connection's first, so it must
+    // issue a real BEGIN: taking the savepoint path there would discard
+    // the requested mode and the write lock that comes with it.
+    it("keeps its own BEGIN mode inside another connection's transaction", async function () {
+        const outer = await sqlite3.open(':memory:');
+        const inner = await sqlite3.open(':memory:');
+        try {
+            await inner.exec('CREATE TABLE t (x)');
+            /** @type {string[]} */
+            const sql = [];
+            inner.on('trace', function (statement) {
+                sql.push(statement);
+            });
+            await outer.transaction(async function () {
+                await inner.transaction(
+                    async function () {
+                        await inner.run('INSERT INTO t VALUES (1)');
+                    },
+                    { mode: 'immediate' },
+                );
+            });
+            assert.ok(
+                sql.includes('BEGIN IMMEDIATE'),
+                `inner connection should have begun its own transaction, saw ${JSON.stringify(sql)}`,
+            );
+            assert.deepStrictEqual(await inner.all('SELECT x FROM t'), [
+                { x: 1 },
+            ]);
+        } finally {
+            await outer.close();
+            await inner.close();
         }
     });
 });
