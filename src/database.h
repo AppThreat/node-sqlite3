@@ -149,15 +149,21 @@ protected:
     Napi::Value Configure(const Napi::CallbackInfo& info);
     Napi::Value Interrupt(const Napi::CallbackInfo& info);
 
+    // True while an exclusive operation (exec/close/wait/loadExtension) is
+    // running or waiting in the database queue. The JS statement cache uses
+    // it to fall back to the uncached path, whose prepare goes through
+    // Database::Schedule and therefore cannot overtake that operation.
+    Napi::Value QueueBusy(const Napi::CallbackInfo& info);
+
     static void SetBusyTimeout(Baton* baton);
     static void SetLimit(Baton* baton);
 
     static void RegisterTraceCallback(Baton* baton);
-    static void TraceCallback(void* db, const char* sql);
+    static void UpdateTraceMask(Database* db, sqlite3* handle);
+    static int TraceV2Callback(unsigned int type, void* ctx, void* p, void* x);
     static void TraceCallback(Database* db, std::string* sql);
 
     static void RegisterProfileCallback(Baton* baton);
-    static void ProfileCallback(void* db, const char* sql, sqlite3_uint64 nsecs);
     static void ProfileCallback(Database* db, ProfileInfo* info);
 
     static void RegisterUpdateCallback(Baton* baton);
