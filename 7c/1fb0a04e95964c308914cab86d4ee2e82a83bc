@@ -1,0 +1,27 @@
+lib/promises.js
+  s_1246da50fbe044::t_7754942a141e2d 568,572
+  s_1246da50fbe044::t_cc66191a38a473 535
+lib/sqlite3.js
+  s_1246da50fbe044::t_dd9e127727e54b 664
+  s_1246da50fbe044::t_ce66802b73c8f2 475
+  s_1246da50fbe044::t_4000fc12f428d7 672-675
+test/promises.test.js
+  s_1246da50fbe044::t_1a90a668dbe1f6 319-328,332,334-343
+  s_1246da50fbe044::t_63ebf9e30384bc 329-331,333
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7c1fb0a04e95964c308914cab86d4ee2e82a83bc",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
