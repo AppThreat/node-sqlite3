@@ -1,0 +1,36 @@
+lib/promises.js
+  s_1246da50fbe044::t_e2acccc40dfe6d 427-429,431-434,437-440,444-445,450
+  s_1246da50fbe044::t_55894521e25ad3 281-287,294,305-308,314-318
+  s_1246da50fbe044::t_88fd18e08ab896 319-320
+test/other_objects.test.js
+  s_1246da50fbe044::t_691f4d11d9502b 122-123,152-153
+  s_1246da50fbe044::t_91d0c419908dfc 121,124,151,154
+test/iterate.test.js
+  s_1246da50fbe044::t_27d7439c337775 70-88
+test/transaction.test.js
+  s_1246da50fbe044::t_91d0c419908dfc 148-153
+test/abort.test.js
+  s_1246da50fbe044::t_2cf585da11f25a 116-117,120-123,131,134-136
+  s_1246da50fbe044::t_e7dd0cc922b9fc 108-115,118-119,124-130,132-133
+test/marshalling.test.js
+  s_1246da50fbe044::t_91d0c419908dfc 231,234
+  s_1246da50fbe044::t_691f4d11d9502b 232-233
+lib/sqlite3.d.ts
+  s_1246da50fbe044::t_967f07aae81728 275,277,279,472-475,477-481,483-487,489-493,495-499,501-505,507-510,512-516,621,737-741,747-750,754-756,758-760,762-764,766-768,770-772,774-776
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5a157413b60606892e1fed063930352ca16c84c2",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
