@@ -171,3 +171,30 @@ missing open flags `OPEN_NOMUTEX`, `OPEN_MEMORY`, `OPEN_EXRESCODE`.
   enumerable properties assigned after each run; they read `undefined`
   before the first run, and `JSON.stringify` of a statement no longer
   includes them.
+
+## TypeScript consumers
+
+The type declarations are now generated (`pnpm run gen-types`) from the
+JSDoc in `lib/*.js` plus two hand-written declaration files (`lib/native.d.ts`
+for the addon's shape, `lib/augment.d.ts` for the JS layer's members), and
+CI fails if they drift. Behavioural changes visible in the types:
+
+- Parameterized promise calls now resolve to `Promise`: `db.all(sql, 1)`
+  is `Promise<Row[]>` (previously it fell through to a callback overload
+  and typed as the database). Callback calls still type as the receiver.
+- Promise-mode methods that accept an `AbortSignal` type the trailing
+  `{ signal }` options object (`SignalOptions`); `iterate()`/`stream()`
+  accept it too.
+- Bind parameters are typed (`BindValue`/`BindParams`), so binding e.g. a
+  `Symbol` is a compile error, matching the runtime strict-binding rule.
+- The SQLite constants have literal types (`sqlite3.OPEN_READONLY` is
+  `1`), so flag combinations are checkable.
+- `db.get`'s callback row is `row?: T` and the promise resolves
+  `T | undefined` in every mode, matching the runtime.
+- The namespace carries `cached.objects`, and the classes expose
+  `db.filename`/`db.mode`/`stmt.sql` and the `Backup` own-properties,
+  none of which were declared before.
+- The ~128 module-level `export const` constants that the old
+  declarations listed never existed at runtime (importing them by name
+  returned `undefined`); they are gone from the types — use the default
+  namespace object, which does carry them.

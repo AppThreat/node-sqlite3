@@ -27,8 +27,11 @@
     },
     "devDependencies": {
         "@biomejs/biome": "2.5.10",
+        "@types/node": "^24.13.3",
         "prebuildify": "^6.0.1",
-        "semver": "^7.8.5"
+        "semver": "^7.8.5",
+        "tsd": "^0.33.0",
+        "typescript": "~5.9.3"
     },
     "peerDependencies": {
         "node-gyp": "12.x"
@@ -55,7 +58,9 @@
         "lint:check": "biome check",
         "lint:errors": "biome check --diagnostic-level=error",
         "lint:jsdoc": "node contrib/check-jsdoc.js",
-        "test": "node test/support/createdb.js && node tools/check-no-only.js && node --test --test-reporter=spec --test-timeout=20000 'test/*.test.js'"
+        "test": "node test/support/createdb.js && node tools/check-no-only.js && node --test --test-reporter=spec --test-timeout=20000 'test/*.test.js'",
+        "gen-types": "node tools/gen-types.js",
+        "test:types": "tsd && tsc --noEmit -p tsconfig.check.json"
     },
     "license": "BSD-3-Clause",
     "keywords": [
@@ -66,5 +71,8 @@
     ],
     "type": "module",
     "main": "./lib/sqlite3.js",
-    "types": "./lib/sqlite3.d.ts"
+    "types": "./lib/sqlite3.d.ts",
+    "tsd": {
+        "directory": "types"
+    }
 }

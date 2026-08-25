@@ -1520,9 +1520,10 @@ Napi::Value Statement::Int64ToJS(Napi::Env env, sqlite3_int64 value,
     const bool safe = value >= -(1LL << 53) + 1 && value < (1LL << 53);
     switch (db->integer_mode) {
         case Database::INTEGER_BIGINT:
-            return Napi::BigInt::New(env, value);
+            return Napi::BigInt::New(env, static_cast<int64_t>(value));
         case Database::INTEGER_MIXED:
-            if (!safe) return Napi::BigInt::New(env, value);
+            if (!safe)
+                return Napi::BigInt::New(env, static_cast<int64_t>(value));
             return Napi::Number::New(env, static_cast<double>(value));
         default:
             if (safe) return Napi::Number::New(env, static_cast<double>(value));
@@ -1555,7 +1556,7 @@ Napi::Value Statement::GetLastID(const Napi::CallbackInfo& info) {
 Napi::Value Statement::GetLastIDBigInt(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     if (!has_run_result) return env.Undefined();
-    return Napi::BigInt::New(env, last_insert_id);
+    return Napi::BigInt::New(env, static_cast<int64_t>(last_insert_id));
 }
 
 Napi::Value Statement::GetChanges(const Napi::CallbackInfo& info) {

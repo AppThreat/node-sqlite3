@@ -117,5 +117,31 @@
             "!test/tmp",
             "!test/nw"
         ]
-    }
+    },
+    "overrides": [
+        {
+            "includes": [
+                "lib/sqlite3.d.ts",
+                "lib/promises.d.ts",
+                "lib/trace.d.ts"
+            ],
+            "formatter": {
+                "enabled": false
+            },
+            "assist": {
+                "actions": {
+                    "source": {
+                        "organizeImports": "off"
+                    }
+                }
+            },
+            "linter": {
+                "rules": {
+                    "complexity": {
+                        "noBannedTypes": "off"
+                    }
+                }
+            }
+        }
+    ]
 }

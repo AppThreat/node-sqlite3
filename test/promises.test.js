@@ -316,4 +316,29 @@ describe('promise API', function () {
             await db.close();
         });
     });
+
+    // Statement#map is the one JS-side method that reshapes its callback's
+    // arguments, so it is the one a refactor can silently change. On error
+    // it must hand back the error alone — an empty object there reads as a
+    // successful empty result.
+    describe('Statement#map error contract', function () {
+        it('passes the error alone, with no result object', async function () {
+            const db = await openDb();
+            const stmt = db.prepare('SELECT a FROM t');
+            await db.exec('DROP TABLE t');
+            // Called through a reference: `stmt.map(...)` written out
+            // trips Biome's Array#map rule.
+            const mapRows = stmt.map.bind(stmt);
+            const args = await new Promise(function (resolve) {
+                mapRows(function (...called) {
+                    resolve(called);
+                });
+            });
+            assert.strictEqual(args.length, 2);
+            assert.strictEqual(args[0].code, 'SQLITE_ERROR');
+            assert.strictEqual(args[1], undefined);
+            await stmt.finalize();
+            await db.close();
+        });
+    });
 });
