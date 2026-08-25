@@ -130,10 +130,10 @@ inline bool OtherIsInt(Napi::Number source) {
     napi_value TRY_CATCH_CALL_args[TRY_CATCH_CALL_MAX_ARGS];                   \
     /* via a pointer so that argc == 0 may pass a NULL argv */                 \
     const Napi::Value* TRY_CATCH_CALL_src = (argv);                            \
-    for (size_t TRY_CATCH_CALL_i = 0;                                          \
-         TRY_CATCH_CALL_i < static_cast<size_t>(argc);                         \
+    for (int TRY_CATCH_CALL_i = 0; TRY_CATCH_CALL_i < (argc);                  \
          TRY_CATCH_CALL_i++) {                                                 \
-        TRY_CATCH_CALL_args[TRY_CATCH_CALL_i] = TRY_CATCH_CALL_src[TRY_CATCH_CALL_i]; \
+        TRY_CATCH_CALL_args[TRY_CATCH_CALL_i] =                                \
+            TRY_CATCH_CALL_src[TRY_CATCH_CALL_i];                              \
     }                                                                          \
     Napi::Value res = (callback).Call(Napi::Value(context),                    \
         static_cast<size_t>(argc), TRY_CATCH_CALL_args);                       \
