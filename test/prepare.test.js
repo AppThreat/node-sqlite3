@@ -39,7 +39,11 @@ describe('prepare', function () {
         });
 
         it('should prepare, run and finalize the statement', function (_t, done) {
-            db.prepare('CREATE TABLE foo (text bar)').run().finalize(done);
+            db.prepare('CREATE TABLE foo (text bar)')
+                .run(function (err) {
+                    if (err) throw err;
+                })
+                .finalize(done);
         });
 
         after(function (_t, done) {
@@ -63,7 +67,9 @@ describe('prepare', function () {
             db.prepare(
                 'CREATE TABLE foo (txt text, num int, flt float, blb blob)',
             )
-                .run()
+                .run(function (err) {
+                    if (err) throw err;
+                })
                 .finalize(done);
         });
 
@@ -142,7 +148,11 @@ describe('prepare', function () {
         let retrieved = 0;
 
         it('should create the table', function (_t, done) {
-            db.prepare('CREATE TABLE foo (num int)').run().finalize(done);
+            db.prepare('CREATE TABLE foo (num int)')
+                .run(function (err) {
+                    if (err) throw err;
+                })
+                .finalize(done);
         });
 
         it('should insert two rows', function (_t, done) {
@@ -402,7 +412,9 @@ describe('prepare', function () {
             db.prepare(
                 'CREATE TABLE foo (txt text, num int, flt float, blb blob)',
             )
-                .run()
+                .run(function (err) {
+                    if (err) throw err;
+                })
                 .finalize(done);
         });
 

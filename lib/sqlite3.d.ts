@@ -253,7 +253,129 @@ export interface SqliteError extends Error {
  */
 export interface RunResult extends Statement {}
 
+/**
+ * Options accepted by every promise-mode method and by iterate()/
+ * transaction(). Aborting interrupts the whole connection (a SQLite
+ * constraint) and rejects with the signal's reason.
+ * @since 9.0.0
+ */
+export interface SignalOptions {
+    signal?: AbortSignal;
+}
+
+/**
+ * What promise-mode run() resolves to. The values are captured when the
+ * statement completes (a reused statement cannot corrupt an older result),
+ * and lastID keeps the 'number'-mode RangeError lazy: it throws only when
+ * read, never merely because the promise resolved. lastIDBigInt is exact
+ * in every integer mode.
+ * @since 9.0.0
+ */
+export interface PromiseRunResult {
+    /** The inserted rowid, subject to the integer mode. */
+    readonly lastID: number | bigint;
+    /** The inserted rowid, exact in every integer mode. */
+    readonly lastIDBigInt: bigint;
+    /** Rows changed by the statement. */
+    readonly changes: number;
+}
+
+/** One row as returned for untyped queries. */
+export type Row = Record<string, unknown>;
+
+/**
+ * Callback of Statement#fetch: receives up to `count` rows and whether the
+ * cursor is exhausted.
+ * @since 9.0.0
+ */
+export type FetchCallback = (
+    /** the failure, if any. */
+    err: Error | null,
+    /** up to `count` result rows. */
+    rows: Row[],
+    /** true when the cursor is exhausted. */
+    done: boolean,
+) => void;
+
+/** Options for Database#transaction. @since 9.0.0 */
+export interface TransactionOptions extends SignalOptions {
+    /** Transaction start mode. Default 'deferred'. */
+    mode?: 'deferred' | 'immediate' | 'exclusive';
+    /** Nest via SAVEPOINT even at the top level. */
+    savepoint?: boolean;
+    /**
+     * Run the body inside serialize() (strict FIFO, at the cost of
+     * bypassing the statement cache). Default false: a transaction is
+     * connection-wide and concurrent work on the same connection races it.
+     */
+    serialize?: boolean;
+}
+
 export class Statement extends events.EventEmitter {
+    // ---- Promise mode (v9): a call whose last argument is not a function
+    // returns a promise instead of `this`. The overloads below express the
+    // arity-0 promise calls exactly; calls that bind parameters without a
+    // callback resolve to Promise at runtime but fall through to the
+    // variadic callback overloads until Deliverable 04 regenerates these
+    // definitions.
+
+    /** @returns Promise<void>. @since 9.0.0 */
+    bind(): Promise<void>;
+    /** @returns Promise<PromiseRunResult>. @since 9.0.0 */
+    run(): Promise<PromiseRunResult>;
+    /** @returns Promise<Row | undefined>. @since 9.0.0 */
+    get(): Promise<Row | undefined>;
+    /** @returns Promise<Row[]>. @since 9.0.0 */
+    all(): Promise<Row[]>;
+    /** @returns Promise<Record<string, unknown>>. @since 9.0.0 */
+    map(): Promise<Record<string, unknown>>;
+    /** @returns Promise<void>. @since 9.0.0 */
+    reset(): Promise<void>;
+    /** @returns Promise<void>. @since 9.0.0 */
+    finalize(): Promise<void>;
+
+    /**
+     * Steps up to `count` rows into one batch without resetting the
+     * statement between calls, so successive fetches continue one cursor.
+     * The native backing of iterate(); usable directly for paged reads.
+     *
+     * @param count maximum number of rows to fetch (>= 1).
+     * @param params bind parameters, bound on the first fetch of a run.
+     * @param callback receives (err, rows, done).
+     * @returns this, for chaining.
+     * @since 9.0.0
+     * @example
+     * stmt.fetch(100, (err, rows, done) => { ... });
+     */
+    fetch(count: number, callback: FetchCallback): this;
+    fetch(count: number, params: any, callback: FetchCallback): this;
+
+    /**
+     * Iterates this statement's results with backpressure, pulling batches
+     * (64..1024 rows) only as the consumer asks. On break/throw the
+     * statement is reset (not finalized) and stays usable; two concurrent
+     * iterators over the same statement throw.
+     *
+     * @param params bind parameters, then optionally `{ signal }`.
+     * @returns an async iterator that is itself async-iterable.
+     * @since 9.0.0
+     * @example
+     * for await (const row of stmt.iterate(42)) { ... }
+     */
+    iterate(...params: any[]): AsyncIterableIterator<Row>;
+
+    /**
+     * `await using` support: finalizes the statement. Idempotent.
+     * @since 9.0.0
+     */
+    [Symbol.asyncDispose](): Promise<void>;
+
+    /**
+     * `using` support for prepareSync() results: initiates an async
+     * finalize synchronously. @since 9.0.0
+     */
+    [Symbol.dispose](): void;
+
     bind(callback?: (err: Error | null) => void): this;
     bind(...params: any[]): this;
 
@@ -340,6 +462,60 @@ export class Database extends events.EventEmitter {
         callback?: (err: Error | null) => void,
     );
 
+    // ---- Promise mode (v9): a call whose last argument is not a function
+    // returns a promise instead of `this`. The overloads below express the
+    // arity-1 promise calls exactly; calls that bind parameters without a
+    // callback resolve to Promise at runtime but fall through to the
+    // variadic callback overloads until Deliverable 04 regenerates these
+    // definitions.
+
+    /**
+     * @returns a promise resolving once the connection is closed.
+     * @since 9.0.0
+     */
+    close(): Promise<void>;
+    /**
+     * @param sql the statement to run.
+     * @returns a promise resolving the run result.
+     * @since 9.0.0
+     */
+    run(sql: string): Promise<PromiseRunResult>;
+    /**
+     * @param sql the query to run.
+     * @returns a promise resolving the first row, or undefined.
+     * @since 9.0.0
+     */
+    get(sql: string): Promise<Row | undefined>;
+    /**
+     * @param sql the query to run.
+     * @returns a promise resolving every result row.
+     * @since 9.0.0
+     */
+    all(sql: string): Promise<Row[]>;
+    /**
+     * @param sql the query to run.
+     * @returns a promise resolving the rows keyed by their first column.
+     * @since 9.0.0
+     */
+    map(sql: string): Promise<Record<string, unknown>>;
+    /**
+     * @param sql one or more statements to execute.
+     * @returns a promise resolving once every statement has run.
+     * @since 9.0.0
+     */
+    exec(sql: string): Promise<void>;
+    /**
+     * @returns a promise resolving once the queue has drained.
+     * @since 9.0.0
+     */
+    wait(): Promise<void>;
+    /**
+     * @param filename path to the extension to load.
+     * @returns a promise resolving once the extension is loaded.
+     * @since 9.0.0
+     */
+    loadExtension(filename: string): Promise<void>;
+
     close(callback?: (err: Error | null) => void): void;
 
     run(
@@ -410,6 +586,74 @@ export class Database extends events.EventEmitter {
      * getSync/runSync/allSync fast path.
      */
     prepareSync(sql: string): Statement;
+
+    /** Callback form of map(): keys rows by their first column. */
+    map(
+        sql: string,
+        callback?: (this: Statement, err: Error | null, map: object) => void,
+    ): this;
+    map(
+        sql: string,
+        params: any,
+        callback?: (this: Statement, err: Error | null, map: object) => void,
+    ): this;
+
+    /**
+     * Iterates query results with backpressure, pulling batches (64..1024
+     * rows) only as the consumer asks. The statement is prepared on first
+     * use and finalized when the iteration ends (drain, break, throw or
+     * abort).
+     *
+     * @param sql the query to iterate.
+     * @param params bind parameters, then optionally `{ signal }`.
+     * @returns an async iterator that is itself async-iterable.
+     * @since 9.0.0
+     * @example
+     * for await (const row of db.iterate('SELECT * FROM big')) { ... }
+     */
+    iterate(sql: string, ...params: any[]): AsyncIterableIterator<Row>;
+
+    /**
+     * db.iterate() as an object-mode Readable, for piping into the rest of
+     * the stream ecosystem.
+     *
+     * @param sql the query to stream.
+     * @param params bind parameters, then optionally `{ signal }`.
+     * @returns an object-mode stream of rows.
+     * @since 9.0.0
+     */
+    stream(sql: string, ...params: any[]): import('node:stream').Readable;
+
+    /**
+     * Runs `fn` inside a transaction: BEGIN / COMMIT, ROLLBACK on throw;
+     * if the rollback fails too, an AggregateError carries both errors.
+     * Nested calls automatically use savepoints. The callback receives
+     * the connection itself as `tx` — a transaction is connection-wide in
+     * SQLite, and work issued on `db` directly from inside the callback
+     * races it unless `{ serialize: true }` is passed.
+     *
+     * @param fn the transaction body, receives `(tx)`.
+     * @param options mode, savepoint, serialize and signal.
+     * @returns whatever `fn` resolves to.
+     * @throws rejects with a TypeError for an invalid body or mode.
+     * @since 9.0.0
+     * @example
+     * const rows = await db.transaction(async (tx) => {
+     *     await tx.run('INSERT INTO t VALUES (?)', 1);
+     *     return tx.all('SELECT * FROM t');
+     * });
+     */
+    transaction<T = unknown>(
+        fn: (tx: Database) => T | Promise<T>,
+        options?: TransactionOptions,
+    ): Promise<T>;
+
+    /**
+     * `await using` support: closes the database. Idempotent; real close
+     * errors (e.g. SQLITE_BUSY from unfinalized statements) propagate.
+     * @since 9.0.0
+     */
+    [Symbol.asyncDispose](): Promise<void>;
 
     /**
      * Opt-in LRU cache of prepared statements for run/get/all/each/map,
@@ -484,6 +728,74 @@ export class Database extends events.EventEmitter {
 }
 
 export function verbose(): sqlite3;
+
+/**
+ * An online backup between two database handles, created by
+ * `db.backup(filename)` (which returns it synchronously).
+ */
+export class Backup extends events.EventEmitter {
+    /**
+     * @param pages pages to copy, or -1 for all remaining.
+     * @returns a promise resolving true once the backup is complete.
+     * @since 9.0.0
+     */
+    step(pages: number): Promise<boolean>;
+    step(
+        pages: number,
+        callback: (this: Backup, err: Error | null, completed: boolean) => void,
+    ): this;
+    /**
+     * @returns a promise resolving once the backup handle is released.
+     * @since 9.0.0
+     */
+    finish(): Promise<void>;
+    finish(callback: (this: Backup, err: Error | null) => void): this;
+
+    /**
+     * @returns True when no step is in flight.
+     */
+    readonly idle: boolean;
+    /**
+     * @returns True when the backup has fully copied.
+     */
+    readonly completed: boolean;
+    /**
+     * @returns True when the backup failed unrecoverably.
+     */
+    readonly failed: boolean;
+    /**
+     * @returns Pages still to copy.
+     */
+    readonly remaining: number;
+    /**
+     * @returns Total pages in the source database.
+     */
+    readonly pageCount: number;
+    /**
+     * @returns Result codes that are retried instead of failing the backup.
+     */
+    retryErrors: number[];
+
+    /**
+     * `await using` support: finishes the backup. Idempotent.
+     * @since 9.0.0
+     */
+    [Symbol.asyncDispose](): Promise<void>;
+}
+
+/**
+ * Opens a database and resolves once the connection is ready. The
+ * `Database` constructor cannot return a promise; this is the
+ * promise-native form. `new Database(...)` is unchanged.
+ *
+ * @param filename the database file (or `:memory:` / `''`).
+ * @param mode open flags, e.g. `sqlite3.OPEN_READWRITE`.
+ * @returns the opened database.
+ * @since 9.0.0
+ * @example
+ * const db = await sqlite3.open('app.db', sqlite3.OPEN_READWRITE);
+ */
+export function open(filename: string, mode?: number): Promise<Database>;
 
 export interface sqlite3 {
     OPEN_READONLY: number;
@@ -623,5 +935,8 @@ export interface sqlite3 {
     RunResult: RunResult;
     Statement: typeof Statement;
     Database: typeof Database;
+    Backup: typeof Backup;
     verbose(): this;
+    /** @since 9.0.0 */
+    open: typeof open;
 }

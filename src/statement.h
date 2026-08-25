@@ -171,6 +171,19 @@ public:
         virtual ~RowsBaton() override = default;
     };
 
+    // fetch(count, ...): like all(), but steps at most `count` rows so a
+    // pull-based iterator can apply backpressure. The statement is not
+    // reset between fetches; the cursor keeps its position.
+    struct FetchBaton : RowsBaton {
+        FetchBaton(Statement* stmt_, Napi::Function cb_) :
+            RowsBaton(stmt_, cb_), count(1), done(false) {}
+        int count;
+        // True when sqlite3_step returned SQLITE_DONE: the cursor is
+        // exhausted and only a rebind can produce more rows.
+        bool done;
+        virtual ~FetchBaton() override = default;
+    };
+
     struct Async;
 
     struct EachBaton : Baton {
@@ -256,6 +269,7 @@ public:
     WORK_DEFINITION(All)
     WORK_DEFINITION(Each)
     WORK_DEFINITION(Reset)
+    WORK_DEFINITION(Fetch)
 
     Napi::Value Finalize_(const Napi::CallbackInfo& info);
 

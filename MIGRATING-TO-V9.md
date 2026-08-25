@@ -1,9 +1,63 @@
 # Migrating to v9
 
 v9 fixes a class of silent data-corruption bugs in the value marshalling
-between JavaScript and SQLite. Code that was already receiving **wrong
+between JavaScript and SQLite, and adds the promise API, async iteration,
+disposal and cancellation. Code that was already receiving **wrong
 values** will now see errors instead; code that was correct keeps working.
-Everything below is a consequence of that single principle.
+Everything below follows from those two principles.
+
+## Calls without a callback now return promises
+
+`run`, `get`, `all`, `map`, `exec`, `close`, `wait`, `loadExtension` on a
+`Database`, and `bind`, `run`, `get`, `all`, `map`, `reset`, `finalize` on
+a `Statement` (plus `step`/`finish` on `Backup`) are dual-mode: a trailing
+function keeps the callback contract byte-for-byte (still returns `this`,
+still chainable); without one you get a promise.
+
+- `db.run(sql, params)` resolves `{ lastID, changes, lastIDBigInt }`.
+  `lastID` applies the integer mode and keeps the 'number'-mode
+  `RangeError` for unsafe rowids **lazy** — it throws only when read, so
+  awaiting an insert into a big-rowid table never throws by itself.
+  `lastIDBigInt` is exact in every mode.
+- Strict-binding errors that used to throw synchronously from a
+  callback-less call (bad bind values, arity mismatches) are now
+  rejections; the orphaned statement is still finalized.
+- A callback-less call that failed used to emit `'error'` on the database;
+  that failure is now a rejection. Calls that pass a callback (including
+  the whole pre-v9 test suite's usage) are unchanged.
+- `each()` is callback-only; calling it without callbacks throws a
+  `TypeError` pointing at `iterate()`. Streaming without callbacks was a
+  silent no-op before.
+- `db.prepare()` and `db.backup()` keep their synchronous return in every
+  form — ~60 places in the callback regression suite rely on it. A
+  prepare error still surfaces on the statement's `'error'` event.
+
+New in this release: top-level `sqlite3.open()` (promise-native open),
+`db.iterate()`/`stmt.iterate()` (pull-based async iteration with
+backpressure, backed by the new native `Statement#fetch(count)`),
+`db.stream()` (object-mode `Readable`), `db.transaction()` (BEGIN/COMMIT
+with rollback on throw, automatic savepoints when nested), and
+`Symbol.asyncDispose`/`Symbol.dispose` for `await using`/`using`.
+
+## Cancellation is connection-wide
+
+Promise-mode calls, `iterate()` and `transaction()` accept a trailing
+`{ signal }` options object (an `AbortSignal`). An already-aborted signal
+rejects before scheduling anything. Aborting afterwards calls
+`db.interrupt()` and rejects with the signal's reason — **interrupting
+every in-flight statement on that connection**, not just the awaited one.
+That is a SQLite constraint: `sqlite3_interrupt` has no per-statement
+form. Work that was queued but not started when the abort lands may still
+run to completion; its result is dropped. The signal listener is removed
+when the call settles, so one long-lived signal does not accumulate
+listeners.
+
+## `map()` single-column results are rows, not `undefined`
+
+`db.map('SELECT id FROM t')` used to build `{ id: undefined }` (the
+two-column code path read a missing second column). A single-column
+result now maps the key to the whole row, consistent with the three-plus
+column rule.
 
 ## Integer reads now refuse to truncate (default `'number'` mode)
 

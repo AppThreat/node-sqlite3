@@ -220,11 +220,19 @@ describe('marshalling', function () {
 
         it('rejects plain objects in arrays instead of coercing them', function (_t, done) {
             // v8 bound these as the literal string "[object Object]".
+            // The trailing callback keeps the call in callback mode, where
+            // strict binding throws synchronously (promise mode rejects
+            // instead — covered in test/promises.test.js).
             assert.throws(
                 function () {
-                    db.run('INSERT INTO types (txt_col) VALUES (?)', [
-                        { a: 1 },
-                    ]);
+                    db.run(
+                        'INSERT INTO types (txt_col) VALUES (?)',
+                        [{ a: 1 }],
+                        function () {
+                            // Never called: the trailing callback only keeps this in
+                            // callback mode, where a bad bind throws synchronously.
+                        },
+                    );
                 },
                 function (err) {
                     assert.ok(err instanceof TypeError);

@@ -110,10 +110,19 @@ describe('data types', function () {
     it('should reject faulty toString in array', function () {
         const faulty = [[{ toString: null }], 1];
         // v8 bound the inner object as "[object Object]"; v9 throws a
-        // TypeError synchronously, naming the parameter index.
+        // TypeError synchronously, naming the parameter index. The
+        // trailing callback keeps the call in callback mode, where strict
+        // binding throws synchronously (promise mode rejects instead).
         assert.throws(
             function () {
-                db.all('SELECT * FROM txt_table WHERE txt = ? LIMIT ?', faulty);
+                db.all(
+                    'SELECT * FROM txt_table WHERE txt = ? LIMIT ?',
+                    faulty,
+                    function () {
+                        // Never called: the trailing callback only keeps this in
+                        // callback mode, where a bad bind throws synchronously.
+                    },
+                );
             },
             function (err) {
                 assert.ok(err instanceof TypeError);
@@ -136,7 +145,14 @@ describe('data types', function () {
         ];
         assert.throws(
             function () {
-                db.all('SELECT * FROM txt_table WHERE txt = ? LIMIT ?', faulty);
+                db.all(
+                    'SELECT * FROM txt_table WHERE txt = ? LIMIT ?',
+                    faulty,
+                    function () {
+                        // Never called: the trailing callback only keeps this in
+                        // callback mode, where a bad bind throws synchronously.
+                    },
+                );
             },
             function (err) {
                 assert.ok(err instanceof TypeError);

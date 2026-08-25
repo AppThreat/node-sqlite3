@@ -16,6 +16,13 @@ function bench(name, fn) {
     });
 }
 
+async function benchAsync(name, fn) {
+    await fn(); // warmup
+    const start = process.hrtime.bigint();
+    await fn();
+    return { name, ms: Number(process.hrtime.bigint() - start) / 1e6 };
+}
+
 const results = [];
 
 async function main() {
@@ -218,6 +225,101 @@ async function main() {
         }),
     );
 
+    // --- Promise-mode variants: the wrapper sits on the hot path of every
+    // call, so its overhead is measured against the callback rows above.
+
+    results.push(
+        await benchAsync('db.all (promise): 20k rows x 4 cols', async () => {
+            await db.all('SELECT a, b, c, d FROM t');
+        }),
+    );
+
+    results.push(
+        await benchAsync('stmt.get (promise): 10k lookups', async () => {
+            const stmt = db.prepare('SELECT a, b, c, d FROM t WHERE rowid = ?');
+            for (let i = 0; i < 10000; i++) {
+                await stmt.get((i % 20000) + 1);
+            }
+            await stmt.finalize();
+        }),
+    );
+
+    results.push(
+        await benchAsync(
+            'db.run (promise): 10k (prepare per call)',
+            async () => {
+                await db.exec('DELETE FROM t2');
+                for (let i = 0; i < 10000; i++) {
+                    await db.run(
+                        'INSERT INTO t2 VALUES (?, ?, ?, ?)',
+                        i,
+                        i + 0.5,
+                        `text-value-${i}`,
+                        Buffer.alloc(64),
+                    );
+                }
+            },
+        ),
+    );
+
+    results.push(
+        await benchAsync('iterate: 20k rows x 4 cols (for await)', async () => {
+            let n = 0;
+            for await (const _row of db.iterate('SELECT a, b, c, d FROM t')) {
+                n++;
+            }
+            if (n !== 20000) throw new Error(`iterate saw ${n} rows`);
+        }),
+    );
+
+    // --- Streaming comparison at 200k rows: each vs all vs iterate.
+    const db4 = new sqlite3.Database(':memory:');
+    await new Promise((r) => {
+        db4.exec(
+            'CREATE TABLE big (a INTEGER, b REAL, c TEXT, d BLOB);\n' +
+                "INSERT INTO big SELECT x, x+0.5, 'text-value-'||x, zeroblob(64) " +
+                'FROM (WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 200000) SELECT x FROM cnt);',
+            r,
+        );
+    });
+
+    results.push(
+        await bench('each: 200k rows', (done) => {
+            let n = 0;
+            db4.each(
+                'SELECT a, b, c, d FROM big',
+                () => {
+                    n++;
+                },
+                () => {
+                    if (n !== 200000) throw new Error(`each saw ${n} rows`);
+                    done();
+                },
+            );
+        }),
+    );
+
+    results.push(
+        await bench('all: 200k rows', (done) => {
+            db4.all('SELECT a, b, c, d FROM big', (_err, rows) => {
+                if (rows.length !== 200000) throw new Error('bad count');
+                done();
+            });
+        }),
+    );
+
+    results.push(
+        await benchAsync('iterate: 200k rows (for await)', async () => {
+            let n = 0;
+            for await (const _row of db4.iterate(
+                'SELECT a, b, c, d FROM big',
+            )) {
+                n++;
+            }
+            if (n !== 200000) throw new Error(`iterate saw ${n} rows`);
+        }),
+    );
+
     results.push(
         await bench('blob: 2k x 256KB round-trip', (done) => {
             const buf = Buffer.alloc(256 * 1024);
@@ -235,7 +337,9 @@ async function main() {
     for (const r of results) {
         console.log(r.name.padEnd(40), `${r.ms.toFixed(1).padStart(8)} ms`);
     }
-    await new Promise((r) => db.close(() => db2.close(() => db3.close(r))));
+    await new Promise((r) =>
+        db.close(() => db2.close(() => db3.close(() => db4.close(r)))),
+    );
 }
 
 main();

@@ -109,6 +109,7 @@ Napi::Object Statement::Init(Napi::Env env, Napi::Object exports) {
       InstanceMethod("all", &Statement::All, napi_default_method),
       InstanceMethod("each", &Statement::Each, napi_default_method),
       InstanceMethod("reset", &Statement::Reset, napi_default_method),
+      InstanceMethod("fetch", &Statement::Fetch, napi_default_method),
       InstanceMethod("finalize", &Statement::Finalize_, napi_default_method),
       InstanceMethod("getSync", &Statement::GetSync, napi_default_method),
       InstanceMethod("runSync", &Statement::RunSync, napi_default_method),
@@ -1204,6 +1205,129 @@ void Statement::Work_AfterReset(napi_env e, napi_status status, void* data) {
     if (IS_FUNCTION(cb)) {
         Napi::Value argv[] = { env.Null() };
         TRY_CATCH_CALL(stmt->Value(), cb, 1, argv);
+    }
+}
+
+// fetch(count, [params], [callback]): steps up to `count` rows and hands
+// them back as one batch. Unlike all() the statement is deliberately NOT
+// reset between calls, so successive fetches continue one cursor — this is
+// the native half of the pull-based async iterator.
+Napi::Value Statement::Fetch(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Statement* stmt = this;
+
+    REQUIRE_ARGUMENT_INTEGER(0, count);
+    if (count < 1) {
+        Napi::TypeError::New(env, "fetch count must be a positive integer")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    FetchBaton* baton = stmt->Bind<FetchBaton>(info, 1);
+    if (baton == NULL) {
+        if (!env.IsExceptionPending()) {
+            Napi::TypeError::New(env, "Data type is not supported")
+                .ThrowAsJavaScriptException();
+        }
+        return env.Null();
+    }
+    else {
+        baton->count = count;
+        stmt->Schedule(Work_BeginFetch, baton);
+        return info.This();
+    }
+}
+
+void Statement::Work_BeginFetch(Baton* baton) {
+    STATEMENT_BEGIN(Fetch);
+}
+
+void Statement::Work_Fetch(napi_env e, void* data) {
+    STATEMENT_INIT(FetchBaton);
+
+    // Mirrors Work_Get's guard: a cursor that already returned SQLITE_DONE
+    // must not be stepped again, unless this call rebinds (which resets).
+    if (stmt->status != SQLITE_DONE || baton->parameters.size()
+            || baton->bind_supplied) {
+        STATEMENT_MUTEX(mtx);
+        sqlite3_mutex_enter(mtx);
+
+        if (stmt->Bind(std::move(baton->parameters), baton->bind_supplied)) {
+            int n = 0;
+            while (n < baton->count
+                    && (stmt->status = sqlite3_step(stmt->_handle)) == SQLITE_ROW) {
+                baton->rows.emplace_back();
+                GetRow(&baton->rows.back(), stmt->_handle, &baton->columns);
+                n++;
+            }
+            if (stmt->status != SQLITE_ROW && stmt->status != SQLITE_DONE) {
+                stmt->message = std::string(sqlite3_errmsg(stmt->db->_handle));
+            }
+        }
+
+        sqlite3_mutex_leave(mtx);
+    }
+
+    baton->done = (stmt->status == SQLITE_DONE);
+}
+
+void Statement::Work_AfterFetch(napi_env e, napi_status status, void* data) {
+    std::unique_ptr<FetchBaton> baton(static_cast<FetchBaton*>(data));
+    auto* stmt = baton->stmt;
+
+    auto env = stmt->Env();
+    Napi::HandleScope scope(env);
+
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    STATEMENT_END();
+
+    if (stmt->status != SQLITE_ROW && stmt->status != SQLITE_DONE) {
+        Error(baton.get());
+        return;
+    }
+
+    // Fire callbacks: (err, rows, done). `done` is true when the cursor is
+    // exhausted, so the JS iterator can stop pulling without another round
+    // trip. Row conversion is a single synchronous pass, like Work_AfterAll.
+    Napi::Function cb = baton->callback.Value();
+
+    if (IS_FUNCTION(cb)) {
+        if (baton->rows.size()) {
+            stmt->SyncColumnKeys(env, baton->columns);
+            Napi::Array result(Napi::Array::New(env, baton->rows.size()));
+            bool failed = false;
+            for (size_t i = 0; i < baton->rows.size(); i++) {
+                (result).Set(i, stmt->RowToJS(env, &baton->rows[i]));
+                if (env.IsExceptionPending()) {
+                    // 'number' integer mode and an unsafe int64: deliver
+                    // the RangeError to the callback.
+                    failed = true;
+                    break;
+                }
+            }
+
+            if (failed) {
+                Napi::Value argv[] = { TakePendingError(env) };
+                TRY_CATCH_CALL(stmt->Value(), cb, 1, argv);
+            }
+            else {
+                Napi::Value argv[] = {
+                    env.Null(),
+                    result,
+                    Napi::Boolean::New(env, baton->done)
+                };
+                TRY_CATCH_CALL(stmt->Value(), cb, 3, argv);
+            }
+        }
+        else {
+            Napi::Value argv[] = {
+                env.Null(),
+                Napi::Array::New(env, 0),
+                Napi::Boolean::New(env, baton->done)
+            };
+            TRY_CATCH_CALL(stmt->Value(), cb, 3, argv);
+        }
     }
 }
 

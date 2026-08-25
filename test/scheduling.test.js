@@ -6,18 +6,24 @@ import sqlite3 from '../lib/sqlite3.js';
 describe('scheduling', function () {
     it('scheduling after the database was closed', function (_t, done) {
         const db = new sqlite3.Database(':memory:');
-        db.on('error', function (err) {
-            assert.ok(
-                err.message &&
-                    err.message.indexOf(
-                        'SQLITE_MISUSE: Database handle is closed',
-                    ) > -1,
-            );
-            done();
-        });
-
+        // A callback-less call is promise mode since v9, so the failure is
+        // a rejection rather than an 'error' event (the callback form is
+        // covered by the next test).
         db.close();
-        db.run('CREATE TABLE foo (id int)');
+        db.run('CREATE TABLE foo (id int)').then(
+            function () {
+                assert.fail('expected the run to fail');
+            },
+            function (err) {
+                assert.ok(
+                    err.message &&
+                        err.message.indexOf(
+                            'SQLITE_MISUSE: Database handle is closed',
+                        ) > -1,
+                );
+                done();
+            },
+        );
     });
 
     it('scheduling a query with callback after the database was closed', function (_t, done) {

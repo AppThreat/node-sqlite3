@@ -74,7 +74,7 @@ See the [API documentation](https://github.com/AppThreat/node-sqlite3/wiki/API) 
 
 # Usage
 
-**Note:** the module must be [installed](#installing) before use.
+**Note:** the module must be [installed](#installing) before use.
 
 This package is now ESM only.
 
@@ -98,6 +98,49 @@ db.serialize(() => {
 
 db.close();
 ```
+
+## Promises, async iteration and disposal (v9)
+
+Every data method is dual-mode: pass a trailing callback for the classic
+behaviour (returning `this`, chainable), or omit it to get a promise. `run`
+resolves `{ lastID, lastIDBigInt, changes }`; `get`/`all`/`map` resolve the
+rows; `exec`/`close`/`wait` resolve `undefined`. Errors carry the v9
+`code`/`errno`/`primaryCode` triple.
+
+```js
+const db = await sqlite3.open(":memory:");          // promise-native open
+await db.exec("CREATE TABLE lorem (info TEXT)");
+const { lastID } = await db.run("INSERT INTO lorem VALUES (?)", "Ipsum 1");
+const row = await db.get("SELECT * FROM lorem WHERE rowid = ?", lastID);
+```
+
+Stream large results with real backpressure — batches are pulled from
+SQLite (64..1024 rows) only as fast as the consumer reads them:
+
+```js
+for await (const row of db.iterate("SELECT * FROM big")) { ... }
+db.stream("SELECT * FROM big").pipe(someTransform);   // object-mode Readable
+```
+
+Transactions, cancellation and `await using` disposal:
+
+```js
+await db.transaction(async (tx) => {       // ROLLBACK on throw, nested savepoints
+  await tx.run("INSERT INTO lorem VALUES (?)", "Ipsum 2");
+});
+
+const rows = await db.all("SELECT * FROM big", { signal });  // AbortSignal:
+// an already-aborted signal rejects before scheduling; aborting in flight
+// interrupts the whole connection (a SQLite constraint) and rejects with
+// the signal's reason.
+
+await using db2 = await sqlite3.open("app.db");  // closed however the block exits
+await using stmt = db2.prepare("SELECT 1");      // finalized the same way
+```
+
+`each()` stays callback-only — the async iterator is its promise-based
+replacement. `db.prepare()` and `db.backup()` keep their synchronous return
+in every form.
 
 ## Performance options
 
