@@ -6,9 +6,34 @@ import sqlite3 from '../lib/sqlite3.js';
 
 // A CPU-heavy query that takes long enough to still be in flight when the
 // abort lands a tick later.
-const HEAVY =
-    'WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 8000000) ' +
-    'SELECT count(*) FROM cnt';
+const HEAVY = counter(8000000);
+
+// The same shape, ~40x cheaper. sqlite3_interrupt() is a no-op when no
+// statement is running yet and does not touch statements started after it
+// returns, so an abort that loses the race against the worker thread
+// simply does not fire — the iterator still rejects (it settles its own
+// waiters), but the query runs to completion in the background and
+// teardown has to wait for it. That makes the cost of a *repeated* abort
+// test up to N full executions, which is why the loop below uses this
+// one: at HEAVY's 0.8s-on-fast-hardware it needed 16s of its 30s budget
+// locally and blew past it entirely on CI's slower and emulated runners
+// (measured there: 29.7s, 25.6s, then a timeout — a coin flip).
+// The window this loop exists to hit is the one during *prepare*, whose
+// width has nothing to do with how long the query then runs, so nothing
+// is lost. Interrupting a running step stays covered by the tests above,
+// which each run HEAVY exactly once.
+const MODERATE = counter(200000);
+
+/**
+ * @param {number} n rows for the recursive CTE to count to.
+ * @returns {string} a query whose cost scales with n.
+ */
+function counter(n) {
+    return (
+        `WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < ${n}) ` +
+        'SELECT count(*) FROM cnt'
+    );
+}
 
 describe('abort', function () {
     it('an already-aborted signal rejects before scheduling', async function () {
@@ -116,13 +141,18 @@ describe('abort', function () {
     // deterministic form is pinned in state_machine.test.js ("a prepare
     // that fails with work queued behind it"), and this keeps the racy
     // interrupt-during-prepare shape itself covered.
+    //
+    // Uses MODERATE, not HEAVY: see the note on that constant for why
+    // repeating this shape is what makes the query's cost matter.
     it('aborting an iterator repeatedly never wedges the connection', {
         timeout: 30000,
     }, async function () {
         for (let i = 0; i < 20; i++) {
             const db = await sqlite3.open(':memory:');
             const controller = new AbortController();
-            const iterator = db.iterate(HEAVY, { signal: controller.signal });
+            const iterator = db.iterate(MODERATE, {
+                signal: controller.signal,
+            });
             const pending = iterator.next();
             controller.abort('stop');
             // Either the fetch was interrupted (rejects with the reason) or
