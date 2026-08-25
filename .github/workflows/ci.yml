@@ -173,7 +173,6 @@ jobs:
         with:
           name: prebuilds-${{ matrix.os }}-${{ matrix.host }}-${{ matrix.target }}-${{ matrix.node }}
           path: prebuilds/
-          retention-days: 7
 
   build-qemu:
     runs-on: ubuntu-24.04-arm
@@ -223,7 +222,6 @@ jobs:
         with:
           name: prebuilds-qemu-${{ matrix.variant }}-${{ env.SAFE_TARGET }}-${{ matrix.node }}
           path: prebuilds/
-          retention-days: 7
 
   publish:
     needs: [build, build-qemu]
