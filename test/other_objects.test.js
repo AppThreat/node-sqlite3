@@ -1,25 +1,30 @@
-import sqlite3 from '../lib/sqlite3.js';
-import assert from 'assert';
+import assert from 'node:assert';
+import { before, beforeEach, describe, it } from 'node:test';
 
-describe('data types', function() {
+import sqlite3 from '../lib/sqlite3.js';
+
+describe('data types', function () {
     let db;
-    before(function(done) {
+    before(function (_t, done) {
         db = new sqlite3.Database(':memory:');
-        db.run("CREATE TABLE txt_table (txt TEXT)");
-        db.run("CREATE TABLE int_table (int INTEGER)");
-        db.run("CREATE TABLE flt_table (flt FLOAT)");
+        db.run('CREATE TABLE txt_table (txt TEXT)');
+        db.run('CREATE TABLE int_table (int INTEGER)');
+        db.run('CREATE TABLE flt_table (flt FLOAT)');
         db.wait(done);
     });
 
-    beforeEach(function(done) {
-        db.exec('DELETE FROM txt_table; DELETE FROM int_table; DELETE FROM flt_table;', done);
+    beforeEach(function (_t, done) {
+        db.exec(
+            'DELETE FROM txt_table; DELETE FROM int_table; DELETE FROM flt_table;',
+            done,
+        );
     });
 
-    it('should serialize Date()', function(done) {
-        let date = new Date();
-        db.run("INSERT INTO int_table VALUES(?)", date, function (err) {
+    it('should serialize Date()', function (_t, done) {
+        const date = new Date();
+        db.run('INSERT INTO int_table VALUES(?)', date, function (err) {
             if (err) throw err;
-            db.get("SELECT int FROM int_table", function(err, row) {
+            db.get('SELECT int FROM int_table', function (err, row) {
                 if (err) throw err;
                 assert.equal(row.int, +date);
                 done();
@@ -27,11 +32,11 @@ describe('data types', function() {
         });
     });
 
-    it('should serialize RegExp()', function(done) {
-        let regexp = /^f\noo/;
-        db.run("INSERT INTO txt_table VALUES(?)", regexp, function (err) {
+    it('should serialize RegExp()', function (_t, done) {
+        const regexp = /^f\noo/;
+        db.run('INSERT INTO txt_table VALUES(?)', regexp, function (err) {
             if (err) throw err;
-            db.get("SELECT txt FROM txt_table", function(err, row) {
+            db.get('SELECT txt FROM txt_table', function (err, row) {
                 if (err) throw err;
                 assert.equal(row.txt, String(regexp));
                 done();
@@ -43,19 +48,19 @@ describe('data types', function() {
         4294967296.249,
         Math.PI,
         3924729304762836.5,
-        new Date().valueOf(),
+        Date.now(),
         912667.394828365,
-        2.3948728634826374e+83,
-        9.293476892934982e+300,
-        Infinity,
-        -9.293476892934982e+300,
-        -2.3948728634826374e+83,
-        -Infinity
-    ].forEach(function(flt) {
-        it('should serialize float ' + flt, function(done) {
-            db.run("INSERT INTO flt_table VALUES(?)", flt, function (err) {
+        2.3948728634826374e83,
+        9.293476892934982e300,
+        Number.POSITIVE_INFINITY,
+        -9.293476892934982e300,
+        -2.3948728634826374e83,
+        Number.NEGATIVE_INFINITY,
+    ].forEach(function (flt) {
+        it(`should serialize float ${flt}`, function (_t, done) {
+            db.run('INSERT INTO flt_table VALUES(?)', flt, function (err) {
                 if (err) throw err;
-                db.get("SELECT flt FROM flt_table", function(err, row) {
+                db.get('SELECT flt FROM flt_table', function (err, row) {
                     if (err) throw err;
                     assert.equal(row.flt, flt);
                     done();
@@ -67,48 +72,67 @@ describe('data types', function() {
     [
         4294967299,
         3924729304762836,
-        new Date().valueOf(),
-        2.3948728634826374e+83,
-        9.293476892934982e+300,
-        Infinity,
-        -9.293476892934982e+300,
-        -2.3948728634826374e+83,
-        -Infinity
-    ].forEach(function(integer) {
-        it('should serialize integer ' + integer, function(done) {
-            db.run("INSERT INTO int_table VALUES(?)", integer, function (err) {
+        Date.now(),
+        2.3948728634826374e83,
+        9.293476892934982e300,
+        Number.POSITIVE_INFINITY,
+        -9.293476892934982e300,
+        -2.3948728634826374e83,
+        Number.NEGATIVE_INFINITY,
+    ].forEach(function (integer) {
+        it(`should serialize integer ${integer}`, function (_t, done) {
+            db.run('INSERT INTO int_table VALUES(?)', integer, function (err) {
                 if (err) throw err;
-                db.get("SELECT int AS integer FROM int_table", function(err, row) {
-                    if (err) throw err;
-                    assert.equal(row.integer, integer);
-                    done();
-                });
+                db.get(
+                    'SELECT int AS integer FROM int_table',
+                    function (err, row) {
+                        if (err) throw err;
+                        assert.equal(row.integer, integer);
+                        done();
+                    },
+                );
             });
         });
     });
 
-    it('should ignore faulty toString', function(done) {
+    it('should ignore faulty toString', function (_t, done) {
         const faulty = { toString: 23 };
-        db.run("INSERT INTO txt_table VALUES(?)", faulty, function (err) {
+        db.run('INSERT INTO txt_table VALUES(?)', faulty, function (err) {
             assert.notEqual(err, undefined);
             done();
         });
     });
 
-    it('should ignore faulty toString in array', function(done) {
-        const faulty = [[{toString: null}], 1];
-        db.all('SELECT * FROM txt_table WHERE txt = ? LIMIT ?', faulty, function (err) {
-            assert.equal(err, null);
-            done();
-        });
+    it('should ignore faulty toString in array', function (_t, done) {
+        const faulty = [[{ toString: null }], 1];
+        db.all(
+            'SELECT * FROM txt_table WHERE txt = ? LIMIT ?',
+            faulty,
+            function (err) {
+                assert.equal(err, null);
+                done();
+            },
+        );
     });
 
-    it('should ignore faulty toString set to function', function(done) {
-        const faulty = [[{toString: function () {console.log('oh no');}}], 1];
-        db.all('SELECT * FROM txt_table WHERE txt = ? LIMIT ?', faulty, function (err) {
-            assert.equal(err, undefined);
-            done();
-        });
+    it('should ignore faulty toString set to function', function (_t, done) {
+        const faulty = [
+            [
+                {
+                    toString: function () {
+                        console.log('oh no');
+                    },
+                },
+            ],
+            1,
+        ];
+        db.all(
+            'SELECT * FROM txt_table WHERE txt = ? LIMIT ?',
+            faulty,
+            function (err) {
+                assert.equal(err, undefined);
+                done();
+            },
+        );
     });
-
 });

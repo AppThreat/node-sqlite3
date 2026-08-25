@@ -1,8 +1,10 @@
-import sqlite3 from '../lib/sqlite3.js';
-import assert from 'assert';
+import assert from 'node:assert';
+import { describe, it } from 'node:test';
 
-describe('constants', function() {
-    it('should have the right OPEN_* flags', function() {
+import sqlite3 from '../lib/sqlite3.js';
+
+describe('constants', function () {
+    it('should have the right OPEN_* flags', function () {
         assert.ok(sqlite3.OPEN_READONLY === 1);
         assert.ok(sqlite3.OPEN_READWRITE === 2);
         assert.ok(sqlite3.OPEN_CREATE === 4);
@@ -12,7 +14,7 @@ describe('constants', function() {
         assert.ok(sqlite3.OPEN_PRIVATECACHE === 0x00040000);
     });
 
-    it('should have the right error flags', function() {
+    it('should have the right error flags', function () {
         assert.ok(sqlite3.OK === 0);
         assert.ok(sqlite3.ERROR === 1);
         assert.ok(sqlite3.INTERNAL === 2);

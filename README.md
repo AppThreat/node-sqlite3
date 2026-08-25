@@ -277,7 +277,8 @@ standalone install). Clone, then:
 ```bash
 pnpm install          # also builds the native binding via the install script
 pnpm run rebuild      # recompile after changing C++ (node-gyp rebuild)
-pnpm run test
+pnpm run lint         # biome check --write (autofix; CI runs lint:check)
+pnpm run test         # node:test, 20s per-test timeout, files run in parallel
 pnpm run prebuild     # produce the shipping prebuilds/ artifacts
 ```
 

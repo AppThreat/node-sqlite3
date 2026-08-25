@@ -6,20 +6,16 @@ minimumReleaseAgeExclude:
 optimisticRepeatInstall: true
 preferSymlinkedExecutables: false
 strictDepBuilds: true
-# Enforce trust-evidence downgrades only for freshly published versions
-# (3 days, same window as minimumReleaseAge). Without the window, mocha's
-# chokidar@4.0.3 — published Dec 2024, one of npm's most-installed packages —
-# is rejected as a "possible package takeover" because an earlier version of
-# the name once carried stronger provenance evidence. mocha (and chokidar with
-# it) leaves the tree in Deliverable 12.
+# Enforce trust-evidence downgrades across the whole tree. The temporary
+# trustPolicyIgnoreAfter window that D15 added for mocha's chokidar went
+# away with mocha in Deliverable 12.
 trustPolicy: no-downgrade
-trustPolicyIgnoreAfter: 4320
 
 # pnpm 11 no longer reads the `pnpm` field in package.json; overrides and
 # built-dependency policy live here instead, even in a single-package repo.
 #
-# onlyBuiltDependencies is intentionally empty: no devDependency in this tree
-# needs lifecycle scripts today. `@biomejs/biome` will be added by Deliverable
-# 12 when Biome lands (it links a platform binary on install). strictDepBuilds
-# fails the install and names anything blocked, so a needed entry cannot be
-# missed silently.
+# onlyBuiltDependencies is intentionally empty: no dependency in this tree
+# needs lifecycle scripts. @biomejs/biome (Deliverable 12) ships its
+# platform binaries as plain optionalDependencies with no install script,
+# so it needs no entry here. strictDepBuilds fails the install and names
+# anything blocked, so a needed entry cannot be missed silently.

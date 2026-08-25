@@ -1,0 +1,121 @@
+{
+    "$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
+    "assist": {
+        "actions": {
+            "source": {
+                "organizeImports": {
+                    "level": "on",
+                    "options": {
+                        "groups": [
+                            ":NODE:",
+                            ":BLANK_LINE:",
+                            ":PACKAGE:",
+                            ":BLANK_LINE:",
+                            "**"
+                        ]
+                    }
+                }
+            }
+        }
+    },
+    "javascript": {
+        "globals": [],
+        "formatter": {
+            "quoteStyle": "single"
+        }
+    },
+    "linter": {
+        "enabled": true,
+        "includes": [
+            "**",
+            "!deps/**",
+            "!build/**",
+            "!prebuilds/**",
+            "!test/tmp/**",
+            "!test/nw/**"
+        ],
+        "rules": {
+            "preset": "recommended",
+            "complexity": {
+                "noForEach": "off",
+                "useLiteralKeys": "off",
+                "noUselessEscapeInRegex": "off",
+                "noUselessTernary": "warn",
+                "noUselessContinue": "warn",
+                "noArguments": "off",
+                "useArrowFunction": "off"
+            },
+            "correctness": {
+                "noUndeclaredVariables": "error",
+                "noConstAssign": "error",
+                "noConstantCondition": "error",
+                "noUnreachable": "info",
+                "noUnusedFunctionParameters": "error",
+                "noUnusedVariables": {
+                    "options": {
+                        "ignoreRestSiblings": true
+                    },
+                    "level": "error"
+                }
+            },
+            "performance": {
+                "noDelete": "off"
+            },
+            "style": {
+                "noParameterAssign": "off",
+                "noShoutyConstants": "warn",
+                "noUselessElse": "warn",
+                "useAsConstAssertion": "error",
+                "useDefaultParameterLast": "error",
+                "useEnumInitializers": "error",
+                "useSelfClosingElements": "error",
+                "useSingleVarDeclarator": "error",
+                "noUnusedTemplateLiteral": "error",
+                "useNumberNamespace": "error",
+                "noInferrableTypes": "error"
+            },
+            "suspicious": {
+                "noAssignInExpressions": "off",
+                "noDoubleEquals": "error",
+                "noAsyncPromiseExecutor": "warn",
+                "noControlCharactersInRegex": "error",
+                "noDebugger": "error",
+                "noEmptyBlockStatements": "warn",
+                "noDuplicateElseIf": "warn",
+                "noExplicitAny": "off",
+                "useAdjacentOverloadSignatures": "off"
+            },
+            "nursery": {}
+        }
+    },
+    "vcs": {
+        "enabled": true,
+        "clientKind": "git",
+        "useIgnoreFile": true,
+        "defaultBranch": "release/v9"
+    },
+    "formatter": {
+        "enabled": true,
+        "includes": [
+            "**",
+            "!deps/**",
+            "!build/**",
+            "!prebuilds/**",
+            "!test/tmp/**",
+            "!test/nw/**"
+        ],
+        "indentStyle": "space",
+        "indentWidth": 4
+    },
+    "files": {
+        "maxSize": 5242880,
+        "includes": [
+            "**",
+            "!deps",
+            "!build",
+            "!prebuilds",
+            "!test/tmp",
+            "!test/nw"
+        ]
+    }
+}

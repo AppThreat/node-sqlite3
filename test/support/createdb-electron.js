@@ -1,4 +1,5 @@
 import { app } from 'electron';
+
 import createdb from './createdb.js';
 
 createdb(function () {

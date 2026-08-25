@@ -3,7 +3,7 @@
 
 /// <reference types="node" />
 
-import events = require("events");
+import events = require('node:events');
 
 export const OPEN_READONLY: number;
 export const OPEN_READWRITE: number;
@@ -26,23 +26,23 @@ export const BUSY: number;
 export const LOCKED: number;
 export const NOMEM: number;
 export const READONLY: number;
-export const INTERRUPT: number
+export const INTERRUPT: number;
 export const IOERR: number;
-export const CORRUPT: number
+export const CORRUPT: number;
 export const NOTFOUND: number;
 export const FULL: number;
 export const CANTOPEN: number;
 export const PROTOCOL: number;
 export const EMPTY: number;
 export const SCHEMA: number;
-export const TOOBIG: number
-export const CONSTRAINT: number
+export const TOOBIG: number;
+export const CONSTRAINT: number;
 export const MISMATCH: number;
 export const MISUSE: number;
 export const NOLFS: number;
-export const AUTH: number
+export const AUTH: number;
 export const FORMAT: number;
-export const RANGE: number
+export const RANGE: number;
 export const NOTADB: number;
 
 export const LIMIT_LENGTH: number;
@@ -59,8 +59,15 @@ export const LIMIT_TRIGGER_DEPTH: number;
 export const LIMIT_WORKER_THREADS: number;
 
 export const cached: {
-    Database(filename: string, callback?: (this: Database, err: Error | null) => void): Database;
-    Database(filename: string, mode?: number, callback?: (this: Database, err: Error | null) => void): Database;
+    Database(
+        filename: string,
+        callback?: (this: Database, err: Error | null) => void,
+    ): Database;
+    Database(
+        filename: string,
+        mode?: number,
+        callback?: (this: Database, err: Error | null) => void,
+    ): Database;
 };
 
 export interface RunResult extends Statement {
@@ -77,19 +84,35 @@ export class Statement extends events.EventEmitter {
     finalize(callback?: (err: Error) => void): Database;
 
     run(callback?: (err: Error | null) => void): this;
-    run(params: any, callback?: (this: RunResult, err: Error | null) => void): this;
+    run(
+        params: any,
+        callback?: (this: RunResult, err: Error | null) => void,
+    ): this;
     run(...params: any[]): this;
 
     get<T>(callback?: (err: Error | null, row?: T) => void): this;
-    get<T>(params: any, callback?: (this: RunResult, err: Error | null, row?: T) => void): this;
+    get<T>(
+        params: any,
+        callback?: (this: RunResult, err: Error | null, row?: T) => void,
+    ): this;
     get(...params: any[]): this;
 
     all<T>(callback?: (err: Error | null, rows: T[]) => void): this;
-    all<T>(params: any, callback?: (this: RunResult, err: Error | null, rows: T[]) => void): this;
+    all<T>(
+        params: any,
+        callback?: (this: RunResult, err: Error | null, rows: T[]) => void,
+    ): this;
     all(...params: any[]): this;
 
-    each<T>(callback?: (err: Error | null, row: T) => void, complete?: (err: Error | null, count: number) => void): this;
-    each<T>(params: any, callback?: (this: RunResult, err: Error | null, row: T) => void, complete?: (err: Error | null, count: number) => void): this;
+    each<T>(
+        callback?: (err: Error | null, row: T) => void,
+        complete?: (err: Error | null, count: number) => void,
+    ): this;
+    each<T>(
+        params: any,
+        callback?: (this: RunResult, err: Error | null, row: T) => void,
+        complete?: (err: Error | null, count: number) => void,
+    ): this;
     each(...params: any[]): this;
 
     /**
@@ -104,30 +127,74 @@ export class Statement extends events.EventEmitter {
 
 export class Database extends events.EventEmitter {
     constructor(filename: string, callback?: (err: Error | null) => void);
-    constructor(filename: string, mode?: number, callback?: (err: Error | null) => void);
+    constructor(
+        filename: string,
+        mode?: number,
+        callback?: (err: Error | null) => void,
+    );
 
     close(callback?: (err: Error | null) => void): void;
 
-    run(sql: string, callback?: (this: RunResult, err: Error | null) => void): this;
-    run(sql: string, params: any, callback?: (this: RunResult, err: Error | null) => void): this;
+    run(
+        sql: string,
+        callback?: (this: RunResult, err: Error | null) => void,
+    ): this;
+    run(
+        sql: string,
+        params: any,
+        callback?: (this: RunResult, err: Error | null) => void,
+    ): this;
     run(sql: string, ...params: any[]): this;
 
-    get<T>(sql: string, callback?: (this: Statement, err: Error | null, row: T) => void): this;
-    get<T>(sql: string, params: any, callback?: (this: Statement, err: Error | null, row: T) => void): this;
+    get<T>(
+        sql: string,
+        callback?: (this: Statement, err: Error | null, row: T) => void,
+    ): this;
+    get<T>(
+        sql: string,
+        params: any,
+        callback?: (this: Statement, err: Error | null, row: T) => void,
+    ): this;
     get(sql: string, ...params: any[]): this;
 
-    all<T>(sql: string, callback?: (this: Statement, err: Error | null, rows: T[]) => void): this;
-    all<T>(sql: string, params: any, callback?: (this: Statement, err: Error | null, rows: T[]) => void): this;
+    all<T>(
+        sql: string,
+        callback?: (this: Statement, err: Error | null, rows: T[]) => void,
+    ): this;
+    all<T>(
+        sql: string,
+        params: any,
+        callback?: (this: Statement, err: Error | null, rows: T[]) => void,
+    ): this;
     all(sql: string, ...params: any[]): this;
 
-    each<T>(sql: string, callback?: (this: Statement, err: Error | null, row: T) => void, complete?: (err: Error | null, count: number) => void): this;
-    each<T>(sql: string, params: any, callback?: (this: Statement, err: Error | null, row: T) => void, complete?: (err: Error | null, count: number) => void): this;
+    each<T>(
+        sql: string,
+        callback?: (this: Statement, err: Error | null, row: T) => void,
+        complete?: (err: Error | null, count: number) => void,
+    ): this;
+    each<T>(
+        sql: string,
+        params: any,
+        callback?: (this: Statement, err: Error | null, row: T) => void,
+        complete?: (err: Error | null, count: number) => void,
+    ): this;
     each(sql: string, ...params: any[]): this;
 
-    exec(sql: string, callback?: (this: Statement, err: Error | null) => void): this;
+    exec(
+        sql: string,
+        callback?: (this: Statement, err: Error | null) => void,
+    ): this;
 
-    prepare(sql: string, callback?: (this: Statement, err: Error | null) => void): Statement;
-    prepare(sql: string, params: any, callback?: (this: Statement, err: Error | null) => void): Statement;
+    prepare(
+        sql: string,
+        callback?: (this: Statement, err: Error | null) => void,
+    ): Statement;
+    prepare(
+        sql: string,
+        params: any,
+        callback?: (this: Statement, err: Error | null) => void,
+    ): Statement;
     prepare(sql: string, ...params: any[]): Statement;
 
     /**
@@ -157,17 +224,28 @@ export class Database extends events.EventEmitter {
     serialize(callback?: () => void): void;
     parallelize(callback?: () => void): void;
 
-    on(event: "trace", listener: (sql: string) => void): this;
-    on(event: "profile", listener: (sql: string, time: number) => void): this;
-    on(event: "change", listener: (type: string, database: string, table: string, rowid: number) => void): this;
-    on(event: "error", listener: (err: Error) => void): this;
-    on(event: "open" | "close", listener: () => void): this;
+    on(event: 'trace', listener: (sql: string) => void): this;
+    on(event: 'profile', listener: (sql: string, time: number) => void): this;
+    on(
+        event: 'change',
+        listener: (
+            type: string,
+            database: string,
+            table: string,
+            rowid: number,
+        ) => void,
+    ): this;
+    on(event: 'error', listener: (err: Error) => void): this;
+    on(event: 'open' | 'close', listener: () => void): this;
     on(event: string, listener: (...args: any[]) => void): this;
 
-    configure(option: "busyTimeout", value: number): void;
-    configure(option: "limit", id: number, value: number): void;
+    configure(option: 'busyTimeout', value: number): void;
+    configure(option: 'limit', id: number, value: number): void;
 
-    loadExtension(filename: string, callback?: (err: Error | null) => void): this;
+    loadExtension(
+        filename: string,
+        callback?: (err: Error | null) => void,
+    ): this;
 
     wait(callback?: (param: null) => void): this;
 
@@ -198,23 +276,23 @@ export interface sqlite3 {
     LOCKED: number;
     NOMEM: number;
     READONLY: number;
-    INTERRUPT: number
+    INTERRUPT: number;
     IOERR: number;
-    CORRUPT: number
+    CORRUPT: number;
     NOTFOUND: number;
     FULL: number;
     CANTOPEN: number;
     PROTOCOL: number;
     EMPTY: number;
     SCHEMA: number;
-    TOOBIG: number
-    CONSTRAINT: number
+    TOOBIG: number;
+    CONSTRAINT: number;
     MISMATCH: number;
     MISUSE: number;
     NOLFS: number;
-    AUTH: number
+    AUTH: number;
     FORMAT: number;
-    RANGE: number
+    RANGE: number;
     NOTADB: number;
 
     LIMIT_LENGTH: number;

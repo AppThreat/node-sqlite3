@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - release/v9
     tags:
       - '*'
 env:
@@ -13,6 +14,61 @@ concurrency:
   group: ${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 jobs:
+  # Lint needs no native build: biome ships as optionalDependencies and
+  # its bin resolves without lifecycle scripts, so --ignore-scripts is
+  # safe here. lint:jsdoc is report-only for now (Deliverable 04 flips
+  # it to a hard failure once the JSDoc pass lands).
+  lint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: 24
+          scope: '@appthreat'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Lint (check only; CI never runs --write)
+        run: pnpm run lint:check
+      - name: JSDoc completeness (report-only)
+        run: pnpm run lint:jsdoc
+
+  # Fast test feedback via a dev rebuild instead of a full prebuild.
+  # Leak check: the suite must exit on its own — nothing here passes
+  # --force-exit, so a leaked handle or worker hangs the run and the
+  # job times out (a failure, not a silent pass). The stray-.only guard
+  # runs inside `pnpm run test` and fails rather than silently skipping.
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - macos-latest
+    name: test (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: 24
+          scope: '@appthreat'
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        python-version: 3.12
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Rebuild native module (required after --ignore-scripts)
+        run: pnpm run rebuild
+      - name: Run tests
+        run: pnpm run test
+
   build:
     runs-on: ${{ matrix.os }}
     strategy:
