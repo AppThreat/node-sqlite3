@@ -27,7 +27,7 @@ jobs:
         target:
           - x64
         node:
-          - 20
+          - 24
         include:
           - os: macos-latest
             node: 24
@@ -112,7 +112,7 @@ jobs:
       fail-fast: false
       matrix:
         node:
-          - 20
+          - 24
         target:
           - linux/arm64
         variant:
