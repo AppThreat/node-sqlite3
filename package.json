@@ -5,7 +5,7 @@
   "homepage": "https://github.com/AppThreat/node-sqlite3",
   "author": "Team AppThreat <cloud@appthreat.com>",
   "binary": {
-    "napi_versions": [9, 10]
+    "napi_versions": [10]
   },
   "files": [
     "binding.gyp",
