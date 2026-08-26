@@ -51,8 +51,15 @@ export type {
 } from './promises.js';
 export type {
     AggregateDefinition,
+    AuthorizerPolicy,
+    AuthorizerRule,
     BindParams,
     BindValue,
+    CancellationToken,
+    CheckpointMode,
+    CheckpointOptions,
+    CheckpointResult,
+    ColumnMetadata,
     DatabaseState,
     FunctionOptions,
     IntegerMode,
@@ -61,4 +68,5 @@ export type {
     RunResult,
     SqliteError,
     StatementRunSyncResult,
+    TableColumnInfo,
 } from './native.js';

@@ -60,10 +60,11 @@ using namespace node_sqlite3;
 namespace {
 
 // The error a user-defined function reached from a sync-path statement
-// reports instead of deadlocking.
+// reports instead of deadlocking. prepareSync is not listed because it is
+// not gated (and should not be): preparing never invokes a function.
 std::string SyncRefusalMessage(const std::string& name) {
     return "user-defined function '" + name + "' cannot be invoked from a "
-        "synchronous method (getSync/runSync/allSync/prepareSync): the "
+        "synchronous method (getSync/runSync/allSync): the "
         "JavaScript thread is blocked inside SQLite and cannot run the "
         "callback, which would deadlock. Use the asynchronous get/run/all/"
         "each instead, or express the logic in SQL.";
@@ -432,6 +433,20 @@ static void ExecuteOnJsThread(napi_env nenv, FuncCall* call) {
         }
     } break;
 
+    case FuncCall::kProgress: {
+        // The JS progress callback (db.progress(n, cb)). Truthy return
+        // aborts the running statement; a throw aborts it too, with the
+        // thrown error kept as the interrupt failure's cause.
+        Napi::Value r = scalar.Call(env.Undefined(), {});
+        if (env.IsExceptionPending()) {
+            SetCallError(db, call,
+                "progress callback of this connection threw: ");
+            return;
+        }
+        call->result.type = SQLITE_INTEGER;
+        call->result.integer = r.ToBoolean().Value() ? 1 : 0;
+    } break;
+
     case FuncCall::kAggCleanup:
         break; // handled above
     }
@@ -523,7 +538,7 @@ static void SweepDeadRegistrations(Database* db) {
 
 static void ReleaseChannelIfIdle(Database* db) {
     if (db->js_channel != NULL && db->js_functions.empty()
-            && db->js_collations.empty()) {
+            && db->js_collations.empty() && db->js_progress == NULL) {
         napi_release_threadsafe_function(db->js_channel,
             napi_tsfn_release);
         db->js_channel = NULL;
@@ -1134,6 +1149,51 @@ void Database::RemoveUserFunctions() {
 
 void Database::ReleaseJsChannelIfIdle() {
     UserFunctionOps::ReleaseChannelIfIdle(this);
+}
+
+bool Database::EnsureJsChannel() {
+    return UserFunctionOps::EnsureChannel(this);
+}
+
+void Database::ReportRegistrationFailure(int rc) {
+    UserFunctionOps::ReportRegistrationError(this, rc);
+}
+
+// The sqlite progress handler (Deliverable 07). Flag mode is one relaxed
+// atomic load — set from any thread via the SharedArrayBuffer-backed
+// cancellation token. Callback mode makes the standard blocking round
+// trip; the sync methods are gated against it (BindSync and the sync
+// prepare path), and the depth check below is belt-and-braces for any
+// path that slips through: continuing is the only non-deadlocking
+// answer there, since the handler cannot report an error.
+int Database::ProgressHandler(void* ctx) {
+    auto* db = static_cast<Database*>(ctx);
+    switch (db->progress_mode) {
+        case ProgressMode::Flag:
+            return db->progress_flag->load(std::memory_order_relaxed) != 0
+                ? 1 : 0;
+        case ProgressMode::Callback: {
+            JsFunc* fn = db->js_progress;
+            if (fn == NULL || fn->dead) return 0;
+            if (db->sync_sqlite_depth > 0) return 0;
+            FuncCall* call = new FuncCall(fn, FuncCall::kProgress);
+            UserFunctionOps::RunBlockingRoundTrip(call);
+            bool stop = !call->errored && call->result.type == SQLITE_INTEGER
+                && call->result.integer != 0;
+            bool failed = call->errored;
+            DisposeFuncCall(call);
+            if (failed) {
+                // The callback threw: the thrown value is already stashed
+                // as the pending cause; abort the statement so the
+                // SQLITE_INTERRUPT failure carries it.
+                sqlite3_interrupt(db->_handle);
+                return 1;
+            }
+            return stop ? 1 : 0;
+        }
+        default:
+            return 0;
+    }
 }
 
 void Database::AttachPendingJsError(Napi::Object err) {

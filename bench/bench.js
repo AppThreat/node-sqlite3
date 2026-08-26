@@ -170,6 +170,131 @@ async function main() {
         }),
     );
 
+    // Deliverable 07: the write-path hooks. "No hook installed" is the
+    // structural zero (the native hook exists only while a listener is
+    // registered); the removed-listener variant proves removal returns
+    // to it. The commit-listener variants measure the active cost.
+    results.push(
+        await bench('db.run + commit listener: 10k autocommits', (done) => {
+            const onCommit = function () {
+                /* no-op listener: measures dispatch cost only */
+            };
+            db.on('commit', onCommit);
+            db.exec('DELETE FROM t2', () => {
+                let i = 0;
+                const next = () => {
+                    if (i === 10000) {
+                        db.removeListener('commit', onCommit);
+                        return done();
+                    }
+                    db.run(
+                        'INSERT INTO t2 VALUES (?, ?, ?, ?)',
+                        i,
+                        i + 0.5,
+                        `text-value-${i}`,
+                        Buffer.alloc(64),
+                        () => {
+                            i++;
+                            next();
+                        },
+                    );
+                };
+                next();
+            });
+        }),
+    );
+
+    results.push(
+        await bench('db.run + change+commit listeners: 10k', (done) => {
+            const onCommit = function () {
+                /* no-op listener: measures dispatch cost only */
+            };
+            const onChange = function () {
+                /* no-op listener: measures dispatch cost only */
+            };
+            db.on('commit', onCommit);
+            db.on('change', onChange);
+            db.exec('DELETE FROM t2', () => {
+                let i = 0;
+                const next = () => {
+                    if (i === 10000) {
+                        db.removeListener('commit', onCommit);
+                        db.removeListener('change', onChange);
+                        return done();
+                    }
+                    db.run(
+                        'INSERT INTO t2 VALUES (?, ?, ?, ?)',
+                        i,
+                        i + 0.5,
+                        `text-value-${i}`,
+                        Buffer.alloc(64),
+                        () => {
+                            i++;
+                            next();
+                        },
+                    );
+                };
+                next();
+            });
+        }),
+    );
+
+    results.push(
+        await bench('db.run after hook removal: 10k', (done) => {
+            const onCommit = function () {
+                /* installed and removed: proves removal restores baseline */
+            };
+            db.on('commit', onCommit);
+            db.removeListener('commit', onCommit);
+            db.exec('DELETE FROM t2', () => {
+                let i = 0;
+                const next = () => {
+                    if (i === 10000) return done();
+                    db.run(
+                        'INSERT INTO t2 VALUES (?, ?, ?, ?)',
+                        i,
+                        i + 0.5,
+                        `text-value-${i}`,
+                        Buffer.alloc(64),
+                        () => {
+                            i++;
+                            next();
+                        },
+                    );
+                };
+                next();
+            });
+        }),
+    );
+
+    // Cancellation-token polling cost: an installed token adds one
+    // relaxed atomic load per `period` VM instructions. Paired against
+    // "get: 10k single-row lookups" above: the same prepared statement,
+    // same parameters, token installed vs not.
+    results.push(
+        await bench(
+            'stmt.get 10k with cancellation token installed',
+            (done) => {
+                const token = db.cancellationToken();
+                const stmt = db.prepare(
+                    'SELECT a, b, c, d FROM t WHERE rowid = ?',
+                );
+                let i = 0;
+                const next = () => {
+                    if (i === 10000) {
+                        return stmt.finalize(() => {
+                            token.destroy();
+                            done();
+                        });
+                    }
+                    i++;
+                    stmt.get((i % 20000) + 1, next);
+                };
+                next();
+            },
+        ),
+    );
+
     results.push(
         await bench('db.run cached: 10k', (done) => {
             db2.cacheStatements();

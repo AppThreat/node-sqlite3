@@ -28,15 +28,21 @@ import type { Readable } from 'node:stream';
 
 import type {
     AggregateDefinition,
+    AuthorizerPolicy,
     Backup,
     BindParams,
     BindValue,
+    CancellationToken,
+    CheckpointMode,
+    CheckpointOptions,
+    CheckpointResult,
     FunctionOptions,
     Row,
     RunResult,
     SqliteError,
     Statement,
     StatementRunSyncResult,
+    TableColumnInfo,
 } from './native.js';
 import type {
     FetchCallback,
@@ -456,12 +462,124 @@ declare module './native.js' {
         removeFunction(name: string): this;
 
         /**
-         * Removes the collation registered under `name`; the synchronous
-         * methods work again once no JavaScript collation remains.
+         * Removes the collation under `name`; the synchronous methods
+         * work again once no JavaScript collation remains.
          *
          * @since 9.0.0
          */
         removeCollation(name: string): this;
+
+        // ---- Hooks, authorizer, progress, WAL, introspection (v9).
+
+        /**
+         * Installs (or removes) a declarative authorizer: a rule list
+         * evaluated inside SQLite, in C++ — no JavaScript runs on the
+         * prepare path. The supported way to sandbox user-supplied SQL;
+         * `deny` rules win over `allow` rules, and the statement cache is
+         * flushed on every change so nothing compiled under the old
+         * policy survives.
+         *
+         * @since 9.0.0
+         * @example
+         * db.authorizer({
+         *     default: 'deny',
+         *     allow: [
+         *         { action: sqlite3.SELECT },
+         *         { action: sqlite3.READ, table: 'users' },
+         *     ],
+         * });
+         */
+        authorizer(policy?: AuthorizerPolicy | null): this;
+
+        /**
+         * Installs a JavaScript progress callback invoked every `period`
+         * VM instructions; a truthy return aborts the statement. Each
+         * invocation is a blocking round trip to the JS thread — the
+         * documented-slow form. While installed, the synchronous methods
+         * refuse to run. Without a callback, removes the handler.
+         *
+         * @since 9.0.0
+         */
+        progress(
+            period?: number | (() => unknown),
+            callback?: () => unknown,
+        ): this;
+
+        /**
+         * Creates a cancellation token: a `SharedArrayBuffer` flag the
+         * native progress handler polls, aborting the running statement
+         * the moment it is set — from any thread, with zero per-check JS
+         * cost.
+         *
+         * @since 9.0.0
+         */
+        cancellationToken(options?: { period?: number }): CancellationToken;
+
+        /** Runs a WAL checkpoint (promise mode). @since 9.0.0 */
+        checkpoint(
+            options?: CheckpointOptions | CheckpointMode | string,
+        ): Promise<CheckpointResult>;
+        /** Runs a WAL checkpoint (callback mode). @since 9.0.0 */
+        checkpoint(
+            options: CheckpointOptions | CheckpointMode | string,
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                result: CheckpointResult,
+            ) => void,
+        ): this;
+        /** Runs a WAL checkpoint (callback only). @since 9.0.0 */
+        checkpoint(
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                result: CheckpointResult,
+            ) => void,
+        ): this;
+
+        /** Reads a table's column metadata (promise mode). @since 9.0.0 */
+        tableInfo(table: string, dbName?: string): Promise<TableColumnInfo[]>;
+        /** Reads a table's column metadata (callback mode). @since 9.0.0 */
+        tableInfo(
+            table: string,
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                columns: TableColumnInfo[],
+            ) => void,
+        ): this;
+        /** Reads a table's column metadata with a database name (callback mode). @since 9.0.0 */
+        tableInfo(
+            table: string,
+            dbName: string,
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                columns: TableColumnInfo[],
+            ) => void,
+        ): this;
+
+        /** Reads or changes a db_config switch (promise mode). @since 9.0.0 */
+        dbConfig(op: number, value?: boolean | number): Promise<boolean>;
+        /** Reads or changes a db_config switch (callback mode). @since 9.0.0 */
+        dbConfig(
+            op: number,
+            value: boolean | number | undefined,
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                value: boolean,
+            ) => void,
+        ): this;
+        /** Reads a db_config switch (callback only). @since 9.0.0 */
+        dbConfig(
+            op: number,
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                value: boolean,
+            ) => void,
+        ): this;
 
         /**
          * Enables the opt-in LRU cache of prepared statements for
@@ -527,6 +645,29 @@ declare module './native.js' {
                 table: string,
                 rowid: number,
             ) => void,
+        ): this;
+        /**
+         * commit event: fired after a transaction commits, on the JS
+         * thread, after that transaction's change events. Observational
+         * only — the commit has already happened and cannot be vetoed.
+         * @since 9.0.0
+         */
+        on(event: 'commit', listener: () => void): this;
+        /**
+         * rollback event: fired after a transaction rolls back, on the JS
+         * thread, after that transaction's change events.
+         * @since 9.0.0
+         */
+        on(event: 'rollback', listener: () => void): this;
+        /**
+         * wal event: fired after a commit writes frames into the WAL,
+         * with the database name and the number of frames now in the WAL.
+         * Observational only — the automatic checkpoint cannot be vetoed.
+         * @since 9.0.0
+         */
+        on(
+            event: 'wal',
+            listener: (database: string, pages: number) => void,
         ): this;
         /** error event. */
         on(event: 'error', listener: (err: SqliteError) => void): this;

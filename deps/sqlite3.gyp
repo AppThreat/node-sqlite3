@@ -79,6 +79,12 @@
           'SQLITE_ENABLE_DBSTAT_VTAB=1',
           'SQLITE_ENABLE_MATH_FUNCTIONS',
           'SQLITE_ENABLE_STAT4',
+          # Deliverable 07: sqlite3_table_column_metadata and the
+          # sqlite3_column_{database,table,origin}_name family compile only
+          # with this define. Decision recorded in the D07 handoff: the
+          # ~30 KB of extra amalgamation code is accepted in exchange for
+          # column metadata (stmt.columns) and db.tableInfo().
+          'SQLITE_ENABLE_COLUMN_METADATA',
           'SQLITE_DEFAULT_MEMSTATUS=0'
         ],
       },
@@ -98,6 +104,8 @@
         'SQLITE_ENABLE_DBSTAT_VTAB=1',
         'SQLITE_ENABLE_MATH_FUNCTIONS',
         'SQLITE_ENABLE_STAT4',
+        # See the direct_dependent_settings copy above (Deliverable 07).
+        'SQLITE_ENABLE_COLUMN_METADATA',
         'SQLITE_DEFAULT_MEMSTATUS=0'
       ],
       'conditions': [

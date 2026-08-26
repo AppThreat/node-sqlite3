@@ -72,6 +72,25 @@ Also new: each round trip to JS costs ~18 µs (measured; see the README's
 "User-defined functions" section for the full cost table), and every
 registration, replacement or removal flushes the statement cache.
 
+## Hooks, authorizer, progress and introspection (new)
+
+Everything in the README's "Hooks, authorizer, progress and
+introspection" section is new — there is nothing to migrate. Three
+behavioural notes worth knowing up front:
+
+- `'commit'` and `'rollback'` events are **observational**: the commit
+  or rollback has already happened when the listener runs, and a return
+  value cannot veto it. (A vetoing hook would have to block the
+  committing worker thread on the JS thread.)
+- Registering the same event twice used to silently *uninstall* the
+  native hook (the old code toggled on every `addListener`); a second
+  `db.on('change', …)` now keeps the hook installed, and removing one
+  listener of several no longer stops the others from firing. The
+  single-listener usage the old suite exercised behaves identically.
+- A JavaScript progress callback (`db.progress(n, cb)`) blocks the
+  synchronous methods while registered, exactly like a JS collation;
+  the SharedArrayBuffer cancellation token does not.
+
 ## `map()` single-column results are rows, not `undefined`
 
 `db.map('SELECT id FROM t')` used to build `{ id: undefined }` (the

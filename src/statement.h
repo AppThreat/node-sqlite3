@@ -273,6 +273,45 @@ public:
     // statement fail with SQLITE_MISUSE.
     Napi::Value FinalizedGetter(const Napi::CallbackInfo& info);
 
+    // --- Introspection (Deliverable 07). readonly/parameterCount/
+    // parameterNames/columns serve a snapshot taken once, under the
+    // connection mutex, so the accessors never touch the sqlite3_stmt*
+    // and cannot race a stepping worker or a round-tripping JS callback.
+    // The sqlite3_stmt result shape does not change across a transparent
+    // re-prepare, so the snapshot holds for the statement's lifetime.
+    // status() reads live counters and takes the mutex instead, refusing
+    // while a JS round trip could hold it.
+    //
+    // Taking the snapshot and publishing it are deliberately separate.
+    // The async prepare runs on a libuv worker, and the accessors run on
+    // the JS thread: had the worker written the accessor-visible fields
+    // directly, a getter called during the prepare window would walk a
+    // std::vector mid-push_back — a dangling read, not merely a stale
+    // one. So SnapshotMetadata() (preparing thread, mutex held) fills
+    // pending_meta, and PublishMetadata() (JS thread only) moves it into
+    // place. The napi async-work completion that calls PublishMetadata()
+    // is ordered after the worker, so the move needs no atomics.
+    struct ColumnMeta {
+        std::string name;
+        std::string decltype_;  // empty = none (expression/alias columns)
+        std::string database;   // SQLITE_ENABLE_COLUMN_METADATA only
+        std::string table;
+        std::string origin;
+    };
+    struct Metadata {
+        bool readonly = false;
+        int param_count = 0;
+        std::vector<std::string> param_names;  // "" entries: unnamed (?)
+        std::vector<ColumnMeta> columns;
+    };
+    void SnapshotMetadata();
+    void PublishMetadata();
+    Napi::Value ReadonlyGetter(const Napi::CallbackInfo& info);
+    Napi::Value ParameterCountGetter(const Napi::CallbackInfo& info);
+    Napi::Value ParameterNamesGetter(const Napi::CallbackInfo& info);
+    Napi::Value ColumnsGetter(const Napi::CallbackInfo& info);
+    Napi::Value Status(const Napi::CallbackInfo& info);
+
 protected:
     static void Work_BeginPrepare(Database::Baton* baton);
     static void Work_Prepare(napi_env env, void* data);
@@ -344,6 +383,14 @@ protected:
     // they were built from so a schema change can invalidate them.
     std::vector<std::string> column_keys_source;
     std::vector<Napi::Reference<Napi::String>> column_keys;
+
+    // Introspection snapshot. pending_meta is written by the preparing
+    // thread; meta and meta_valid are touched only by the JS thread, and
+    // meta_valid gates the accessors (the async prepare window leaves
+    // them undefined). See the note above PublishMetadata().
+    Metadata pending_meta;
+    Metadata meta;
+    bool meta_valid = false;
 
     std::queue<Call*> queue;
     std::string message;

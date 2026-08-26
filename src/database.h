@@ -4,8 +4,10 @@
 
 
 #include <assert.h>
+#include <atomic>
 #include <string>
 #include <queue>
+#include <vector>
 
 #include <sqlite3.h>
 #include <napi.h>
@@ -27,6 +29,25 @@ struct UserFunctionOps;
 class Database : public Napi::ObjectWrap<Database> {
 public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
+
+    // The declarative authorizer: a rule list evaluated in C++ (a JS
+    // callback would need a blocking round trip from inside
+    // sqlite3_prepare, on whatever thread is preparing).
+    struct AuthRule {
+        int action = -1;   // -1 matches any authorizer action
+        int verdict;       // SQLITE_OK / SQLITE_DENY / SQLITE_IGNORE
+        std::string arg1;  // "" matches anything (table, index, column…)
+        std::string arg2;
+        std::string database;
+        std::string trigger;
+    };
+    struct AuthPolicy {
+        int default_decision = SQLITE_OK;
+        // Deny rules first, then ignore, then allow: a deny can never be
+        // rescued by a later allow, which is the safe reading for a
+        // sandbox (the JS layer orders them this way).
+        std::vector<AuthRule> rules;
+    };
 
     // How INTEGER columns and lastID are converted to JS
     // (configure('integerMode', mode)). 'number' throws a RangeError on
@@ -115,6 +136,77 @@ public:
         virtual ~LimitBaton() override = default;
     };
 
+    // Deliverable 07: hook registration carries the wanted state (the JS
+    // layer calls configure(type, true) for every addListener, so a toggle
+    // here would uninstall a hook on the second listener).
+    struct HookBaton : Baton {
+        bool enable = false;
+        HookBaton(Database* db_, Napi::Function cb_, bool enable_) :
+            Baton(db_, cb_), enable(enable_) {}
+        virtual ~HookBaton() override = default;
+    };
+
+    struct CheckpointBaton : Baton {
+        std::string database;
+        int mode;
+        int log_frames = 0;
+        int ckpt_frames = 0;
+        CheckpointBaton(Database* db_, Napi::Function cb_,
+                const char* database_, int mode_) :
+            Baton(db_, cb_), database(database_), mode(mode_) {}
+        virtual ~CheckpointBaton() override = default;
+    };
+
+    struct TableInfoBaton : Baton {
+        struct Column {
+            int cid;
+            std::string name;
+            std::string type;
+            bool not_null;
+            std::string dflt;
+            int pk;
+            std::string collate;
+            bool autoinc;
+        };
+        std::string database;
+        std::string table;
+        std::vector<Column> columns;
+        TableInfoBaton(Database* db_, Napi::Function cb_,
+                const char* database_, const char* table_) :
+            Baton(db_, cb_), database(database_), table(table_) {}
+        virtual ~TableInfoBaton() override = default;
+    };
+
+    struct DbConfigBaton : Baton {
+        int op;
+        int value;
+        int previous = 0;
+        DbConfigBaton(Database* db_, Napi::Function cb_, int op_, int value_) :
+            Baton(db_, cb_), op(op_), value(value_) {}
+        virtual ~DbConfigBaton() override = default;
+    };
+
+    // Authorizer registration. Owns `policy` until the exclusive handler
+    // installs it (or the schedule fails and the baton destructor frees
+    // it).
+    struct AuthBaton : Baton {
+        AuthPolicy* policy = NULL;
+        bool remove = false;
+        AuthBaton(Database* db_, Napi::Function cb_) : Baton(db_, cb_) {}
+        virtual ~AuthBaton() override { delete policy; }
+    };
+
+    // Cancellation-token registration. Owns the Int32Array reference (and
+    // the captured flag pointer) until the exclusive handler installs it.
+    struct ProgressFlagBaton : Baton {
+        int period;
+        std::atomic<int32_t>* flag = NULL;
+        Napi::Reference<Napi::Value> buffer;
+        ProgressFlagBaton(Database* db_, Napi::Function cb_, int period_) :
+            Baton(db_, cb_), period(period_) {}
+        virtual ~ProgressFlagBaton() override = default;
+    };
+
     typedef void (*Work_Callback)(Baton* baton);
 
     struct Call {
@@ -131,10 +223,22 @@ public:
     };
 
     struct UpdateInfo {
-        int type;
+        // Which connection event this queued item delivers. change,
+        // commit and rollback share one ordered channel so a
+        // transaction's change events always reach JS before its commit
+        // (or rollback) event: three separate uv_async_t watchers would
+        // be drained in handle-init order, not send order, whenever two
+        // were pending in the same loop wakeup.
+        enum Kind { kChange, kCommit, kRollback } kind = kChange;
+        int type = 0;                      // kChange only (SQLITE_INSERT/…)
         std::string database;
         std::string table;
-        sqlite3_int64 rowid;
+        sqlite3_int64 rowid = 0;
+    };
+
+    struct WalInfo {
+        std::string database;
+        int pages;
     };
 
     // The sqlite handle exists and has not been closed. Note that Closing
@@ -148,6 +252,7 @@ public:
     typedef Async<std::string, Database> AsyncTrace;
     typedef Async<ProfileInfo, Database> AsyncProfile;
     typedef Async<UpdateInfo, Database> AsyncUpdate;
+    typedef Async<WalInfo, Database> AsyncWal;
 
     friend class Statement;
     friend class Backup;
@@ -175,6 +280,8 @@ public:
     ~Database() {
         RemoveCallbacks();
         RemoveUserFunctions();
+        RemoveAuthorizer();
+        RemoveProgressHandler();
         sqlite3_close(_handle);
         _handle = NULL;
         db_state = DbState::Closed;
@@ -241,19 +348,106 @@ protected:
     static void UpdateCallback(void* db, int type, const char* database, const char* table, sqlite3_int64 rowid);
     static void UpdateCallback(Database* db, UpdateInfo* info);
 
+    // --- Transaction hooks (commit / rollback), the WAL hook, the
+    // declarative authorizer and the progress handler (Deliverable 07).
+    // All registration goes through the exclusive queue with the
+    // MayBlockOnWorkerRoundTrip deferral — every sqlite3_*_hook /
+    // sqlite3_set_authorizer / sqlite3_progress_handler call takes the
+    // connection mutex.
+
+    static void RegisterCommitCallback(Baton* baton);
+    static void RegisterRollbackCallback(Baton* baton);
+    static void RegisterWalCallback(Baton* baton);
+    // The sqlite hooks. Advisory by design: the commit/rollback/wal
+    // return values are ignored (always "proceed"), because a veto would
+    // block the committing worker on the JS thread — the D06 deadlock
+    // shape, on the commit path. A NULL channel (hooks removed, close in
+    // progress) means drop the event: sqlite itself may still fire a hook
+    // during the implicit rollback of sqlite3_close.
+    static int CommitHook(void* ctx);
+    static void RollbackHook(void* ctx);
+    static int WalHook(void* ctx, sqlite3* handle, const char* database,
+            int pages);
+    static void TxnCallback(Database* db, UpdateInfo* info);
+    static void WalCallback(Database* db, WalInfo* info);
+    // Creates the shared channel on first need / releases it when no
+    // transaction hook is left. Exclusive contexts only.
+    static void EnsureTxnChannel(Database* db);
+    static void MaybeDropTxnChannel(Database* db);
+
+    Napi::Value SetAuthorizer(const Napi::CallbackInfo& info);
+    static void Work_SetAuthorizer(Baton* baton);
+    // Runs on whatever thread is preparing. auth_policy is only ever
+    // swapped by the exclusive handler (pending == 0, so no prepare is
+    // running) and freed after the swap, so the pointer read here is
+    // stable for the whole call.
+    static int AuthorizerCallback(void* ctx, int action, const char* arg1,
+        const char* arg2, const char* database, const char* trigger);
+    void RemoveAuthorizer();
+
+    // Progress handler: either an atomic flag inside a SharedArrayBuffer
+    // (db.cancellationToken(); zero per-invocation cost, cancellable from
+    // any thread) or a JS callback making the D06 blocking round trip
+    // (observability; documented as slow). One sqlite3_progress_handler
+    // slot per connection, so the two forms replace each other.
+    enum class ProgressMode { None, Flag, Callback };
+    Napi::Value SetProgressFlag(const Napi::CallbackInfo& info);
+    Napi::Value SetProgressCallback(const Napi::CallbackInfo& info);
+    static void Work_SetProgressFlag(Baton* baton);
+    static void Work_SetProgressCallback(Baton* baton);
+    // The sqlite handler. Flag mode is a relaxed atomic load; callback
+    // mode round-trips to the JS thread and aborts the statement when the
+    // callback returns truthy or throws. Defined in src/function.cc with
+    // the round-trip machinery. ApplyProgressHandler (re)installs or
+    // removes the sqlite hook from the current state; exclusive contexts
+    // only.
+    static int ProgressHandler(void* ctx);
+    static void ApplyProgressHandler(Database* db);
+    void RemoveProgressHandler();
+    // Frees the JS-callback holder, releasing its JS references and its
+    // database ref exactly like JsFuncDestroy does for registered
+    // functions (no sqlite registration exists to call xDestroy for us).
+    void DropJsProgressHolder();
+
+    // WAL checkpoints (sqlite3_wal_checkpoint_v2), table metadata
+    // (PRAGMA table_info + sqlite3_table_column_metadata) and the safe
+    // sqlite3_db_config subset. Scheduled work; the sqlite calls run on
+    // the worker pool like statement work.
+    Napi::Value Checkpoint(const Napi::CallbackInfo& info);
+    static void Work_BeginCheckpoint(Baton* baton);
+    static void Work_Checkpoint(napi_env env, void* data);
+    static void Work_AfterCheckpoint(napi_env env, napi_status status, void* data);
+
+    Napi::Value TableInfo(const Napi::CallbackInfo& info);
+    static void Work_BeginTableInfo(Baton* baton);
+    static void Work_TableInfo(napi_env env, void* data);
+    static void Work_AfterTableInfo(napi_env env, napi_status status, void* data);
+
+    Napi::Value DbConfig(const Napi::CallbackInfo& info);
+    static void Work_BeginDbConfig(Baton* baton);
+    static void Work_DbConfig(napi_env env, void* data);
+    static void Work_AfterDbConfig(napi_env env, napi_status status, void* data);
+
+    // sqlite3_changes64 / sqlite3_total_changes64, subject to the
+    // connection's integer mode.
+    Napi::Value ChangesGetter(const Napi::CallbackInfo& info);
+    Napi::Value TotalChangesGetter(const Napi::CallbackInfo& info);
+
     void RemoveCallbacks();
 
     // True when a main-thread sqlite call on this connection could block
-    // on the connection mutex: a JS function or collation is registered
-    // and statement work is in flight — a worker may be sitting inside a
-    // round trip holding that mutex while it waits for this very thread.
-    // Callers on the JS thread must defer their sqlite call (the exclusive
-    // queue runs it once nothing is in flight) instead of touching the
-    // handle. Without registered functions in-flight work never waits on
-    // the JS thread, so the mutex is only ever held briefly and blocking
-    // on it is fine — which is why every pre-existing path is unchanged.
+    // on the connection mutex: a JS function, collation or progress
+    // callback is registered and statement work is in flight — a worker
+    // may be sitting inside a round trip holding that mutex while it
+    // waits for this very thread. Callers on the JS thread must defer
+    // their sqlite call (the exclusive queue runs it once nothing is in
+    // flight) instead of touching the handle. Without registered
+    // callbacks in-flight work never waits on the JS thread, so the mutex
+    // is only ever held briefly and blocking on it is fine — which is why
+    // every pre-existing path is unchanged.
     bool MayBlockOnWorkerRoundTrip() {
-        return (!(js_functions.empty() && js_collations.empty()))
+        return (!(js_functions.empty() && js_collations.empty()
+                    && js_progress == NULL))
             && pending > 0;
     }
 
@@ -301,6 +495,13 @@ protected:
     // with their holders, so the connection stays consistent.
     void RemoveUserFunctions();
 
+    // Defined in src/function.cc beside the channel they serve: creates
+    // the shared ThreadSafeFunction on demand (the progress callback form
+    // needs it without any SQL function being registered), and reports a
+    // registration failure on the connection's 'error' event.
+    bool EnsureJsChannel();
+    void ReportRegistrationFailure(int rc);
+
     // Releases the callback channel when no registration is left. Only
     // called from live-loop contexts (the removal handlers, Work_BeginClose)
     // — never from a destructor, where it could re-enter the channel's own
@@ -336,7 +537,44 @@ protected:
 
     AsyncTrace* debug_trace = NULL;
     AsyncProfile* debug_profile = NULL;
-    AsyncUpdate* update_event = NULL;
+    // Shared, ordered channel for the change/commit/rollback events (see
+    // UpdateInfo::Kind). The per-hook installed flags say which sqlite
+    // hooks feed it.
+    AsyncUpdate* txn_event = NULL;
+    bool hook_change = false;
+    bool hook_commit = false;
+    bool hook_rollback = false;
+    AsyncWal* wal_event = NULL;
+
+    // --- Authorizer and progress handler (Deliverable 07) ---
+    //
+    // Lifetime answers (the checklist items these must settle):
+    //
+    //  - auth_policy is owned by the Database, swapped only inside the
+    //    exclusive registration handler — which by definition runs at
+    //    pending == 0, when no prepare (the only context the authorizer
+    //    fires in) can be executing on any thread. The old policy is
+    //    freed after the sqlite3_set_authorizer swap, never under a
+    //    concurrent callback. Cleared in Work_BeginClose and ~Database,
+    //    both main-thread with nothing in flight.
+    //  - The progress SharedArrayBuffer reference is a Napi persistent
+    //    rooted on the main thread (created by the registration handler,
+    //    reset in RemoveProgressHandler). The C handler dereferences
+    //    progress_flag only while the sqlite hook is installed, and
+    //    RemoveProgressHandler unregisters the hook before resetting the
+    //    reference — at pending == 0, exclusive, so no step/prepare can
+    //    be inside the handler. At environment teardown the reference is
+    //    reclaimed with everything else; no JS runs.
+    //  - js_progress (the callback form) is a JsFunc holder exactly like
+    //    a registered function: JS-thread-only state, swept by the same
+    //    exclusive removal paths, and its round trips ride the shared
+    //    js_channel (see src/function.cc).
+    AuthPolicy* auth_policy = NULL;
+    ProgressMode progress_mode = ProgressMode::None;
+    int progress_period = 0;
+    std::atomic<int32_t>* progress_flag = NULL;
+    Napi::Reference<Napi::Value> progress_buffer;
+    JsFunc* js_progress = NULL;
 
     // --- User-defined function state (Deliverable 06) ---
 

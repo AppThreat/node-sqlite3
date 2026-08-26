@@ -66,6 +66,15 @@ Napi::Object Statement::Init(Napi::Env env, Napi::Object exports) {
       InstanceAccessor("changes", &Statement::GetChanges, nullptr,
           static_cast<napi_property_attributes>(napi_configurable)),
       InstanceAccessor("finalized", &Statement::FinalizedGetter, nullptr),
+      // Introspection (Deliverable 07): snapshots taken at prepare time,
+      // so the getters never race a worker.
+      InstanceAccessor("readonly", &Statement::ReadonlyGetter, nullptr),
+      InstanceAccessor("parameterCount", &Statement::ParameterCountGetter,
+          nullptr),
+      InstanceAccessor("parameterNames", &Statement::ParameterNamesGetter,
+          nullptr),
+      InstanceAccessor("columns", &Statement::ColumnsGetter, nullptr),
+      InstanceMethod("status", &Statement::Status, napi_default_method),
     });
 
     exports.Set("Statement", t);
@@ -179,6 +188,22 @@ Statement::Statement(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Statemen
             ).ThrowAsJavaScriptException();
             return;
         }
+        // A JavaScript progress callback fires inside prepare and step
+        // alike (sqlite invokes the handler in both), and a round trip
+        // from this thread would wait for itself. Unlike functions there
+        // is no per-invocation error channel, so refuse up front — the
+        // same contract as collations. The SharedArrayBuffer token form
+        // has no such restriction.
+        if (db->js_progress != NULL) {
+            Napi::Error::New(env,
+                "sync methods cannot be used while a JavaScript progress "
+                "callback is registered on this connection: the callback "
+                "would have to run JS on the thread that is blocked inside "
+                "SQLite (a deadlock). Use the asynchronous API, or a "
+                "cancellation token instead"
+            ).ThrowAsJavaScriptException();
+            return;
+        }
 
         sqlite3_mutex* mtx = sqlite3_db_mutex(db->_handle);
         sqlite3_mutex_enter(mtx);
@@ -192,6 +217,12 @@ Statement::Statement(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Statemen
             if (status != SQLITE_OK) {
                 message = std::string(sqlite3_errmsg(db->_handle));
                 _handle = NULL;
+            }
+            else {
+                // Sync prepare: this is the JS thread, so take and
+                // publish in one go.
+                SnapshotMetadata();
+                PublishMetadata();
             }
         }
         sqlite3_mutex_leave(mtx);
@@ -237,6 +268,9 @@ void Statement::Work_Prepare(napi_env e, void* data) {
     if (stmt->status != SQLITE_OK) {
         stmt->message = std::string(sqlite3_errmsg(baton->db->_handle));
         stmt->_handle = NULL;
+    }
+    else {
+        stmt->SnapshotMetadata();
     }
 
     sqlite3_mutex_leave(mtx);
@@ -298,6 +332,9 @@ void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
         stmt->Finalize_();
     }
     else {
+        // Publish before `prepared`: both are JS-thread state, and this
+        // is the first point at which JS can observe either.
+        stmt->PublishMetadata();
         stmt->prepared = true;
         if (!baton->callback.IsEmpty() && baton->callback.Value().IsFunction()) {
             Napi::Function cb = baton->callback.Value();
@@ -1233,14 +1270,19 @@ template <class T> T* Statement::BindSync(const Napi::CallbackInfo& info) {
     // would need the JS thread, which is the one about to block inside
     // SQLite — and unlike functions, a collation callback has no way to
     // report an error, so refusing up front is the only sound answer.
-    // (Functions are handled per-invocation, with a precise error.)
-    if (!db->js_collations.empty()) {
+    // (Functions are handled per-invocation, with a precise error.) The
+    // JS progress callback is refused for the same reason — it fires
+    // during step (and prepare) and has no error channel. The
+    // SharedArrayBuffer token form works fine from the sync methods.
+    if (!db->js_collations.empty() || db->js_progress != NULL) {
         Napi::Error::New(env,
-            "sync methods cannot be used while a JavaScript collation is "
-            "registered on this connection: a comparison would have to run "
-            "JS on the thread that is blocked inside SQLite (a deadlock), "
-            "and SQLite provides no way to fail a single comparison. "
-            "removeCollation() first, or use the asynchronous API"
+            "sync methods cannot be used while a JavaScript collation or "
+            "progress callback is registered on this connection: a "
+            "comparison or progress check would have to run JS on the "
+            "thread that is blocked inside SQLite (a deadlock), and "
+            "SQLite provides no way to fail a single one. "
+            "removeCollation()/db.progress() first, or use the "
+            "asynchronous API"
         ).ThrowAsJavaScriptException();
         return NULL;
     }
@@ -1429,6 +1471,161 @@ Napi::Value Statement::GetChanges(const Napi::CallbackInfo& info) {
 
 Napi::Value Statement::FinalizedGetter(const Napi::CallbackInfo& info) {
     return Napi::Boolean::New(info.Env(), finalized);
+}
+
+// --- Introspection (Deliverable 07) ---------------------------------------
+
+// Must be called on the thread that prepared, with the connection mutex
+// held (both prepare paths already satisfy this). Reads only metadata
+// that is fixed for the lifetime of the sqlite3_stmt, and writes only
+// pending_meta — never the accessor-visible fields, which belong to the
+// JS thread. PublishMetadata() hands it over.
+void Statement::SnapshotMetadata() {
+    Metadata snapshot;
+    snapshot.readonly = sqlite3_stmt_readonly(_handle) != 0;
+
+    snapshot.param_count = sqlite3_bind_parameter_count(_handle);
+    snapshot.param_names.reserve(snapshot.param_count);
+    for (int i = 1; i <= snapshot.param_count; i++) {
+        const char* name = sqlite3_bind_parameter_name(_handle, i);
+        snapshot.param_names.emplace_back(name != NULL ? name : "");
+    }
+
+    int cols = sqlite3_column_count(_handle);
+    snapshot.columns.reserve(cols);
+    for (int i = 0; i < cols; i++) {
+        ColumnMeta meta;
+        const char* name = sqlite3_column_name(_handle, i);
+        meta.name = name != NULL ? name : "";
+        const char* decl = sqlite3_column_decltype(_handle, i);
+        if (decl != NULL) meta.decltype_ = decl;
+        // The origin family requires SQLITE_ENABLE_COLUMN_METADATA
+        // (enabled in deps/sqlite3.gyp since Deliverable 07).
+#ifdef SQLITE_ENABLE_COLUMN_METADATA
+        const char* db_name = sqlite3_column_database_name(_handle, i);
+        if (db_name != NULL) meta.database = db_name;
+        const char* table = sqlite3_column_table_name(_handle, i);
+        if (table != NULL) meta.table = table;
+        const char* origin = sqlite3_column_origin_name(_handle, i);
+        if (origin != NULL) meta.origin = origin;
+#endif
+        snapshot.columns.push_back(std::move(meta));
+    }
+
+    pending_meta = std::move(snapshot);
+}
+
+// JS thread only. Making the snapshot visible is a single flag flip
+// after the move, so an accessor either sees no snapshot or sees a
+// complete one; there is no window in which meta_valid is set while the
+// vectors are still being filled.
+void Statement::PublishMetadata() {
+    meta = std::move(pending_meta);
+    meta_valid = true;
+}
+
+Napi::Value Statement::ReadonlyGetter(const Napi::CallbackInfo& info) {
+    if (!meta_valid) return info.Env().Undefined();
+    return Napi::Boolean::New(info.Env(), meta.readonly);
+}
+
+Napi::Value Statement::ParameterCountGetter(const Napi::CallbackInfo& info) {
+    if (!meta_valid) return info.Env().Undefined();
+    return Napi::Number::New(info.Env(), meta.param_count);
+}
+
+Napi::Value Statement::ParameterNamesGetter(const Napi::CallbackInfo& info) {
+    if (!meta_valid) return info.Env().Undefined();
+    auto env = info.Env();
+    Napi::Array result = Napi::Array::New(env, meta.param_names.size());
+    for (size_t i = 0; i < meta.param_names.size(); i++) {
+        // Positional `?` parameters have no name: null keeps the index
+        // mapping honest instead of shifting the array.
+        result.Set(i, meta.param_names[i].empty()
+            ? env.Null().As<Napi::Value>()
+            : Napi::String::New(env, meta.param_names[i]).As<Napi::Value>());
+    }
+    return result;
+}
+
+Napi::Value Statement::ColumnsGetter(const Napi::CallbackInfo& info) {
+    if (!meta_valid) return info.Env().Undefined();
+    auto env = info.Env();
+    Napi::Array result = Napi::Array::New(env, meta.columns.size());
+    size_t i = 0;
+    for (const auto& column : meta.columns) {
+        Napi::Object col = Napi::Object::New(env);
+        col.Set("name", Napi::String::New(env, column.name.c_str()));
+        // Fields sqlite reports as NULL are omitted rather than nulled:
+        // an absent declaredType says "the column has none", a null one
+        // would read as "unknown".
+        if (!column.decltype_.empty()) {
+            col.Set("declaredType",
+                Napi::String::New(env, column.decltype_.c_str()));
+        }
+        if (!column.database.empty()) {
+            col.Set("database",
+                Napi::String::New(env, column.database.c_str()));
+        }
+        if (!column.table.empty()) {
+            col.Set("table", Napi::String::New(env, column.table.c_str()));
+        }
+        if (!column.origin.empty()) {
+            col.Set("origin", Napi::String::New(env, column.origin.c_str()));
+        }
+        result.Set(i++, col);
+    }
+    return result;
+}
+
+// status(op, reset?): live sqlite3_stmt_status counters. Takes the
+// connection mutex for the read; refuses while a JS round trip could be
+// holding it (the mutex would be waiting on this very thread).
+Napi::Value Statement::Status(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Statement* stmt = this;
+
+    REQUIRE_ARGUMENT_INTEGER(0, op);
+    bool reset = false;
+    if (info.Length() > 1 && !info[1].IsUndefined()) {
+        if (!info[1].IsBoolean()) {
+            Napi::TypeError::New(env, "reset flag must be a boolean")
+                .ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        reset = info[1].As<Napi::Boolean>().Value();
+    }
+
+    if (finalized) {
+        Napi::Error::New(env, "Statement is already finalized")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    if (!prepared) {
+        Napi::Error::New(env,
+            "Statement is not prepared yet").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    if (db->MayBlockOnWorkerRoundTrip()) {
+        Napi::Error::New(env,
+            "statement.status() cannot run while a JavaScript function, "
+            "collation or progress callback is mid-call on this "
+            "connection; call it after the query completes"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    if (db->_handle == NULL) {
+        Napi::Error::New(env, "Database handle is closed")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    sqlite3_mutex* mtx = sqlite3_db_mutex(db->_handle);
+    sqlite3_mutex_enter(mtx);
+    int value = sqlite3_stmt_status(stmt->_handle, op, reset ? 1 : 0);
+    sqlite3_mutex_leave(mtx);
+
+    return Napi::Number::New(env, value);
 }
 
 Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {

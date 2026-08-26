@@ -79,6 +79,7 @@ struct FuncCall {
         kValue,       // result = result(acc); window frame value, state kept
         kInverse,     // acc = inverse(acc, ...args)
         kCollation,   // cmp(a, b) -> sign
+        kProgress,    // progress() -> truthy? abort the statement
         kAggCleanup   // free the aggregate state without touching JS state
     };
 

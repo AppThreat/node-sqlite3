@@ -205,11 +205,16 @@ export declare class Database extends EventEmitter {
     /**
      * Configures the connection.
      *
-     * @param option `'trace'`, `'profile'` or `'change'` to enable or
-     *   disable the corresponding event.
+     * @param option `'trace'`, `'profile'`, `'change'`, `'commit'`,
+     *   `'rollback'` or `'wal'` to enable or disable the corresponding
+     *   event's native hook (normally done by `on()`/`removeListener()`,
+     *   which call this for you).
      * @param value whether the event should be emitted.
      */
-    configure(option: 'trace' | 'profile' | 'change', value: boolean): this;
+    configure(
+        option: 'trace' | 'profile' | 'change' | 'commit' | 'rollback' | 'wal',
+        value: boolean,
+    ): this;
     /**
      * Configures the connection.
      *
@@ -385,6 +390,115 @@ export declare class Database extends EventEmitter {
      * @returns this database, for chaining.
      */
     _removeCollation(name: string): this;
+
+    // Internal hook/authorizer/progress entry points (Deliverable 07):
+    // option parsing and policy normalization live in the public wrappers
+    // in lib/sqlite3.js.
+
+    /**
+     * Installs the normalized authorizer policy (rule rows are
+     * `[action, verdict, arg1, arg2, database, trigger]`, action -1 and
+     * empty strings are wildcards, deny rows first), or removes it when
+     * called with no arguments.
+     *
+     * @internal
+     * @param defaultDecision one of OK / DENY / IGNORE.
+     * @param rules the normalized rule rows.
+     * @returns this database, for chaining.
+     */
+    _setAuthorizer(defaultDecision?: number, rules?: unknown[][]): this;
+    /**
+     * Installs the cancellation-token progress handler (an Int32Array over
+     * a SharedArrayBuffer polled every `period` VM instructions), or
+     * removes the progress handler when called with no arguments.
+     *
+     * @internal
+     * @param flag the Int32Array flag view.
+     * @param period VM instructions between checks.
+     * @returns this database, for chaining.
+     */
+    _progressFlag(flag?: Int32Array, period?: number): this;
+    /**
+     * Installs the JavaScript progress callback (a blocking round trip
+     * per invocation — the documented-slow form), or removes the progress
+     * handler when called with no arguments.
+     *
+     * @internal
+     * @param period VM instructions between invocations.
+     * @param fn the callback; a truthy return aborts the statement.
+     * @returns this database, for chaining.
+     */
+    _progressCallback(period?: number, fn?: () => unknown): this;
+    /**
+     * Runs a WAL checkpoint.
+     *
+     * @internal
+     * @param database the attached database name.
+     * @param mode a CHECKPOINT_* constant.
+     * @param callback receives `{ busy, logFrames, checkpointedFrames }`.
+     * @returns this database, for chaining.
+     */
+    _checkpoint(
+        database: string,
+        mode: number,
+        callback?: (
+            this: Database,
+            err: SqliteError | null,
+            result?: CheckpointResult,
+        ) => void,
+    ): this;
+    /**
+     * Reads one table's column metadata.
+     *
+     * @internal
+     * @param database the attached database name.
+     * @param table the table name.
+     * @param callback receives the column array.
+     * @returns this database, for chaining.
+     */
+    _tableInfo(
+        database: string,
+        table: string,
+        callback?: (
+            this: Database,
+            err: SqliteError | null,
+            columns?: TableColumnInfo[],
+        ) => void,
+    ): this;
+    /**
+     * Reads or changes one db_config switch.
+     *
+     * @internal
+     * @param op a DBCONFIG_* constant.
+     * @param value 1/0 to set, -1 to query.
+     * @param callback receives the previous value as a boolean.
+     * @returns this database, for chaining.
+     */
+    _dbConfig(
+        op: number,
+        value: number,
+        callback?: (
+            this: Database,
+            err: SqliteError | null,
+            value?: boolean,
+        ) => void,
+    ): this;
+
+    /**
+     * Rows changed by the most recent statement on this connection
+     * (`sqlite3_changes64`), subject to the integer mode.
+     *
+     * @since 9.0.0
+     */
+    readonly changes: number | bigint;
+
+    /**
+     * Every row change since the connection opened
+     * (`sqlite3_total_changes64`), subject to the integer mode.
+     *
+     * @since 9.0.0
+     */
+    readonly totalChanges: number | bigint;
 }
 
 /**
@@ -435,6 +549,150 @@ export interface StatementRunSyncResult {
     lastID: number | bigint;
     /** Rows changed by the statement. */
     changes: number;
+}
+
+/**
+ * One rule of a declarative authorizer policy: which SQLite actions are
+ * allowed, denied or ignored, optionally narrowed to a table, column,
+ * database or trigger. Omitted fields match anything.
+ *
+ * @since 9.0.0
+ */
+export interface AuthorizerRule {
+    /** One of the CREATE_* / READ / SELECT / … action constants. */
+    action?: number;
+    /** The first action argument (table for table/read actions, index name for index actions). */
+    arg1?: string;
+    /** Alias for `arg1`. */
+    table?: string;
+    /** The second action argument (column for READ). */
+    arg2?: string;
+    /** Alias for `arg2`. */
+    column?: string;
+    /** The schema name. */
+    database?: string;
+    /** The trigger name. */
+    trigger?: string;
+}
+
+/**
+ * A declarative authorization policy for `Database#authorizer`,
+ * evaluated inside SQLite itself — no JavaScript runs on the prepare
+ * path. `deny` rules are evaluated before `allow` rules, so a deny can
+ * never be overridden.
+ *
+ * @since 9.0.0
+ */
+export interface AuthorizerPolicy {
+    /** The decision for actions no rule matches; `'deny'` makes the policy a sandbox. */
+    default?: 'allow' | 'deny' | 'ignore';
+    /** Rules that permit (sqlite3.OK). */
+    allow?: AuthorizerRule[];
+    /** Rules that refuse (sqlite3.DENY); evaluated first. */
+    deny?: AuthorizerRule[];
+    /** Rules that make SQLite treat the object as nonexistent (sqlite3.IGNORE). */
+    ignore?: AuthorizerRule[];
+}
+
+/**
+ * A cancellation token from `Database#cancellationToken`: a shared flag
+ * the native progress handler polls, aborting the running statement the
+ * moment it is set. Works from any thread.
+ *
+ * @since 9.0.0
+ */
+export interface CancellationToken {
+    /** Whether the token has been cancelled. */
+    readonly cancelled: boolean;
+    /** An AbortSignal that fires with `cancel()`; usable as `{ signal }`. */
+    readonly signal: AbortSignal;
+    /** The underlying SharedArrayBuffer — postMessage it to a Worker. */
+    readonly buffer: SharedArrayBuffer;
+    /**
+     * Sets the flag (idempotent); aborts every statement on the
+     * connection.
+     *
+     * @param reason the AbortSignal's reason; defaults to the standard
+     *   abort error.
+     */
+    cancel(reason?: unknown): void;
+    /** Clears the flag so the token can be reused. Does not revive `signal`. */
+    reset(): void;
+    /**
+     * Removes the underlying progress handler and releases the buffer.
+     *
+     * A connection has a single progress slot, so a later
+     * `cancellationToken()` or `progress()` call takes it over. Calling
+     * `destroy()` on a token that no longer holds the slot clears only
+     * its own flag and leaves the current handler installed.
+     */
+    destroy(): void;
+}
+
+/** A WAL checkpoint mode. @since 9.0.0 */
+export type CheckpointMode = 'passive' | 'full' | 'restart' | 'truncate';
+
+/** Options for `Database#checkpoint`. @since 9.0.0 */
+export interface CheckpointOptions {
+    /** The checkpoint mode; default `'passive'`. */
+    mode?: CheckpointMode;
+    /** The attached database to checkpoint; default `'main'`. */
+    db?: string;
+}
+
+/** The result of `Database#checkpoint`. @since 9.0.0 */
+export interface CheckpointResult {
+    /** True when another connection's reader or writer prevented the checkpoint. */
+    busy: boolean;
+    /** Frames in the WAL after the checkpoint. */
+    logFrames: number;
+    /** Frames copied back into the database file. */
+    checkpointedFrames: number;
+}
+
+/**
+ * One column of a table, as reported by `Database#tableInfo`.
+ *
+ * @since 9.0.0
+ */
+export interface TableColumnInfo {
+    /** The zero-based column index. */
+    cid: number;
+    /** The column name. */
+    name: string;
+    /** The declared type (empty for columns without one). */
+    type: string;
+    /** Whether the column is NOT NULL. */
+    notNull: boolean;
+    /** The DEFAULT clause's literal SQL text; present only when the column has one. */
+    defaultValue?: string;
+    /** 1 for a PRIMARY KEY column (2+ for composite keys). */
+    primaryKey: number;
+    /** The column's collation. */
+    collate: string;
+    /** Whether the column is AUTOINCREMENT. */
+    autoIncrement: boolean;
+}
+
+/**
+ * Metadata for one result column of a prepared statement, from the
+ * introspection snapshot taken at prepare time. Fields SQLite reports as
+ * absent (expression and alias columns have no origin, expression
+ * columns no declared type) are omitted, not nulled.
+ *
+ * @since 9.0.0
+ */
+export interface ColumnMetadata {
+    /** The result column's name. */
+    name: string;
+    /** The underlying column's declared type, when there is one. */
+    declaredType?: string;
+    /** The schema the column comes from. */
+    database?: string;
+    /** The table the column comes from. */
+    table?: string;
+    /** The column's original name (before an alias). */
+    origin?: string;
 }
 
 /**
@@ -562,6 +820,63 @@ export declare class Statement extends EventEmitter {
      * @since 9.0.0
      */
     readonly finalized: boolean;
+
+    // ---- Introspection (Deliverable 07). Served from a snapshot taken
+    // once, on the thread that prepared — these never touch the sqlite
+    // statement handle at read time. All are undefined until the
+    // asynchronous prepare has completed.
+
+    /**
+     * Whether the statement makes no direct changes to the database file
+     * (`sqlite3_stmt_readonly`).
+     *
+     * @since 9.0.0
+     */
+    readonly readonly: boolean | undefined;
+
+    /**
+     * The number of bind parameters (`sqlite3_bind_parameter_count`).
+     *
+     * @since 9.0.0
+     */
+    readonly parameterCount: number | undefined;
+
+    /**
+     * The bind parameter names in 1-based order: `':a'`, `'@b'`, `'$c'`,
+     * `'?1'`. Positional `?` parameters have no name; their entries are
+     * null so indices stay aligned.
+     *
+     * @since 9.0.0
+     */
+    readonly parameterNames: Array<string | null> | undefined;
+
+    /**
+     * The result columns' metadata: name, and — when they have one —
+     * declaredType, database, table and origin (the pre-alias column
+     * name). Expression columns carry only a name.
+     *
+     * @since 9.0.0
+     */
+    readonly columns: ColumnMetadata[] | undefined;
+
+    /**
+     * Reads one `sqlite3_stmt_status` counter (the `STMTSTATUS_*`
+     * constants), e.g. `FULLSCAN_STEP` — nonzero after a query scanned a
+     * table without an index. Live counters, read under the connection
+     * mutex.
+     *
+     * @param op a STMTSTATUS_* constant.
+     * @param reset zero the counter after reading it.
+     * @returns the counter value.
+     * @throws {Error} When the statement is not prepared, is finalized, or
+     *   a JavaScript callback is mid-call on the connection.
+     * @since 9.0.0
+     * @example
+     * const stmt = await db.prepare('SELECT * FROM big');
+     * await stmt.all();
+     * const fullscanSteps = stmt.status(sqlite3.STMTSTATUS_FULLSCAN_STEP);
+     */
+    status(op: number, reset?: boolean): number;
 }
 
 /**
@@ -779,6 +1094,69 @@ declare const binding: {
     /** Limit id: maximum index of a bind parameter. */ readonly LIMIT_VARIABLE_NUMBER: 9;
     /** Limit id: maximum nested trigger depth. */ readonly LIMIT_TRIGGER_DEPTH: 10;
     /** Limit id: maximum number of auxiliary worker threads. */ readonly LIMIT_WORKER_THREADS: 11;
+
+    // Authorizer action codes (Deliverable 07), for `db.authorizer()`
+    // rules. @since 9.0.0
+    /** Authorizer action: CREATE INDEX. arg1 is the index, arg2 the table. @since 9.0.0 */ readonly CREATE_INDEX: 1;
+    /** Authorizer action: CREATE TABLE. arg1 is the table. @since 9.0.0 */ readonly CREATE_TABLE: 2;
+    /** Authorizer action: CREATE TEMP INDEX. @since 9.0.0 */ readonly CREATE_TEMP_INDEX: 3;
+    /** Authorizer action: CREATE TEMP TABLE. @since 9.0.0 */ readonly CREATE_TEMP_TABLE: 4;
+    /** Authorizer action: CREATE TEMP TRIGGER. @since 9.0.0 */ readonly CREATE_TEMP_TRIGGER: 5;
+    /** Authorizer action: CREATE TEMP VIEW. @since 9.0.0 */ readonly CREATE_TEMP_VIEW: 6;
+    /** Authorizer action: CREATE TRIGGER. @since 9.0.0 */ readonly CREATE_TRIGGER: 7;
+    /** Authorizer action: CREATE VIEW. @since 9.0.0 */ readonly CREATE_VIEW: 8;
+    /** Authorizer action: DELETE. arg1 is the table. @since 9.0.0 */ readonly DELETE: 9;
+    /** Authorizer action: DROP INDEX. @since 9.0.0 */ readonly DROP_INDEX: 10;
+    /** Authorizer action: DROP TABLE. @since 9.0.0 */ readonly DROP_TABLE: 11;
+    /** Authorizer action: DROP TEMP INDEX. @since 9.0.0 */ readonly DROP_TEMP_INDEX: 12;
+    /** Authorizer action: DROP TEMP TABLE. @since 9.0.0 */ readonly DROP_TEMP_TABLE: 13;
+    /** Authorizer action: DROP TEMP TRIGGER. @since 9.0.0 */ readonly DROP_TEMP_TRIGGER: 14;
+    /** Authorizer action: DROP TEMP VIEW. @since 9.0.0 */ readonly DROP_TEMP_VIEW: 15;
+    /** Authorizer action: DROP TRIGGER. @since 9.0.0 */ readonly DROP_TRIGGER: 16;
+    /** Authorizer action: DROP VIEW. @since 9.0.0 */ readonly DROP_VIEW: 17;
+    /** Authorizer action: INSERT. arg1 is the table. @since 9.0.0 */ readonly INSERT: 18;
+    /** Authorizer action: PRAGMA. arg1 is the pragma name. @since 9.0.0 */ readonly PRAGMA: 19;
+    /** Authorizer action: READ. arg1 is the table, arg2 the column. @since 9.0.0 */ readonly READ: 20;
+    /** Authorizer action: SELECT (fires once per SELECT, no args). @since 9.0.0 */ readonly SELECT: 21;
+    /** Authorizer action: BEGIN/COMMIT/ROLLBACK statements. @since 9.0.0 */ readonly TRANSACTION: 22;
+    /** Authorizer action: UPDATE. arg1 is the table. @since 9.0.0 */ readonly UPDATE: 23;
+    /** Authorizer action: ATTACH. arg1 is the filename. @since 9.0.0 */ readonly ATTACH: 24;
+    /** Authorizer action: DETACH. arg1 is the database name. @since 9.0.0 */ readonly DETACH: 25;
+    /** Authorizer action: ALTER TABLE. arg1 is the table, arg2 the new name. @since 9.0.0 */ readonly ALTER_TABLE: 26;
+    /** Authorizer action: REINDEX. @since 9.0.0 */ readonly REINDEX: 27;
+    /** Authorizer action: ANALYZE. @since 9.0.0 */ readonly ANALYZE: 28;
+    /** Authorizer action: CREATE VTABLE. @since 9.0.0 */ readonly CREATE_VTABLE: 29;
+    /** Authorizer action: DROP VTABLE. @since 9.0.0 */ readonly DROP_VTABLE: 30;
+    /** Authorizer action: invoke a function. arg2 is the name. @since 9.0.0 */ readonly FUNCTION: 31;
+    /** Authorizer action: SAVEPOINT. @since 9.0.0 */ readonly SAVEPOINT: 32;
+    /** Authorizer action: recursive query without a term. @since 9.0.0 */ readonly RECURSIVE: 33;
+    /** Authorizer decision: refuse the action (SQLITE_DENY). @since 9.0.0 */ readonly DENY: 1;
+    /** Authorizer decision: pretend the object does not exist (SQLITE_IGNORE). @since 9.0.0 */ readonly IGNORE: 2;
+
+    // Statement status counters, for `Statement#status`. @since 9.0.0
+    /** stmt status: full-scan steps — nonzero when no index was used. @since 9.0.0 */ readonly STMTSTATUS_FULLSCAN_STEP: 1;
+    /** stmt status: sort algorithm invocations. @since 9.0.0 */ readonly STMTSTATUS_SORT: 2;
+    /** stmt status: auto-index steps. @since 9.0.0 */ readonly STMTSTATUS_AUTOINDEX: 3;
+    /** stmt status: virtual machine steps. @since 9.0.0 */ readonly STMTSTATUS_VM_STEP: 4;
+    /** stmt status: re-preparations. @since 9.0.0 */ readonly STMTSTATUS_REPREPARE: 5;
+    /** stmt status: times the statement was run. @since 9.0.0 */ readonly STMTSTATUS_RUN: 6;
+    /** stmt status: filter misses. @since 9.0.0 */ readonly STMTSTATUS_FILTER_MISS: 7;
+    /** stmt status: filter hits. @since 9.0.0 */ readonly STMTSTATUS_FILTER_HIT: 8;
+
+    // db_config switches, for `Database#dbConfig`. @since 9.0.0
+    /** dbConfig op: enforce foreign keys. @since 9.0.0 */ readonly DBCONFIG_ENABLE_FKEY: 1002;
+    /** dbConfig op: enable triggers. @since 9.0.0 */ readonly DBCONFIG_ENABLE_TRIGGER: 1003;
+    /** dbConfig op: enable views. @since 9.0.0 */ readonly DBCONFIG_ENABLE_VIEW: 1015;
+    /** dbConfig op: enable load_extension(). @since 9.0.0 */ readonly DBCONFIG_ENABLE_LOAD_EXTENSION: 1005;
+    /** dbConfig op: put the connection in defensive mode. @since 9.0.0 */ readonly DBCONFIG_DEFENSIVE: 1010;
+    /** dbConfig op: allow writes to the schema tables. @since 9.0.0 */ readonly DBCONFIG_WRITABLE_SCHEMA: 1011;
+    /** dbConfig op: trust schema SQL (off for untrusted schemas). @since 9.0.0 */ readonly DBCONFIG_TRUSTED_SCHEMA: 1017;
+
+    // WAL checkpoint modes, for `Database#checkpoint`. @since 9.0.0
+    /** Checkpoint mode: checkpoint without blocking (default). @since 9.0.0 */ readonly CHECKPOINT_PASSIVE: 0;
+    /** Checkpoint mode: wait for writers, checkpoint everything. @since 9.0.0 */ readonly CHECKPOINT_FULL: 1;
+    /** Checkpoint mode: full, then wait for readers to restart the WAL. @since 9.0.0 */ readonly CHECKPOINT_RESTART: 2;
+    /** Checkpoint mode: restart, then truncate the WAL file. @since 9.0.0 */ readonly CHECKPOINT_TRUNCATE: 3;
 };
 
 /**

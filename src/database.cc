@@ -4,6 +4,7 @@
 #include "macros.h"
 #include "database.h"
 #include "statement.h"
+#include "function.h"
 
 using namespace node_sqlite3;
 
@@ -30,9 +31,19 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("_registerCollation", &Database::RegisterUserCollation, napi_default_method),
         InstanceMethod("_removeFunction", &Database::RemoveUserFunction, napi_default_method),
         InstanceMethod("_removeCollation", &Database::RemoveUserCollation, napi_default_method),
+        // Hooks, authorizer and progress (Deliverable 07): internal entry
+        // points wrapped by lib/sqlite3.js, which parses options.
+        InstanceMethod("_setAuthorizer", &Database::SetAuthorizer, napi_default_method),
+        InstanceMethod("_progressFlag", &Database::SetProgressFlag, napi_default_method),
+        InstanceMethod("_progressCallback", &Database::SetProgressCallback, napi_default_method),
+        InstanceMethod("_checkpoint", &Database::Checkpoint, napi_default_method),
+        InstanceMethod("_tableInfo", &Database::TableInfo, napi_default_method),
+        InstanceMethod("_dbConfig", &Database::DbConfig, napi_default_method),
         InstanceAccessor("open", &Database::Open, nullptr),
         InstanceAccessor("integerMode", &Database::IntegerModeGetter, nullptr),
         InstanceAccessor("state", &Database::StateGetter, nullptr),
+        InstanceAccessor("changes", &Database::ChangesGetter, nullptr),
+        InstanceAccessor("totalChanges", &Database::TotalChangesGetter, nullptr),
         // Individual accessors for the statement cache's hot guard: the
         // state object is fine for diagnostics, but constructing it on
         // every cached call measured +46% on db.getSync cached (bench,
@@ -316,8 +327,12 @@ void Database::Work_BeginClose(Baton* baton) {
     // Registered JS functions must not survive to sqlite3_close: they
     // capture this Database and fire from whatever thread touches the
     // handle. Main-thread here, with nothing in flight — the same
-    // conditions RemoveCallbacks relies on for the hooks.
+    // conditions RemoveCallbacks relies on for the hooks. The authorizer
+    // and progress handler are unregistered for the same reason (both can
+    // fire from the implicit work close performs).
     baton->db->RemoveUserFunctions();
+    baton->db->RemoveAuthorizer();
+    baton->db->RemoveProgressHandler();
     baton->db->ReleaseJsChannelIfIdle();
     baton->db->db_state = DbState::Closing;
 
@@ -425,12 +440,21 @@ Napi::Value Database::Configure(const Napi::CallbackInfo& info) {
     REQUIRE_ARGUMENTS(2);
 
     Napi::Function handle;
-    if (info[0].StrictEquals( Napi::String::New(env, "trace"))) {    
-       auto* baton = new Baton(db, handle);
+    // The JS layer calls configure(type, true) for every addListener and
+    // (type, false) when the last listener is gone, so the register
+    // handlers SET the hook state rather than toggling it (toggling
+    // uninstalled the hook on the second listener — a pre-v9 latent bug
+    // the multi-listener tests pin).
+    auto hook_enable = [&]() -> bool {
+        if (info[1].IsBoolean()) return info[1].As<Napi::Boolean>().Value();
+        return true;
+    };
+    if (info[0].StrictEquals( Napi::String::New(env, "trace"))) {
+        auto* baton = new HookBaton(db, handle, hook_enable());
         db->Schedule(RegisterTraceCallback, baton);
     }
     else if (info[0].StrictEquals( Napi::String::New(env, "profile"))) {
-       auto* baton = new Baton(db, handle);
+        auto* baton = new HookBaton(db, handle, hook_enable());
         db->Schedule(RegisterProfileCallback, baton);
     }
     else if (info[0].StrictEquals( Napi::String::New(env, "busyTimeout"))) {
@@ -484,8 +508,20 @@ Napi::Value Database::Configure(const Napi::CallbackInfo& info) {
         }
     }
     else if (info[0].StrictEquals(Napi::String::New(env, "change"))) {
-       auto* baton = new Baton(db, handle);
+        auto* baton = new HookBaton(db, handle, hook_enable());
         db->Schedule(RegisterUpdateCallback, baton);
+    }
+    else if (info[0].StrictEquals(Napi::String::New(env, "commit"))) {
+        auto* baton = new HookBaton(db, handle, hook_enable());
+        db->Schedule(RegisterCommitCallback, baton);
+    }
+    else if (info[0].StrictEquals(Napi::String::New(env, "rollback"))) {
+        auto* baton = new HookBaton(db, handle, hook_enable());
+        db->Schedule(RegisterRollbackCallback, baton);
+    }
+    else if (info[0].StrictEquals(Napi::String::New(env, "wal"))) {
+        auto* baton = new HookBaton(db, handle, hook_enable());
+        db->Schedule(RegisterWalCallback, baton);
     }
     else {
         Napi::TypeError::New(env,
@@ -568,7 +604,7 @@ void Database::UpdateTraceMask(Database* db, sqlite3* handle) {
 }
 
 void Database::RegisterTraceCallback(Baton* b) {
-    auto baton = std::unique_ptr<Baton>(b);
+    auto baton = std::unique_ptr<HookBaton>(static_cast<HookBaton*>(b));
     if (baton->db->MayBlockOnWorkerRoundTrip()) {
         baton->db->Schedule(RegisterTraceCallback, baton.release(), true);
         return;
@@ -580,12 +616,10 @@ void Database::RegisterTraceCallback(Baton* b) {
     assert(!baton->db->MayBlockOnWorkerRoundTrip());
     auto* db = baton->db;
 
-    if (db->debug_trace == NULL) {
-        // Add it.
+    if (baton->enable && db->debug_trace == NULL) {
         db->debug_trace = new AsyncTrace(db, TraceCallback);
     }
-    else {
-        // Remove it.
+    else if (!baton->enable && db->debug_trace != NULL) {
         db->debug_trace->finish();
         db->debug_trace = NULL;
     }
@@ -637,7 +671,7 @@ void Database::TraceCallback(Database* db, std::string* s) {
 }
 
 void Database::RegisterProfileCallback(Baton* b) {
-    auto baton = std::unique_ptr<Baton>(b);
+    auto baton = std::unique_ptr<HookBaton>(static_cast<HookBaton*>(b));
     if (baton->db->MayBlockOnWorkerRoundTrip()) {
         baton->db->Schedule(RegisterProfileCallback, baton.release(), true);
         return;
@@ -649,12 +683,10 @@ void Database::RegisterProfileCallback(Baton* b) {
     assert(!baton->db->MayBlockOnWorkerRoundTrip());
     auto* db = baton->db;
 
-    if (db->debug_profile == NULL) {
-        // Add it.
+    if (baton->enable && db->debug_profile == NULL) {
         db->debug_profile = new AsyncProfile(db, ProfileCallback);
     }
-    else {
-        // Remove it.
+    else if (!baton->enable && db->debug_profile != NULL) {
         db->debug_profile->finish();
         db->debug_profile = NULL;
     }
@@ -678,8 +710,22 @@ void Database::ProfileCallback(Database *db, ProfileInfo* i) {
     EMIT_EVENT(db->Value(), 3, argv);
 }
 
+void Database::EnsureTxnChannel(Database* db) {
+    if (db->txn_event == NULL) {
+        db->txn_event = new AsyncUpdate(db, TxnCallback);
+    }
+}
+
+void Database::MaybeDropTxnChannel(Database* db) {
+    if (db->txn_event != NULL && !db->hook_change && !db->hook_commit
+            && !db->hook_rollback) {
+        db->txn_event->finish();
+        db->txn_event = NULL;
+    }
+}
+
 void Database::RegisterUpdateCallback(Baton* b) {
-    auto baton = std::unique_ptr<Baton>(b);
+    auto baton = std::unique_ptr<HookBaton>(static_cast<HookBaton*>(b));
     if (baton->db->MayBlockOnWorkerRoundTrip()) {
         baton->db->Schedule(RegisterUpdateCallback, baton.release(), true);
         return;
@@ -691,19 +737,98 @@ void Database::RegisterUpdateCallback(Baton* b) {
     assert(!baton->db->MayBlockOnWorkerRoundTrip());
     auto* db = baton->db;
 
-    if (db->update_event == NULL) {
-        // Add it.
-        db->update_event = new AsyncUpdate(db, UpdateCallback);
-        sqlite3_update_hook(db->_handle, UpdateCallback, db);
-    }
-    else {
-        // Remove it.
-        sqlite3_update_hook(db->_handle, NULL, NULL);
-        db->update_event->finish();
-        db->update_event = NULL;
+    if (baton->enable != db->hook_change) {
+        db->hook_change = baton->enable;
+        if (baton->enable) {
+            EnsureTxnChannel(db);
+            sqlite3_update_hook(db->_handle, UpdateCallback, db);
+        }
+        else {
+            sqlite3_update_hook(db->_handle, NULL, NULL);
+            MaybeDropTxnChannel(db);
+        }
     }
 
     // Release only after the sqlite call; see RegisterTraceCallback.
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+void Database::RegisterCommitCallback(Baton* b) {
+    auto baton = std::unique_ptr<HookBaton>(static_cast<HookBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(RegisterCommitCallback, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    if (baton->enable != db->hook_commit) {
+        db->hook_commit = baton->enable;
+        if (baton->enable) {
+            EnsureTxnChannel(db);
+            sqlite3_commit_hook(db->_handle, CommitHook, db);
+        }
+        else {
+            sqlite3_commit_hook(db->_handle, NULL, NULL);
+            MaybeDropTxnChannel(db);
+        }
+    }
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+void Database::RegisterRollbackCallback(Baton* b) {
+    auto baton = std::unique_ptr<HookBaton>(static_cast<HookBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(RegisterRollbackCallback, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    if (baton->enable != db->hook_rollback) {
+        db->hook_rollback = baton->enable;
+        if (baton->enable) {
+            EnsureTxnChannel(db);
+            sqlite3_rollback_hook(db->_handle, RollbackHook, db);
+        }
+        else {
+            sqlite3_rollback_hook(db->_handle, NULL, NULL);
+            MaybeDropTxnChannel(db);
+        }
+    }
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+void Database::RegisterWalCallback(Baton* b) {
+    auto baton = std::unique_ptr<HookBaton>(static_cast<HookBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(RegisterWalCallback, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    if (baton->enable && db->wal_event == NULL) {
+        db->wal_event = new AsyncWal(db, WalCallback);
+        sqlite3_wal_hook(db->_handle, WalHook, db);
+    }
+    else if (!baton->enable && db->wal_event != NULL) {
+        sqlite3_wal_hook(db->_handle, NULL, NULL);
+        db->wal_event->finish();
+        db->wal_event = NULL;
+    }
+
     db->exclusiveHeld = false;
     db->Process();
 }
@@ -712,19 +837,69 @@ void Database::UpdateCallback(void* db, int type, const char* database,
         const char* table, sqlite3_int64 rowid) {
     // Note: This function is called in the thread pool.
     // Note: Some queries, such as "EXPLAIN" queries, are not sent through this.
+    auto* handle = static_cast<Database*>(db);
+    if (handle->txn_event == NULL) return; // removed / closing
     auto* info = new UpdateInfo();
+    info->kind = UpdateInfo::kChange;
     info->type = type;
     info->database = std::string(database);
     info->table = std::string(table);
     info->rowid = rowid;
-    static_cast<Database*>(db)->update_event->send(info);
+    handle->txn_event->send(info);
 }
 
-void Database::UpdateCallback(Database *db, UpdateInfo* i) {
+// Runs on the thread executing the COMMIT. The commit itself has already
+// happened when sqlite calls this; the return value is advisory-only by
+// design (see database.h) — always "proceed".
+int Database::CommitHook(void* ctx) {
+    auto* db = static_cast<Database*>(ctx);
+    if (db->txn_event == NULL) return SQLITE_OK;
+    auto* info = new UpdateInfo();
+    info->kind = UpdateInfo::kCommit;
+    db->txn_event->send(info);
+    return SQLITE_OK;
+}
+
+// Runs on the thread executing the ROLLBACK (including the implicit
+// rollback of a close, and of a rolled-back savepoint release).
+void Database::RollbackHook(void* ctx) {
+    auto* db = static_cast<Database*>(ctx);
+    if (db->txn_event == NULL) return;
+    auto* info = new UpdateInfo();
+    info->kind = UpdateInfo::kRollback;
+    db->txn_event->send(info);
+}
+
+// Runs on the thread committing a write into the WAL. Returning nonzero
+// would prevent the automatic checkpoint; the event is observational, so
+// the checkpoint always proceeds.
+int Database::WalHook(void* ctx, sqlite3* /*handle*/, const char* database,
+        int pages) {
+    auto* db = static_cast<Database*>(ctx);
+    if (db->wal_event == NULL) return SQLITE_OK;
+    auto* info = new WalInfo();
+    info->database = std::string(database != NULL ? database : "");
+    info->pages = pages;
+    db->wal_event->send(info);
+    return SQLITE_OK;
+}
+
+void Database::TxnCallback(Database* db, UpdateInfo* i) {
     auto info = std::unique_ptr<UpdateInfo>(i);
+    // Note: This function is called in the main V8 thread.
     auto env = db->Env();
     Napi::HandleScope scope(env);
 
+    if (info->kind == UpdateInfo::kCommit) {
+        Napi::Value argv[] = { Napi::String::New(env, "commit") };
+        EMIT_EVENT(db->Value(), 1, argv);
+        return;
+    }
+    if (info->kind == UpdateInfo::kRollback) {
+        Napi::Value argv[] = { Napi::String::New(env, "rollback") };
+        EMIT_EVENT(db->Value(), 1, argv);
+        return;
+    }
     Napi::Value argv[] = {
         Napi::String::New(env, "change"),
         Napi::String::New(env, sqlite_authorizer_string(info->type)),
@@ -733,6 +908,726 @@ void Database::UpdateCallback(Database *db, UpdateInfo* i) {
         Napi::Number::New(env, info->rowid),
     };
     EMIT_EVENT(db->Value(), 5, argv);
+}
+
+void Database::WalCallback(Database* db, WalInfo* i) {
+    auto info = std::unique_ptr<WalInfo>(i);
+    auto env = db->Env();
+    Napi::HandleScope scope(env);
+
+    Napi::Value argv[] = {
+        Napi::String::New(env, "wal"),
+        Napi::String::New(env, info->database.c_str()),
+        Napi::Number::New(env, info->pages)
+    };
+    EMIT_EVENT(db->Value(), 3, argv);
+}
+
+// --- Authorizer ------------------------------------------------------------
+
+namespace {
+
+bool ValidAuthDecision(int v) {
+    return v == SQLITE_OK || v == SQLITE_DENY || v == SQLITE_IGNORE;
+}
+
+// Reads one optional string field of a rule row: null/undefined/omitted
+// become "" (wildcard).
+bool ReadRuleString(const Napi::Value& value, std::string* out) {
+    if (value.IsNull() || value.IsUndefined()) {
+        out->clear();
+        return true;
+    }
+    if (!value.IsString()) return false;
+    *out = value.As<Napi::String>().Utf8Value();
+    return true;
+}
+
+// Element access with an explicit index type: a literal 0 in Get(0) is
+// also a null-pointer constant and makes the const char* overload
+// ambiguous.
+inline Napi::Value At(const Napi::Array& a, uint32_t i) {
+    return a.Get(i);
+}
+
+} // namespace
+
+// _setAuthorizer(defaultDecision, rules) installs a policy;
+// _setAuthorizer() / _setAuthorizer(null) removes it. rules is an array
+// of [action, verdict, arg1, arg2, database, trigger] rows (action -1
+// and empty strings are wildcards); the JS layer orders deny rules
+// before allow rules so a deny can never be overridden.
+Napi::Value Database::SetAuthorizer(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    auto* db = this;
+
+    auto* baton = new AuthBaton(db, Napi::Function());
+    if (info.Length() == 0 || info[0].IsNull() || info[0].IsUndefined()) {
+        baton->remove = true;
+    }
+    else {
+        if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsArray()) {
+            delete baton;
+            Napi::TypeError::New(env,
+                "authorizer policy must be a decision constant and a rule array"
+            ).ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        auto* policy = new AuthPolicy();
+        policy->default_decision = info[0].As<Napi::Number>().Int32Value();
+        if (!ValidAuthDecision(policy->default_decision)) {
+            delete baton;
+            delete policy;
+            Napi::TypeError::New(env,
+                "default decision must be sqlite3.OK, sqlite3.DENY or sqlite3.IGNORE"
+            ).ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        Napi::Array rules = info[1].As<Napi::Array>();
+        uint32_t count = rules.Length();
+        policy->rules.reserve(count);
+        for (uint32_t i = 0; i < count; i++) {
+            Napi::Value row = rules.Get(i);
+            if (!row.IsArray() || row.As<Napi::Array>().Length() != 6) {
+                delete baton;
+                delete policy;
+                Napi::TypeError::New(env,
+                    "authorizer rule " + std::to_string(i) +
+                    " must be [action, verdict, arg1, arg2, database, trigger]"
+                ).ThrowAsJavaScriptException();
+                return env.Null();
+            }
+            Napi::Array parts = row.As<Napi::Array>();
+            if (!At(parts, 0).IsNumber() || !At(parts, 1).IsNumber()) {
+                delete baton;
+                delete policy;
+                Napi::TypeError::New(env,
+                    "authorizer rule " + std::to_string(i) +
+                    ": action and verdict must be numbers"
+                ).ThrowAsJavaScriptException();
+                return env.Null();
+            }
+            AuthRule rule;
+            rule.action = At(parts, 0).As<Napi::Number>().Int32Value();
+            rule.verdict = At(parts, 1).As<Napi::Number>().Int32Value();
+            bool ok = ValidAuthDecision(rule.verdict)
+                && ReadRuleString(At(parts, 2), &rule.arg1)
+                && ReadRuleString(At(parts, 3), &rule.arg2)
+                && ReadRuleString(At(parts, 4), &rule.database)
+                && ReadRuleString(At(parts, 5), &rule.trigger);
+            if (!ok) {
+                delete baton;
+                delete policy;
+                Napi::TypeError::New(env,
+                    "authorizer rule " + std::to_string(i) +
+                    " has an invalid verdict (OK/DENY/IGNORE) or a non-string match field"
+                ).ThrowAsJavaScriptException();
+                return env.Null();
+            }
+            policy->rules.push_back(std::move(rule));
+        }
+        baton->policy = policy;
+    }
+
+    db->Schedule(Work_SetAuthorizer, baton, true);
+    db->Process();
+
+    return info.This();
+}
+
+void Database::Work_SetAuthorizer(Baton* b) {
+    auto baton = std::unique_ptr<AuthBaton>(static_cast<AuthBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(Work_SetAuthorizer, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    // Nothing in flight: the deferral above guarantees it, and the sqlite
+    // call below would otherwise race a worker for the connection mutex.
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    // The swap happens at pending == 0, so no prepare (the only context
+    // the authorizer fires in) can be reading the old policy.
+    AuthPolicy* old = db->auth_policy;
+    if (baton->remove) {
+        db->auth_policy = NULL;
+        sqlite3_set_authorizer(db->_handle, NULL, NULL);
+    }
+    else {
+        db->auth_policy = baton->policy;
+        baton->policy = NULL; // ownership moved to the database
+        sqlite3_set_authorizer(db->_handle, AuthorizerCallback, db);
+    }
+    delete old;
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+int Database::AuthorizerCallback(void* ctx, int action, const char* arg1,
+        const char* arg2, const char* database, const char* trigger) {
+    // Runs on whatever thread is inside sqlite3_prepare (or a step's
+    // transparent re-prepare). Pure C matching — no JS, no round trip:
+    // the policy is evaluated here precisely because a JS callback could
+    // not return a value synchronously from this context.
+    auto* db = static_cast<Database*>(ctx);
+    const AuthPolicy* policy = db->auth_policy;
+    if (policy == NULL) return SQLITE_OK;
+
+    for (const auto& rule : policy->rules) {
+        if (rule.action >= 0 && rule.action != action) continue;
+        if (!rule.arg1.empty() && (arg1 == NULL || rule.arg1 != arg1)) continue;
+        if (!rule.arg2.empty() && (arg2 == NULL || rule.arg2 != arg2)) continue;
+        if (!rule.database.empty()
+                && (database == NULL || rule.database != database)) continue;
+        if (!rule.trigger.empty()
+                && (trigger == NULL || rule.trigger != trigger)) continue;
+        return rule.verdict;
+    }
+    return policy->default_decision;
+}
+
+void Database::RemoveAuthorizer() {
+    // Main-thread, nothing in flight (Work_BeginClose / ~Database).
+    if (_handle != NULL && auth_policy != NULL) {
+        sqlite3_set_authorizer(_handle, NULL, NULL);
+    }
+    delete auth_policy;
+    auth_policy = NULL;
+}
+
+// --- Progress handler / cancellation token ----------------------------------
+
+static_assert(std::atomic<int32_t>::is_always_lock_free,
+    "the cancellation token relies on lock-free cross-thread flag reads");
+
+// _progressFlag(int32Array, period) installs the token form; the array is
+// an Int32Array view over a SharedArrayBuffer (the stable napi surface
+// has no SharedArrayBuffer accessors; the typed-array info call returns
+// the shared backing pointer, and rooting the view roots the buffer).
+// _progressFlag() removes whatever progress handler is installed.
+Napi::Value Database::SetProgressFlag(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    auto* db = this;
+
+    if (info.Length() == 0 || info[0].IsNull() || info[0].IsUndefined()) {
+        auto* baton = new ProgressFlagBaton(db, Napi::Function(), 0);
+        db->Schedule(Work_SetProgressFlag, baton, true);
+        db->Process();
+        return info.This();
+    }
+
+    void* data = NULL;
+    if (!info[0].IsTypedArray()) {
+        Napi::TypeError::New(env,
+            "cancellation token must be an Int32Array over a SharedArrayBuffer"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    napi_typedarray_type type;
+    size_t length = 0, byte_offset = 0;
+    napi_value backing = NULL;
+    napi_status st = napi_get_typedarray_info(env, info[0],
+        &type, &length, &data, &backing, &byte_offset);
+    if (st != napi_ok || type != napi_int32_array || length < 1
+            || data == NULL || backing == NULL) {
+        Napi::TypeError::New(env,
+            "cancellation token must be an Int32Array with at least one element"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    // The JS layer requires a SharedArrayBuffer backing store (it can
+    // check; the stable napi surface cannot): that is what makes the flag
+    // visible when it is set from a worker thread.
+    if (info.Length() < 2 || !info[1].IsNumber()
+            || info[1].As<Napi::Number>().Int32Value() < 1) {
+        Napi::TypeError::New(env,
+            "progress period must be a positive integer (VM instructions)"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    auto* baton = new ProgressFlagBaton(db, Napi::Function(),
+        info[1].As<Napi::Number>().Int32Value());
+    baton->buffer = Napi::Persistent(info[0]);
+    baton->flag = static_cast<std::atomic<int32_t>*>(data);
+    db->Schedule(Work_SetProgressFlag, baton, true);
+    db->Process();
+
+    return info.This();
+}
+
+// _progressCallback(period, fn) installs the JS-callback form;
+// _progressCallback() removes whatever progress handler is installed.
+Napi::Value Database::SetProgressCallback(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    auto* db = this;
+
+    if (info.Length() == 0 || info[0].IsNull() || info[0].IsUndefined()
+            || info[1].IsNull() || info[1].IsUndefined()) {
+        auto* baton = new FunctionBaton(db, Napi::Function(), "", 0, 0);
+        baton->nArg = -1; // sentinel: remove
+        db->Schedule(Work_SetProgressCallback, baton, true);
+        db->Process();
+        return info.This();
+    }
+
+    if (!info[0].IsNumber() || info[0].As<Napi::Number>().Int32Value() < 1) {
+        Napi::TypeError::New(env,
+            "progress period must be a positive integer (VM instructions)"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    if (!info[1].IsFunction()) {
+        Napi::TypeError::New(env,
+            "progress callback must be a function"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    auto* baton = new FunctionBaton(db, Napi::Function(), "progress",
+        info[0].As<Napi::Number>().Int32Value(), 0);
+    baton->fn.Reset(info[1].As<Napi::Function>(), 1);
+    db->Schedule(Work_SetProgressCallback, baton, true);
+    db->Process();
+
+    return info.This();
+}
+
+// Installs/updates the sqlite hook from the current state. Exclusive
+// context: the handler's flag pointer and buffer reference are published
+// only while nothing can be inside the handler.
+void Database::ApplyProgressHandler(Database* db) {
+    if (db->progress_mode == Database::ProgressMode::None) {
+        sqlite3_progress_handler(db->_handle, 0, NULL, NULL);
+    }
+    else {
+        sqlite3_progress_handler(db->_handle, db->progress_period,
+            Database::ProgressHandler, db);
+    }
+}
+
+void Database::Work_SetProgressFlag(Baton* b) {
+    auto baton = std::unique_ptr<ProgressFlagBaton>(
+        static_cast<ProgressFlagBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(Work_SetProgressFlag, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    if (baton->buffer.IsEmpty()) {
+        // Remove: unregister first, then drop the published state.
+        db->progress_mode = ProgressMode::None;
+        db->progress_flag = NULL;
+        db->progress_buffer.Reset();
+        ApplyProgressHandler(db);
+    }
+    else {
+        // The flag form replaces the callback form (one sqlite slot).
+        if (db->js_progress != NULL) {
+            db->DropJsProgressHolder();
+            db->ReleaseJsChannelIfIdle();
+        }
+        db->progress_flag = baton->flag;
+        db->progress_buffer = std::move(baton->buffer);
+        db->progress_mode = ProgressMode::Flag;
+        db->progress_period = baton->period;
+        ApplyProgressHandler(db);
+    }
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+void Database::Work_SetProgressCallback(Baton* b) {
+    auto baton = std::unique_ptr<FunctionBaton>(static_cast<FunctionBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(Work_SetProgressCallback, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    if (baton->nArg == -1) {
+        db->progress_mode = ProgressMode::None;
+        db->progress_flag = NULL;
+        db->progress_buffer.Reset();
+        db->DropJsProgressHolder();
+        ApplyProgressHandler(db);
+        db->ReleaseJsChannelIfIdle();
+    }
+    else {
+        if (!db->EnsureJsChannel()) {
+            db->ReportRegistrationFailure(SQLITE_NOMEM);
+        }
+        else {
+            JsFunc* old = db->js_progress;
+            db->js_progress = new JsFunc(db, "progress", 0);
+            db->js_progress->fn.Reset(baton->fn.Value(), 1);
+            delete old;
+            // The callback form replaces the flag form (one sqlite slot).
+            db->progress_flag = NULL;
+            db->progress_buffer.Reset();
+            db->progress_mode = ProgressMode::Callback;
+            db->progress_period = baton->nArg;
+            ApplyProgressHandler(db);
+        }
+    }
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+void Database::DropJsProgressHolder() {
+    if (js_progress != NULL) {
+        JsFunc* fn = js_progress;
+        js_progress = NULL;
+        if (!fn->dead) {
+            fn->dead = true;
+            fn->fn.Reset();
+            fn->db->Unref();
+        }
+        delete fn;
+    }
+}
+
+void Database::RemoveProgressHandler() {
+    // Main-thread, nothing in flight (Work_BeginClose / ~Database).
+    if (_handle != NULL && progress_mode != ProgressMode::None) {
+        sqlite3_progress_handler(_handle, 0, NULL, NULL);
+    }
+    progress_mode = ProgressMode::None;
+    progress_period = 0;
+    progress_flag = NULL;
+    progress_buffer.Reset();
+    DropJsProgressHolder();
+}
+
+// --- WAL checkpoints --------------------------------------------------------
+
+// _checkpoint(dbName, mode, callback). Non-exclusive: concurrent statement
+// work is serialized by the connection mutex inside sqlite, and a
+// checkpoint racing readers is exactly what the busy flag reports.
+Napi::Value Database::Checkpoint(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    auto* db = this;
+
+    REQUIRE_ARGUMENT_STRING(0, database);
+    REQUIRE_ARGUMENT_INTEGER(1, mode);
+    OPTIONAL_ARGUMENT_FUNCTION(2, callback);
+
+    auto* baton = new CheckpointBaton(db, callback, database.c_str(), mode);
+    db->Schedule(Work_BeginCheckpoint, baton);
+
+    return info.This();
+}
+
+void Database::Work_BeginCheckpoint(Baton* baton) {
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    baton->db->pending++;
+
+    auto env = baton->db->Env();
+    CREATE_WORK("sqlite3.Database.Checkpoint", Work_Checkpoint, Work_AfterCheckpoint);
+}
+
+void Database::Work_Checkpoint(napi_env e, void* data) {
+    auto* baton = static_cast<CheckpointBaton*>(data);
+
+    baton->status = sqlite3_wal_checkpoint_v2(
+        baton->db->_handle,
+        baton->database.c_str(),
+        baton->mode,
+        &baton->log_frames,
+        &baton->ckpt_frames
+    );
+
+    if (baton->status != SQLITE_OK && baton->status != SQLITE_BUSY) {
+        baton->message = std::string(sqlite3_errmsg(baton->db->_handle));
+    }
+}
+
+void Database::Work_AfterCheckpoint(napi_env e, napi_status status, void* data) {
+    std::unique_ptr<CheckpointBaton> baton(static_cast<CheckpointBaton*>(data));
+    auto* db = baton->db;
+
+    auto env = db->Env();
+    Napi::HandleScope scope(env);
+
+    db->pending--;
+    db->Process();
+
+    Napi::Function cb = baton->callback.Value();
+    if (!IS_FUNCTION(cb)) return;
+
+    if (baton->status != SQLITE_OK && baton->status != SQLITE_BUSY) {
+        EXCEPTION(baton->message, baton->status, exception);
+        Napi::Value argv[] = { exception };
+        TRY_CATCH_CALL(db->Value(), cb, 1, argv);
+        return;
+    }
+    Napi::Object result = Napi::Object::New(env);
+    result.Set("busy", Napi::Boolean::New(env, baton->status == SQLITE_BUSY));
+    result.Set("logFrames", Napi::Number::New(env, baton->log_frames));
+    result.Set("checkpointedFrames",
+        Napi::Number::New(env, baton->ckpt_frames));
+    Napi::Value argv[] = { env.Null(), result };
+    TRY_CATCH_CALL(db->Value(), cb, 2, argv);
+}
+
+// --- Table metadata ---------------------------------------------------------
+
+// _tableInfo(dbName, table, callback): PRAGMA <db>.table_info(<table>) for
+// the column order, cid and defaults, enriched per column with
+// sqlite3_table_column_metadata (declared type, collation, autoincrement).
+// The PRAGMA is subject to the installed authorizer — a deny-by-default
+// policy must allow SQLITE_PRAGMA (and the SELECT family is not involved).
+Napi::Value Database::TableInfo(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    auto* db = this;
+
+    REQUIRE_ARGUMENT_STRING(0, database);
+    REQUIRE_ARGUMENT_STRING(1, table);
+    OPTIONAL_ARGUMENT_FUNCTION(2, callback);
+
+    auto* baton = new TableInfoBaton(db, callback, database.c_str(), table.c_str());
+    db->Schedule(Work_BeginTableInfo, baton);
+
+    return info.This();
+}
+
+void Database::Work_BeginTableInfo(Baton* baton) {
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    baton->db->pending++;
+
+    auto env = baton->db->Env();
+    CREATE_WORK("sqlite3.Database.TableInfo", Work_TableInfo, Work_AfterTableInfo);
+}
+
+void Database::Work_TableInfo(napi_env e, void* data) {
+    auto* baton = static_cast<TableInfoBaton*>(data);
+    auto* db = baton->db;
+
+    // %Q quotes and escapes the identifier path; the schema name is
+    // validated by the JS layer to the plain identifiers sqlite accepts.
+    char* sql = sqlite3_mprintf("PRAGMA %s.table_info(%Q)",
+        baton->database.c_str(), baton->table.c_str());
+    if (sql == NULL) {
+        baton->status = SQLITE_NOMEM;
+        baton->message = "out of memory";
+        return;
+    }
+
+    sqlite3_stmt* stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->_handle, sql, -1, &stmt, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) {
+        baton->status = rc;
+        baton->message = std::string(sqlite3_errmsg(db->_handle));
+        return;
+    }
+
+    baton->status = SQLITE_OK;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        TableInfoBaton::Column col{};
+        col.cid = sqlite3_column_int(stmt, 0);
+        const char* name = (const char*)sqlite3_column_text(stmt, 1);
+        col.name = name != NULL ? name : "";
+        const char* type = (const char*)sqlite3_column_text(stmt, 2);
+        col.type = type != NULL ? type : "";
+        col.not_null = sqlite3_column_int(stmt, 3) != 0;
+        const char* dflt = (const char*)sqlite3_column_text(stmt, 4);
+        col.dflt = dflt != NULL ? dflt : "";
+        col.pk = sqlite3_column_int(stmt, 5);
+
+        // Enrich with the metadata API; failure here keeps the PRAGMA row
+        // (e.g. a view, where there is no table metadata to read).
+        const char* decl = NULL;
+        const char* collate = NULL;
+        int not_null = 0, pk = 0, autoinc = 0;
+        int mrc = sqlite3_table_column_metadata(db->_handle,
+            baton->database.c_str(), baton->table.c_str(), col.name.c_str(),
+            &decl, &collate, &not_null, &pk, &autoinc);
+        if (mrc == SQLITE_OK) {
+            if (decl != NULL) col.type = decl;
+            if (collate != NULL) col.collate = collate;
+            col.not_null = not_null != 0;
+            col.pk = pk;
+            col.autoinc = autoinc != 0;
+        }
+        baton->columns.push_back(std::move(col));
+    }
+    if (rc != SQLITE_DONE) {
+        baton->status = rc;
+        baton->message = std::string(sqlite3_errmsg(db->_handle));
+    }
+    sqlite3_finalize(stmt);
+}
+
+void Database::Work_AfterTableInfo(napi_env e, napi_status status, void* data) {
+    std::unique_ptr<TableInfoBaton> baton(static_cast<TableInfoBaton*>(data));
+    auto* db = baton->db;
+
+    auto env = db->Env();
+    Napi::HandleScope scope(env);
+
+    db->pending--;
+    db->Process();
+
+    Napi::Function cb = baton->callback.Value();
+    if (!IS_FUNCTION(cb)) return;
+
+    if (baton->status != SQLITE_OK) {
+        EXCEPTION(baton->message, baton->status, exception);
+        Napi::Value argv[] = { exception };
+        TRY_CATCH_CALL(db->Value(), cb, 1, argv);
+        return;
+    }
+
+    Napi::Array result = Napi::Array::New(env, baton->columns.size());
+    size_t i = 0;
+    for (const auto& col : baton->columns) {
+        Napi::Object row = Napi::Object::New(env);
+        row.Set("cid", Napi::Number::New(env, col.cid));
+        row.Set("name", Napi::String::New(env, col.name.c_str()));
+        row.Set("type", Napi::String::New(env, col.type.c_str()));
+        row.Set("notNull", Napi::Boolean::New(env, col.not_null));
+        // The PRAGMA reports the default's literal SQL text or nothing;
+        // an absent field (not a null one) says "no DEFAULT clause".
+        if (!col.dflt.empty()) {
+            row.Set("defaultValue", Napi::String::New(env, col.dflt.c_str()));
+        }
+        row.Set("primaryKey", Napi::Number::New(env, col.pk));
+        row.Set("collate", Napi::String::New(env, col.collate.c_str()));
+        row.Set("autoIncrement", Napi::Boolean::New(env, col.autoinc));
+        result.Set(i++, row);
+    }
+    Napi::Value argv[] = { env.Null(), result };
+    TRY_CATCH_CALL(db->Value(), cb, 2, argv);
+}
+
+// --- db_config subset ---------------------------------------------------------
+
+// _dbConfig(op, value, callback). value 0/1 sets; -1 queries without
+// changing. The callback receives the previous value. Exclusive: unlike
+// a read, a set followed by a query must not be reordered by the
+// parallel worker pool.
+Napi::Value Database::DbConfig(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    auto* db = this;
+
+    REQUIRE_ARGUMENT_INTEGER(0, op);
+    REQUIRE_ARGUMENT_INTEGER(1, value);
+    OPTIONAL_ARGUMENT_FUNCTION(2, callback);
+
+    auto* baton = new DbConfigBaton(db, callback, op, value);
+    db->Schedule(Work_BeginDbConfig, baton, true);
+
+    return info.This();
+}
+
+void Database::Work_BeginDbConfig(Baton* baton) {
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    baton->db->pending++;
+
+    auto env = baton->db->Env();
+    CREATE_WORK("sqlite3.Database.DbConfig", Work_DbConfig, Work_AfterDbConfig);
+}
+
+void Database::Work_DbConfig(napi_env e, void* data) {
+    auto* baton = static_cast<DbConfigBaton*>(data);
+
+    // sqlite3_db_config's out pointer receives the value AFTER the new
+    // one is applied (see the aFlagOp handling in the amalgamation), not
+    // the prior value its docs describe. Query first so the callback
+    // really sees the previous state, then apply.
+    int applied = 0;
+    baton->status = sqlite3_db_config(baton->db->_handle, baton->op,
+        -1, &baton->previous);
+    if (baton->status == SQLITE_OK && baton->value >= 0) {
+        baton->status = sqlite3_db_config(baton->db->_handle, baton->op,
+            baton->value, &applied);
+    }
+    if (baton->status != SQLITE_OK) {
+        baton->message = std::string(sqlite3_errmsg(baton->db->_handle));
+    }
+}
+
+void Database::Work_AfterDbConfig(napi_env e, napi_status status, void* data) {
+    std::unique_ptr<DbConfigBaton> baton(static_cast<DbConfigBaton*>(data));
+    auto* db = baton->db;
+
+    auto env = db->Env();
+    Napi::HandleScope scope(env);
+
+    db->pending--;
+    db->Process();
+
+    Napi::Function cb = baton->callback.Value();
+    if (!IS_FUNCTION(cb)) return;
+
+    if (baton->status != SQLITE_OK) {
+        EXCEPTION(baton->message, baton->status, exception);
+        Napi::Value argv[] = { exception };
+        TRY_CATCH_CALL(db->Value(), cb, 1, argv);
+        return;
+    }
+    Napi::Value argv[] = {
+        env.Null(), Napi::Boolean::New(env, baton->previous != 0)
+    };
+    TRY_CATCH_CALL(db->Value(), cb, 2, argv);
+}
+
+// --- Change counters ----------------------------------------------------------
+
+Napi::Value Database::ChangesGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (!IsOpen() || _handle == NULL) {
+        Napi::Error::New(env, "Database is not open").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    // A worker blocked mid-round-trip holds the connection mutex while
+    // waiting for this very thread; reading the counter now would
+    // deadlock. Everything else merely serializes on the mutex inside
+    // sqlite, which is the ordinary main-thread sqlite cost.
+    if (MayBlockOnWorkerRoundTrip()) {
+        Napi::Error::New(env,
+            "db.changes cannot be read while a JavaScript function, "
+            "collation or progress callback is mid-call on this "
+            "connection; read it from a callback or after the query"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    return ConvertInt64ToJS(env, sqlite3_changes64(_handle),
+        integer_mode, "db.changes");
+}
+
+Napi::Value Database::TotalChangesGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (!IsOpen() || _handle == NULL) {
+        Napi::Error::New(env, "Database is not open").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    if (MayBlockOnWorkerRoundTrip()) {
+        Napi::Error::New(env,
+            "db.totalChanges cannot be read while a JavaScript function, "
+            "collation or progress callback is mid-call on this "
+            "connection; read it from a callback or after the query"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    return ConvertInt64ToJS(env, sqlite3_total_changes64(_handle),
+        integer_mode, "db.totalChanges");
 }
 
 Napi::Value Database::Exec(const Napi::CallbackInfo& info) {
@@ -934,8 +1829,13 @@ void Database::RemoveCallbacks() {
         debug_profile->finish();
         debug_profile = NULL;
     }
-    if (update_event) {
-        update_event->finish();
-        update_event = NULL;
+    if (txn_event) {
+        txn_event->finish();
+        txn_event = NULL;
+    }
+    hook_change = hook_commit = hook_rollback = false;
+    if (wal_event) {
+        wal_event->finish();
+        wal_event = NULL;
     }
 }

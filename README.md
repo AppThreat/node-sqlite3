@@ -330,6 +330,109 @@ a cursor is suspended mid-query; the statement cache is flushed on every
 registration, replacement and removal, so no statement compiled against
 the old implementation is handed back.
 
+## Hooks, authorizer, progress and introspection (v9)
+
+```js
+// Transaction hooks. commit fires after the transaction commits — every
+// change event of that transaction is delivered first, which is what
+// makes the pair useful for cache invalidation. The hooks are
+// observational: the commit (or rollback) has already happened when the
+// listener runs, and no return value can veto it.
+db.on('change', (type, database, table, rowid) => { /* ... */ });
+db.on('commit', () => { /* ... */ });
+db.on('rollback', () => { /* ... */ });
+
+// WAL hook: fires after a commit appends frames to the WAL.
+db.on('wal', (database, pages) => { /* ... */ });
+```
+
+A hook's native sqlite callback exists only while at least one listener
+is registered — an installed-but-unused hook costs nothing. In WAL mode,
+`db.checkpoint()` is the lever for keeping the WAL bounded:
+
+```js
+const { busy, logFrames, checkpointedFrames } =
+    await db.checkpoint({ mode: 'truncate' });
+```
+
+### Sandboxing SQL with the authorizer
+
+```js
+db.authorizer({
+    default: 'deny',
+    allow: [
+        { action: sqlite3.SELECT },
+        { action: sqlite3.READ, table: 'users' },
+    ],
+});
+db.authorizer(null); // remove
+```
+
+The policy is a rule list evaluated inside SQLite itself, in C++ — no
+JavaScript runs on the prepare path, so it is fast and thread-safe by
+construction. `deny` rules win over `allow` rules; a denied action fails
+the statement with `SQLITE_AUTH` ("not authorized"). The ~35 action
+constants (`sqlite3.SELECT`, `sqlite3.READ`, `sqlite3.INSERT`,
+`sqlite3.ATTACH`, …) and the decisions (`sqlite3.DENY`,
+`sqlite3.IGNORE`) are exported. The statement cache is flushed on every
+policy change: a cached statement was compiled under the old policy and
+would bypass the new one.
+
+### Cancelling queries
+
+```js
+// The cancellation token: an atomic flag in a SharedArrayBuffer that
+// the native progress handler polls. Zero JS cost per check, and
+// cancel() works from any thread — post token.buffer to a Worker.
+const token = db.cancellationToken();
+db.all(longRunningSql).catch(() => {});
+setTimeout(() => token.cancel(), 100);
+
+// token.signal is a real AbortSignal, so the promise form rejects with
+// your reason:
+db.all(longRunningSql, { signal: token.signal }).catch((reason) => {});
+```
+
+Cancellation is connection-wide, like `db.interrupt()`: the abort
+reaches every statement running on the connection. While a token exists,
+each query pays one relaxed atomic load per `period` VM instructions
+(default 1000) — within measurement noise in the benchmark suite.
+
+A JavaScript callback form exists for progress reporting —
+`db.progress(10000, () => shouldStop)` calls the callback every 10,000
+VM instructions and aborts the statement when it returns truthy — but
+each invocation is a blocking round trip to the JS thread (the same
+~18 µs class as JS functions), so it is for progress bars over long
+queries, not per-row work. While it is registered, the synchronous
+methods refuse to run (a callback would fire on the thread that must
+service it). The token form has no such restriction.
+
+### Statement and connection introspection
+
+```js
+const stmt = await db.prepare('SELECT name AS who FROM users WHERE id = ?');
+stmt.readonly;        // true — sqlite3_stmt_readonly
+stmt.parameterCount;  // 1
+stmt.parameterNames;  // ['?1'] (null entries for positional `?`)
+stmt.columns;         // [{ name: 'who', declaredType: 'TEXT',
+                      //    database: 'main', table: 'users', origin: 'name' }]
+stmt.status(sqlite3.STMTSTATUS_FULLSCAN_STEP); // >0: the query scanned
+                                              // without an index
+
+db.changes;           // rows changed by the most recent statement (64-bit)
+db.totalChanges;      // every change since open (64-bit)
+await db.tableInfo('users');   // column metadata incl. collation, defaults
+await db.dbConfig(sqlite3.DBCONFIG_DEFENSIVE, true); // safe db_config switches
+```
+
+The statement accessors serve a snapshot taken when the statement was
+prepared, so reading them never touches the sqlite handle and cannot
+race a running query; fields SQLite reports as absent (an expression
+column has no origin, a typeless column no declared type) are omitted
+rather than nulled. Integer modes apply to `changes`/`totalChanges` as
+everywhere else. `tableInfo` runs a `PRAGMA table_info`, so a
+deny-by-default authorizer must allow `sqlite3.PRAGMA`.
+
 ## Source install
 
 To skip searching for pre-compiled binaries, and force a build from source, use
