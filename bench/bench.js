@@ -1,6 +1,8 @@
 // Micro-benchmarks for the hot paths targeted by the marshalling
 // optimisations: row conversion (all/each), bind marshalling (run),
 // and blob transfers. Run: node bench/bench.js
+import { pipeline } from 'node:stream/promises';
+
 import sqlite3 from '../lib/sqlite3.js';
 
 function bench(name, fn) {
@@ -558,9 +560,10 @@ async function main() {
             'db.transaction: 200 empty bodies',
             async () => {
                 for (let i = 0; i < 200; i++) {
-                    await dbf.transaction(async (tx) => {
-                        await tx.get('SELECT 1 AS v');
-                    });
+                    // Deliberately empty: this measures the wrapper
+                    // (ALS enter/exit, flow-store copy, validation), not
+                    // any body work.
+                    await dbf.transaction(async () => undefined);
                 }
             },
         );
@@ -583,6 +586,74 @@ async function main() {
         });
 
         await dbf.close();
+    }
+
+    // --- Deliverable 08: the blob stream round trip (flat memory) and
+    // the binary-size note. 100 MB through createWriteStream and back
+    // through createReadStream in 64 KiB chunks; RSS is sampled before,
+    // at the midpoint and after, because the point of incremental blob
+    // I/O is that memory stays flat regardless of the blob's size.
+    {
+        const dbs = await new Promise((resolve) => {
+            const d = new sqlite3.Database(':memory:', () => resolve(d));
+        });
+        dbs.exec('CREATE TABLE big (id INTEGER PRIMARY KEY, data BLOB)');
+        dbs.exec('INSERT INTO big VALUES (1, zeroblob(100 * 1024 * 1024))');
+        const blob = await new Promise((resolve, reject) => {
+            const b = dbs.openBlob(
+                { table: 'big', column: 'data', rowid: 1 },
+                (err) => (err ? reject(err) : resolve(b)),
+            );
+        });
+
+        const rss = () => (process.memoryUsage.rss() / 1024 / 1024).toFixed(1);
+        const rssBefore = rss();
+        const src = Buffer.alloc(1024 * 1024, 0xab);
+        const t0 = process.hrtime.bigint();
+        await pipeline(
+            (async function* () {
+                for (let i = 0; i < 100; i++) yield src;
+            })(),
+            blob.createWriteStream(),
+        );
+        const rssMid = rss();
+        let readBytes = 0;
+        let hash = 0;
+        let rssMin = Number.POSITIVE_INFINITY;
+        let rssMax = 0;
+        await pipeline(blob.createReadStream(), async (source) => {
+            for await (const chunk of source) {
+                readBytes += chunk.length;
+                for (let i = 0; i < chunk.length; i += 4096) {
+                    hash = (hash * 31 + chunk[i]) | 0;
+                }
+                const now = Number(process.memoryUsage.rss());
+                if (now < rssMin) rssMin = now;
+                if (now > rssMax) rssMax = now;
+            }
+        });
+        const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+        if (readBytes !== 100 * 1024 * 1024) throw new Error('short read');
+        void hash;
+        const rssAfter = rss();
+        results.push({
+            name: 'blob stream: 100MB round trip',
+            ms,
+        });
+        // The write-phase growth (rssMid) is SQLite's in-memory rollback
+        // journal for rewriting the whole blob — reproduced identically
+        // with a direct blob.write loop, so it is inherent to the
+        // operation, not the streaming API. What must stay flat is the
+        // read: min/max RSS sampled per chunk across all 100 MB.
+        console.log(
+            `blob stream RSS: before=${rssBefore}MB ` +
+                `after-write=${rssMid}MB (incl. sqlite rollback journal) ` +
+                `read-phase min=${(rssMin / 1048576).toFixed(1)}MB ` +
+                `max=${(rssMax / 1048576).toFixed(1)}MB ` +
+                `after=${rssAfter}MB (flat read if max~min)`,
+        );
+        await blob.close();
+        await new Promise((r) => dbs.close(r));
     }
 
     for (const r of results) {

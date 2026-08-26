@@ -5,13 +5,15 @@
 #include "database.h"
 #include "statement.h"
 #include "function.h"
+#include "session.h"
+#include "blob.h"
 
 using namespace node_sqlite3;
 
 Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
     Napi::HandleScope scope(env);
     // declare napi_default_method here as it is only available in Node v14.12.0+
-    auto napi_default_method = static_cast<napi_property_attributes>(napi_writable | napi_configurable); 
+    auto napi_default_method = static_cast<napi_property_attributes>(napi_writable | napi_configurable);
 
     auto t = DefineClass(env, "Database", {
         InstanceMethod("close", &Database::Close, napi_default_method),
@@ -39,6 +41,11 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("_checkpoint", &Database::Checkpoint, napi_default_method),
         InstanceMethod("_tableInfo", &Database::TableInfo, napi_default_method),
         InstanceMethod("_dbConfig", &Database::DbConfig, napi_default_method),
+        // Sessions, changesets and serialization (Deliverable 08):
+        // internal entry points wrapped by lib/sqlite3.js.
+        InstanceMethod("_applyChangeset", &Database::ApplyChangeset, napi_default_method),
+        InstanceMethod("_serializeToBytes", &Database::SerializeToBytes, napi_default_method),
+        InstanceMethod("_deserialize", &Database::Deserialize, napi_default_method),
         InstanceAccessor("open", &Database::Open, nullptr),
         InstanceAccessor("integerMode", &Database::IntegerModeGetter, nullptr),
         InstanceAccessor("state", &Database::StateGetter, nullptr),
@@ -55,12 +62,14 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceAccessor("queued", &Database::QueuedGetter, nullptr)
     });
 
-    // The constructor rides per-env instance data (NAPI >= 6 only: the
+    // The constructors ride per-env instance data (NAPI >= 6 only: the
     // package declares napi_versions [10]). Allocated bare: node-addon-api
     // takes ownership of instance data and deletes it at env teardown.
-    Napi::FunctionReference* constructor = new Napi::FunctionReference();
-    *constructor = Napi::Persistent(t);
-    env.SetInstanceData<Napi::FunctionReference>(constructor);
+    // Database::Init runs first in RegisterModule, so it allocates the
+    // block the other classes then fill in.
+    AddonData* data = new AddonData();
+    data->database_ctor = Napi::Persistent(t);
+    env.SetInstanceData<AddonData>(data);
 
     exports.Set("Database", t);
     return exports;
@@ -329,10 +338,15 @@ void Database::Work_BeginClose(Baton* baton) {
     // handle. Main-thread here, with nothing in flight — the same
     // conditions RemoveCallbacks relies on for the hooks. The authorizer
     // and progress handler are unregistered for the same reason (both can
-    // fire from the implicit work close performs).
+    // fire from the implicit work close performs). Sessions and blob
+    // handles are torn down for the same lifetime reason: both hold
+    // native objects sqlite3_close would leave dangling.
     baton->db->RemoveUserFunctions();
     baton->db->RemoveAuthorizer();
     baton->db->RemoveProgressHandler();
+    baton->db->RemovePreupdateHook();
+    baton->db->CloseLiveSessions();
+    baton->db->CloseLiveBlobs();
     baton->db->ReleaseJsChannelIfIdle();
     baton->db->db_state = DbState::Closing;
 
@@ -523,6 +537,10 @@ Napi::Value Database::Configure(const Napi::CallbackInfo& info) {
         auto* baton = new HookBaton(db, handle, hook_enable());
         db->Schedule(RegisterWalCallback, baton);
     }
+    else if (info[0].StrictEquals(Napi::String::New(env, "preupdate"))) {
+        auto* baton = new HookBaton(db, handle, hook_enable());
+        db->Schedule(RegisterPreupdateCallback, baton);
+    }
     else {
         Napi::TypeError::New(env,
             info[0].As<Napi::String>().Utf8Value() +
@@ -564,6 +582,9 @@ void Database::SetBusyTimeout(Baton* b) {
 
     assert(baton->db->IsOpen());
     assert(baton->db->_handle);
+    // Nothing in flight: the deferral above guarantees it, and the sqlite
+    // call below would otherwise race a worker for the connection mutex.
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
 
     sqlite3_busy_timeout(baton->db->_handle, baton->timeout);
 
@@ -582,6 +603,7 @@ void Database::SetLimit(Baton* b) {
 
     assert(baton->db->IsOpen());
     assert(baton->db->_handle);
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
 
     sqlite3_limit(baton->db->_handle, baton->id, baton->value);
 
@@ -923,6 +945,181 @@ void Database::WalCallback(Database* db, WalInfo* i) {
     EMIT_EVENT(db->Value(), 3, argv);
 }
 
+// --- Preupdate event (Deliverable 08) ----------------------------------------
+
+void Database::RegisterPreupdateCallback(Baton* b) {
+    auto baton = std::unique_ptr<HookBaton>(static_cast<HookBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(RegisterPreupdateCallback, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    // Nothing in flight: the deferral above guarantees it, and the sqlite
+    // call below would otherwise race a worker for the connection mutex.
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    if (baton->enable != db->hook_preupdate) {
+        if (baton->enable) {
+            // The preupdate hook slot is shared with the session
+            // extension (see src/session.h): refuse loudly while a
+            // session is tracked rather than letting sqlite3session_*
+            // silently displace our hook — or ours displace theirs.
+            if (!db->live_sessions.empty()) {
+                Napi::Env env = db->Env();
+                Napi::HandleScope scope(env);
+                EXCEPTION("cannot register a 'preupdate' listener while a "
+                    "session is open on this connection: both use "
+                    "SQLite's single preupdate hook, and one would "
+                    "silently stop the other. Close the session first",
+                    SQLITE_MISUSE, exception);
+                Napi::Value info[] = {
+                    Napi::String::New(env, "error"), exception
+                };
+                EMIT_EVENT(db->Value(), 2, info);
+            }
+            else {
+                db->preupdate_event = new AsyncPreupdate(db,
+                    PreupdateCallback);
+                sqlite3_preupdate_hook(db->_handle, PreupdateTrampoline, db);
+                db->hook_preupdate = true;
+            }
+        }
+        else {
+            // Unregister before finishing the channel so no event can be
+            // in flight for it.
+            sqlite3_preupdate_hook(db->_handle, NULL, NULL);
+            db->preupdate_event->finish();
+            db->preupdate_event = NULL;
+            db->hook_preupdate = false;
+        }
+    }
+
+    // Release only after the sqlite call; see RegisterTraceCallback.
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+// Note: called in the thread performing the write — the libuv worker for
+// asynchronous statements, or the JS thread inside the *Sync methods.
+void Database::PreupdateTrampoline(void* ctx, sqlite3* handle, int op,
+        const char* database, const char* table, sqlite3_int64 key1,
+        sqlite3_int64 key2) {
+    auto* db = static_cast<Database*>(ctx);
+    if (db->preupdate_event == NULL) return; // removed / closing
+
+    // sqlite3_preupdate_old/new are only valid inside this callback, so
+    // the row values are materialised eagerly here — the Async bridge
+    // defers the JS event to the loop thread, and a half-filled container
+    // must never be what JS observes. Both row vectors are fully sized
+    // before any element is converted.
+    auto* info = new PreupdateInfo();
+    info->op = op;
+    info->database = database != NULL ? database : "";
+    info->table = table != NULL ? table : "";
+    info->key1 = key1;
+    info->key2 = key2;
+
+    int n_col = sqlite3_preupdate_count(handle);
+    if (op != SQLITE_INSERT) {
+        info->old_row.resize(n_col);
+        for (int i = 0; i < n_col; i++) {
+            sqlite3_value* v = NULL;
+            if (sqlite3_preupdate_old(handle, i, &v) == SQLITE_OK
+                    && v != NULL) {
+                ValueToCell(&info->old_row[i], v);
+            }
+        }
+    }
+    if (op != SQLITE_DELETE) {
+        info->new_row.resize(n_col);
+        for (int i = 0; i < n_col; i++) {
+            sqlite3_value* v = NULL;
+            if (sqlite3_preupdate_new(handle, i, &v) == SQLITE_OK
+                    && v != NULL) {
+                ValueToCell(&info->new_row[i], v);
+            }
+        }
+    }
+
+    db->preupdate_event->send(info);
+}
+
+void Database::PreupdateCallback(Database* db, PreupdateInfo* i) {
+    auto info = std::unique_ptr<PreupdateInfo>(i);
+    // Note: called in the main V8 thread.
+    auto env = db->Env();
+    Napi::HandleScope scope(env);
+
+    Napi::Object payload = Napi::Object::New(env);
+    payload.Set("op",
+        Napi::String::New(env, sqlite_authorizer_string(info->op)));
+    payload.Set("database",
+        Napi::String::New(env, info->database.c_str()));
+    payload.Set("table", Napi::String::New(env, info->table.c_str()));
+    // key1 is the rowid being inserted/deleted/updated; key2 carries the
+    // new rowid only for a rowid-changing UPDATE. INSERT therefore has no
+    // old rowid to report.
+    payload.Set("oldRowid", info->op == SQLITE_INSERT
+        ? env.Null()
+        : ConvertInt64ToJS(env, info->key1, db->integer_mode,
+            "the preupdate oldRowid"));
+    payload.Set("rowid", ConvertInt64ToJS(env,
+        info->op == SQLITE_UPDATE ? info->key2 : info->key1,
+        db->integer_mode, "the preupdate rowid"));
+
+    // A blob write fires the hook as SQLITE_DELETE (the new values are
+    // not yet available); old/new stay op-gated so JS sees the same
+    // INSERT=new-only / DELETE=old-only / UPDATE=both shape regardless.
+    const int mode = db->integer_mode;
+    auto row_to_array = [&](Row& cells, const char* what) -> Napi::Value {
+        Napi::Array out = Napi::Array::New(env, cells.size());
+        for (size_t idx = 0; idx < cells.size(); idx++) {
+            out.Set(idx, CellToJS(env, cells[idx], mode, what));
+            if (env.IsExceptionPending()) return env.Null();
+        }
+        return out;
+    };
+    if (info->op != SQLITE_INSERT) {
+        payload.Set("oldRow",
+            row_to_array(info->old_row, "a preupdate old row value"));
+    }
+    else {
+        payload.Set("oldRow", env.Null());
+    }
+    if (info->op != SQLITE_DELETE) {
+        payload.Set("newRow",
+            row_to_array(info->new_row, "a preupdate new row value"));
+    }
+    else {
+        payload.Set("newRow", env.Null());
+    }
+
+    Napi::Value argv[] = {
+        Napi::String::New(env, "preupdate"),
+        payload
+    };
+    EMIT_EVENT(db->Value(), 2, argv);
+}
+
+void Database::RemovePreupdateHook() {
+    // Main-thread, nothing in flight (Work_BeginClose / ~Database). The
+    // sqlite hook is uninstalled before the channel is finished; sqlite
+    // itself may still fire the hook during the implicit rollback of
+    // sqlite3_close, by which point the channel is gone and the
+    // trampoline drops the event — the update hook's contract.
+    if (_handle != NULL && hook_preupdate) {
+        sqlite3_preupdate_hook(_handle, NULL, NULL);
+    }
+    hook_preupdate = false;
+    if (preupdate_event != NULL) {
+        preupdate_event->finish();
+        preupdate_event = NULL;
+    }
+}
+
+
 // --- Authorizer ------------------------------------------------------------
 
 namespace {
@@ -932,14 +1129,17 @@ bool ValidAuthDecision(int v) {
 }
 
 // Reads one optional string field of a rule row: null/undefined/omitted
-// become "" (wildcard).
-bool ReadRuleString(const Napi::Value& value, std::string* out) {
+// become the match-anything flag; a string (including the empty string)
+// is matched exactly.
+bool ReadRuleString(const Napi::Value& value, std::string* out, bool* any) {
     if (value.IsNull() || value.IsUndefined()) {
         out->clear();
+        *any = true;
         return true;
     }
     if (!value.IsString()) return false;
     *out = value.As<Napi::String>().Utf8Value();
+    *any = false;
     return true;
 }
 
@@ -955,7 +1155,8 @@ inline Napi::Value At(const Napi::Array& a, uint32_t i) {
 // _setAuthorizer(defaultDecision, rules) installs a policy;
 // _setAuthorizer() / _setAuthorizer(null) removes it. rules is an array
 // of [action, verdict, arg1, arg2, database, trigger] rows (action -1
-// and empty strings are wildcards); the JS layer orders deny rules
+// and null fields are wildcards; an explicitly-passed empty string
+// matches only an empty argument); the JS layer orders deny rules
 // before allow rules so a deny can never be overridden.
 Napi::Value Database::SetAuthorizer(const Napi::CallbackInfo& info) {
     auto env = info.Env();
@@ -1011,10 +1212,12 @@ Napi::Value Database::SetAuthorizer(const Napi::CallbackInfo& info) {
             rule.action = At(parts, 0).As<Napi::Number>().Int32Value();
             rule.verdict = At(parts, 1).As<Napi::Number>().Int32Value();
             bool ok = ValidAuthDecision(rule.verdict)
-                && ReadRuleString(At(parts, 2), &rule.arg1)
-                && ReadRuleString(At(parts, 3), &rule.arg2)
-                && ReadRuleString(At(parts, 4), &rule.database)
-                && ReadRuleString(At(parts, 5), &rule.trigger);
+                && ReadRuleString(At(parts, 2), &rule.arg1, &rule.arg1_any)
+                && ReadRuleString(At(parts, 3), &rule.arg2, &rule.arg2_any)
+                && ReadRuleString(At(parts, 4), &rule.database,
+                    &rule.database_any)
+                && ReadRuleString(At(parts, 5), &rule.trigger,
+                    &rule.trigger_any);
             if (!ok) {
                 delete baton;
                 delete policy;
@@ -1078,11 +1281,11 @@ int Database::AuthorizerCallback(void* ctx, int action, const char* arg1,
 
     for (const auto& rule : policy->rules) {
         if (rule.action >= 0 && rule.action != action) continue;
-        if (!rule.arg1.empty() && (arg1 == NULL || rule.arg1 != arg1)) continue;
-        if (!rule.arg2.empty() && (arg2 == NULL || rule.arg2 != arg2)) continue;
-        if (!rule.database.empty()
+        if (!rule.arg1_any && (arg1 == NULL || rule.arg1 != arg1)) continue;
+        if (!rule.arg2_any && (arg2 == NULL || rule.arg2 != arg2)) continue;
+        if (!rule.database_any
                 && (database == NULL || rule.database != database)) continue;
-        if (!rule.trigger.empty()
+        if (!rule.trigger_any
                 && (trigger == NULL || rule.trigger != trigger)) continue;
         return rule.verdict;
     }

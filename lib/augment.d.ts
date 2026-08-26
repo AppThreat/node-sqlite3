@@ -24,21 +24,26 @@
 // (they are regenerated into lib/promises.d.ts and re-exported from the
 // generated lib/sqlite3.d.ts).
 
-import type { Readable } from 'node:stream';
+import type { Readable, Writable } from 'node:stream';
 
 import type {
     AggregateDefinition,
+    ApplyChangesetOptions,
     AuthorizerPolicy,
     Backup,
     BindParams,
     BindValue,
+    Blob,
     CancellationToken,
     CheckpointMode,
     CheckpointOptions,
     CheckpointResult,
     FunctionOptions,
+    OpenBlobOptions,
     Row,
     RunResult,
+    Session,
+    SessionOptions,
     SqliteError,
     Statement,
     StatementRunSyncResult,
@@ -688,6 +693,75 @@ declare module './native.js' {
         };
         /** Finalizes every cached statement, emptying the cache. @internal */
         _drainStatementCache(): void;
+
+        // ---- Sessions, changesets, serialization and blob I/O
+        // (Deliverable 08).
+
+        /**
+         * Creates a change-recording session on this connection.
+         * @since 9.0.0
+         */
+        session(
+            options?: SessionOptions,
+            callback?: (this: Session, err: SqliteError | null) => void,
+        ): Session;
+        /** Creates a session, callback form. */
+        session(
+            callback: (this: Session, err: SqliteError | null) => void,
+        ): Session;
+
+        /**
+         * Applies a changeset inside one savepoint (either every change
+         * lands or the apply rolls back), resolving once done.
+         * @since 9.0.0
+         */
+        applyChangeset(
+            changeset: Uint8Array | ArrayBuffer | DataView,
+            options?: ApplyChangesetOptions,
+        ): Promise<void>;
+        /** Applies a changeset, callback form. */
+        applyChangeset(
+            changeset: Uint8Array | ArrayBuffer | DataView,
+            options: ApplyChangesetOptions | undefined,
+            callback: (this: Database, err: SqliteError | null) => void,
+        ): this;
+        /** Applies a changeset with the default policy, callback form. */
+        applyChangeset(
+            changeset: Uint8Array | ArrayBuffer | DataView,
+            callback: (this: Database, err: SqliteError | null) => void,
+        ): this;
+
+        /**
+         * Serializes the database (or one attached schema) to bytes.
+         * @since 9.0.0
+         */
+        serializeToBytes(dbName?: string): Promise<Uint8Array>;
+        /** Serializes the database, callback form. */
+        serializeToBytes(
+            dbName: string | undefined,
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                bytes: Uint8Array,
+            ) => void,
+        ): this;
+        /** Serializes the database, callback form. */
+        serializeToBytes(
+            callback: (
+                this: Database,
+                err: SqliteError | null,
+                bytes: Uint8Array,
+            ) => void,
+        ): this;
+
+        /**
+         * Opens an incremental blob handle on one row's blob column.
+         * @since 9.0.0
+         */
+        openBlob(
+            options: OpenBlobOptions,
+            callback?: (this: Blob, err: SqliteError | null) => void,
+        ): Blob;
     }
 
     interface Statement {
@@ -877,6 +951,120 @@ declare module './native.js' {
         /** Finishes the backup, callback form. */
         finish(callback: (this: Backup, err: SqliteError | null) => void): this;
         /** `await using` support: finishes the backup. @since 9.0.0 */
+        [Symbol.asyncDispose](): Promise<void>;
+    }
+
+    interface Session {
+        /** Harvests the recorded changes as a changeset. @since 9.0.0 */
+        changeset(): Promise<Uint8Array>;
+        /** Harvests the recorded changes, callback form. */
+        changeset(
+            callback: (
+                this: Session,
+                err: SqliteError | null,
+                changeset: Uint8Array,
+            ) => void,
+        ): this;
+        /**
+         * Harvests the recorded changes as a patchset (new rows only —
+         * smaller, but unusable for conflict detection on updates).
+         * @since 9.0.0
+         */
+        patchset(): Promise<Uint8Array>;
+        /** Harvests the recorded changes as a patchset, callback form. */
+        patchset(
+            callback: (
+                this: Session,
+                err: SqliteError | null,
+                patchset: Uint8Array,
+            ) => void,
+        ): this;
+        /** Closes the session; a second close is a benign no-op. @since 9.0.0 */
+        close(): Promise<void>;
+        /** Closes the session, callback form. */
+        close(callback: (this: Session, err: SqliteError | null) => void): this;
+        /** `using` support: initiates an asynchronous close. @since 9.0.0 */
+        [Symbol.dispose](): void;
+        /** `await using` support: closes the session. @since 9.0.0 */
+        [Symbol.asyncDispose](): Promise<void>;
+    }
+
+    interface Blob {
+        /**
+         * Reads `target.length` bytes starting at the blob offset into
+         * the target, resolving the byte count.
+         * @since 9.0.0
+         */
+        read(target: Uint8Array, offset?: number): Promise<number>;
+        /** Reads into the target, callback form. */
+        read(
+            target: Uint8Array,
+            offset: number | undefined,
+            callback: (
+                this: Blob,
+                err: SqliteError | null,
+                transferred: number,
+            ) => void,
+        ): this;
+        /** Reads into the target, callback form. */
+        read(
+            target: Uint8Array,
+            callback: (
+                this: Blob,
+                err: SqliteError | null,
+                transferred: number,
+            ) => void,
+        ): this;
+        /**
+         * Writes `source.length` bytes from the source at the blob
+         * offset, resolving the byte count.
+         * @since 9.0.0
+         */
+        write(source: Uint8Array, offset?: number): Promise<number>;
+        /** Writes from the source, callback form. */
+        write(
+            source: Uint8Array,
+            offset: number | undefined,
+            callback: (
+                this: Blob,
+                err: SqliteError | null,
+                transferred: number,
+            ) => void,
+        ): this;
+        /** Writes from the source, callback form. */
+        write(
+            source: Uint8Array,
+            callback: (
+                this: Blob,
+                err: SqliteError | null,
+                transferred: number,
+            ) => void,
+        ): this;
+        /** Re-aims the handle at a new rowid (after a row invalidation). @since 9.0.0 */
+        reopen(rowid: number): Promise<void>;
+        /** Re-aims the handle at a new rowid, callback form. */
+        reopen(
+            rowid: number,
+            callback: (this: Blob, err: SqliteError | null) => void,
+        ): this;
+        /** Closes the handle; a second close is a benign no-op. @since 9.0.0 */
+        close(): Promise<void>;
+        /** Closes the handle, callback form. */
+        close(callback: (this: Blob, err: SqliteError | null) => void): this;
+        /**
+         * Streams the blob's bytes as a binary Readable in chunks.
+         * @since 9.0.0
+         */
+        createReadStream(options?: { highWaterMark?: number }): Readable;
+        /**
+         * Streams into the blob at a moving offset. The blob cannot
+         * grow: size the column first (e.g. `zeroblob(n)`).
+         * @since 9.0.0
+         */
+        createWriteStream(options?: { highWaterMark?: number }): Writable;
+        /** `using` support: initiates an asynchronous close. @since 9.0.0 */
+        [Symbol.dispose](): void;
+        /** `await using` support: closes the handle. @since 9.0.0 */
         [Symbol.asyncDispose](): Promise<void>;
     }
 }

@@ -24,6 +24,12 @@ struct JsFunc;
 struct FunctionBaton;
 struct RemoveFunctionBaton;
 struct UserFunctionOps;
+struct SessionOps;
+class Session;
+class Blob;
+// One queued 'preupdate' event (Deliverable 08); defined in
+// src/session.h, which can see the Cell type from src/convert.h.
+struct PreupdateInfo;
 
 
 class Database : public Napi::ObjectWrap<Database> {
@@ -36,10 +42,18 @@ public:
     struct AuthRule {
         int action = -1;   // -1 matches any authorizer action
         int verdict;       // SQLITE_OK / SQLITE_DENY / SQLITE_IGNORE
-        std::string arg1;  // "" matches anything (table, index, column…)
-        std::string arg2;
+        std::string arg1;  // table, index, pragma name…
+        std::string arg2;  // column, new name…
         std::string database;
         std::string trigger;
+        // An unspecified field (null/undefined in the rule row) matches
+        // anything; an explicitly-passed empty string matches only an
+        // empty argument, which D07's wildcard-"" encoding could not
+        // express.
+        bool arg1_any = true;
+        bool arg2_any = true;
+        bool database_any = true;
+        bool trigger_any = true;
     };
     struct AuthPolicy {
         int default_decision = SQLITE_OK;
@@ -72,14 +86,25 @@ public:
                   // terminal for scheduling purposes
     };
 
+    // Per-environment constructor references. These must live in
+    // instance data rather than in file statics: node-addon-api deletes
+    // instance data at env teardown, while a static Napi::Reference is
+    // destroyed at process exit — after the env is gone — so its
+    // napi_delete_reference lands on a dead environment (a segfault at
+    // exit, seen on musl). Instance data is also per-env, which a static
+    // is not: two environments would otherwise share one constructor.
+    struct AddonData {
+        Napi::FunctionReference database_ctor;
+        Napi::FunctionReference changeset_iter_ctor;
+    };
+
     static inline bool HasInstance(Napi::Value val) {
         auto env = val.Env();
         Napi::HandleScope scope(env);
         if (!val.IsObject()) return false;
         auto obj = val.As<Napi::Object>();
-        auto constructor =
-            env.GetInstanceData<Napi::FunctionReference>();
-        return obj.InstanceOf(constructor->Value());
+        auto* data = env.GetInstanceData<AddonData>();
+        return obj.InstanceOf(data->database_ctor.Value());
     }
 
     struct Baton {
@@ -253,10 +278,14 @@ public:
     typedef Async<ProfileInfo, Database> AsyncProfile;
     typedef Async<UpdateInfo, Database> AsyncUpdate;
     typedef Async<WalInfo, Database> AsyncWal;
+    typedef Async<PreupdateInfo, Database> AsyncPreupdate;
 
     friend class Statement;
     friend class Backup;
+    friend class Session;
+    friend class Blob;
     friend struct UserFunctionOps;
+    friend struct SessionOps;
 
     // Marks that the JavaScript thread is itself inside a sqlite call on
     // this connection and therefore cannot service the ThreadSafeFunction
@@ -282,6 +311,11 @@ public:
         RemoveUserFunctions();
         RemoveAuthorizer();
         RemoveProgressHandler();
+        RemovePreupdateHook();
+        // owner_dying: this Database is mid-destruction, so the
+        // detaching objects must not call back into it.
+        CloseLiveSessions(true);
+        CloseLiveBlobs(true);
         sqlite3_close(_handle);
         _handle = NULL;
         db_state = DbState::Closed;
@@ -335,6 +369,9 @@ protected:
     // connection mutex is provably free. Definitions in statement.cc.
     static void Work_DeferredStatementFinalize(Baton* baton);
     static void Work_DeferredHandleFinalize(Baton* baton);
+    // Same deferral for a collected Session's native handle. Definition
+    // in src/session.cc.
+    static void Work_DeferredSessionDelete(Baton* baton);
 
     static void RegisterTraceCallback(Baton* baton);
     static void UpdateTraceMask(Database* db, sqlite3* handle);
@@ -385,6 +422,22 @@ protected:
         const char* arg2, const char* database, const char* trigger);
     void RemoveAuthorizer();
 
+    // --- Preupdate event (Deliverable 08). One preupdate hook slot
+    // exists per connection and is shared with the session extension:
+    // sqlite3session_create installs its own hook, displacing ours.
+    // Ownership is therefore exclusive — see the note in src/session.h —
+    // and enforced on the JS thread at pending == 0 in both directions.
+    // The trampoline materialises old/new rows eagerly (the
+    // sqlite3_preupdate_old/new values die with the callback) and defers
+    // the JS event through the shared channel; the JS-thread half
+    // converts with the connection's integer mode.
+    static void RegisterPreupdateCallback(Baton* baton);
+    static void PreupdateTrampoline(void* ctx, sqlite3* handle, int op,
+        const char* database, const char* table, sqlite3_int64 key1,
+        sqlite3_int64 key2);
+    static void PreupdateCallback(Database* db, PreupdateInfo* info);
+    void RemovePreupdateHook();
+
     // Progress handler: either an atomic flag inside a SharedArrayBuffer
     // (db.cancellationToken(); zero per-invocation cost, cancellable from
     // any thread) or a JS callback making the D06 blocking round trip
@@ -428,6 +481,36 @@ protected:
     static void Work_DbConfig(napi_env env, void* data);
     static void Work_AfterDbConfig(napi_env env, napi_status status, void* data);
 
+    // --- Changeset apply, serialize/deserialize and session/blob
+    // tracking (Deliverable 08). Definitions in src/session.cc and
+    // src/blob.cc. _applyChangeset runs on the worker pool like
+    // statement work (it is one big savepoint-wrapped write); the JS
+    // conflict/filter forms round-trip through a per-apply
+    // ThreadSafeFunction (js_apply_depth keeps MayBlockOnWorkerRoundTrip
+    // truthful while any are in flight). _serializeToBytes and
+    // _deserialize are exclusive: a snapshot must not interleave with
+    // writes, and deserialize replaces the schema image outright.
+    Napi::Value ApplyChangeset(const Napi::CallbackInfo& info);
+    static void Work_BeginApplyChangeset(Baton* baton);
+    static void Work_ApplyChangeset(napi_env env, void* data);
+    static void Work_AfterApplyChangeset(napi_env env, napi_status status, void* data);
+
+    Napi::Value SerializeToBytes(const Napi::CallbackInfo& info);
+    static void Work_BeginSerializeToBytes(Baton* baton);
+    static void Work_SerializeToBytes(napi_env env, void* data);
+    static void Work_AfterSerializeToBytes(napi_env env, napi_status status, void* data);
+
+    Napi::Value Deserialize(const Napi::CallbackInfo& info);
+    static void Work_BeginDeserialize(Baton* baton);
+    static void Work_Deserialize(napi_env env, void* data);
+    static void Work_AfterDeserialize(napi_env env, napi_status status, void* data);
+
+    // JS-thread, nothing in flight (Work_BeginClose / ~Database): delete
+    // every tracked session handle / close every tracked blob handle so
+    // sqlite3_close cannot leave them dangling. Both are idempotent.
+    void CloseLiveSessions(bool owner_dying = false);
+    void CloseLiveBlobs(bool owner_dying = false);
+
     // sqlite3_changes64 / sqlite3_total_changes64, subject to the
     // connection's integer mode.
     Napi::Value ChangesGetter(const Napi::CallbackInfo& info);
@@ -437,17 +520,19 @@ protected:
 
     // True when a main-thread sqlite call on this connection could block
     // on the connection mutex: a JS function, collation or progress
-    // callback is registered and statement work is in flight — a worker
-    // may be sitting inside a round trip holding that mutex while it
-    // waits for this very thread. Callers on the JS thread must defer
-    // their sqlite call (the exclusive queue runs it once nothing is in
-    // flight) instead of touching the handle. Without registered
-    // callbacks in-flight work never waits on the JS thread, so the mutex
+    // callback is registered and statement work is in flight, or a
+    // changeset apply carrying JS conflict/filter handlers is queued or
+    // in flight (the apply holds the connection mutex for its whole
+    // run, and its handlers block on this thread) — a worker may be
+    // sitting inside a round trip holding that mutex while it waits for
+    // this very thread. Callers on the JS thread must defer their sqlite
+    // call (the exclusive queue runs it once nothing is in flight)
+    // instead of touching the handle. Without registered callbacks in-flight work never waits on the JS thread, so the mutex
     // is only ever held briefly and blocking on it is fine — which is why
     // every pre-existing path is unchanged.
     bool MayBlockOnWorkerRoundTrip() {
         return (!(js_functions.empty() && js_collations.empty()
-                    && js_progress == NULL))
+                    && js_progress == NULL && js_apply_depth == 0))
             && pending > 0;
     }
 
@@ -545,6 +630,44 @@ protected:
     bool hook_commit = false;
     bool hook_rollback = false;
     AsyncWal* wal_event = NULL;
+
+    // --- Preupdate event and session/blob tracking (Deliverable 08) ---
+    //
+    // Lifetime answers (the checklist items these must settle):
+    //
+    //  - preupdate_event is an Async channel exactly like txn_event:
+    //    created by the exclusive registration handler, finished in
+    //    RemovePreupdateHook (Work_BeginClose, ~Database). The sqlite
+    //    hook is uninstalled before the channel is finished; a NULL
+    //    channel inside the trampoline means "drop the event" (removed /
+    //    closing), the same contract the update hook has.
+    //  - live_sessions / live_blobs are JS-thread-only registries of the
+    //    wrappers holding native handles. Population: session/blob
+    //    construction (before the handle exists, so the preupdate-slot
+    //    ownership check cannot miss one still being created) and blob
+    //    open-completion. Teardown: each object's close-completion, the
+    //    create/open failure paths, and CloseLiveSessions/CloseLiveBlobs
+    //    (Work_BeginClose, ~Database — main thread, pending == 0).
+    //    Disposing twice is a benign no-op (the handle is NULL the
+    //    second time); disposing after the database closed finds the
+    //    handle already NULL; and unlike the progress slot these
+    //    objects do not displace one another, so "disposed after
+    //    something else took its place" cannot occur.
+    //  - js_apply_depth counts the changeset applies with JS
+    //    conflict/filter handlers that are queued or in flight
+    //    (JS-thread writes: the entry point increments, the
+    //    after-handler decrements), and is read by
+    //    MayBlockOnWorkerRoundTrip. A count, not a flag: nothing
+    //    serialises applies, so two can overlap, and a flag cleared by
+    //    the first to finish would declare the connection safe while the
+    //    second still held the mutex inside sqlite3changeset_apply —
+    //    which is precisely the deadlock MayBlockOnWorkerRoundTrip
+    //    exists to prevent.
+    AsyncPreupdate* preupdate_event = NULL;
+    bool hook_preupdate = false;
+    std::vector<Session*> live_sessions;
+    std::vector<Blob*> live_blobs;
+    int js_apply_depth = 0;
 
     // --- Authorizer and progress handler (Deliverable 07) ---
     //

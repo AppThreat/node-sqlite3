@@ -484,6 +484,65 @@ export declare class Database extends EventEmitter {
         ) => void,
     ): this;
 
+    // Internal session/serialization entry points (Deliverable 08):
+    // option parsing and policy normalization live in the public
+    // wrappers in lib/sqlite3.js. `decision` is a CHANGESET_* constant
+    // used when no JS conflict handler is given; the handler functions
+    // make the blocking round trip from inside sqlite3changeset_apply.
+    // `flags` carries SQLITE_DESERIALIZE_RESIZEABLE / READONLY.
+
+    /**
+     * Applies a changeset.
+     *
+     * @internal
+     * @param changeset the changeset bytes.
+     * @param decision the CHANGESET_ABORT/OMIT/REPLACE default decision.
+     * @param onConflict the JS conflict handler, or null.
+     * @param onFilter the JS table filter, or null.
+     * @param callback called once the apply completed or rolled back.
+     * @returns this database, for chaining.
+     */
+    _applyChangeset(
+        changeset: ChangesetBytes,
+        decision: number,
+        onConflict:
+            | ((info: ChangesetConflict) => 'abort' | 'omit' | 'replace')
+            | null,
+        onFilter: ((table: string) => boolean) | null,
+        callback?: (this: Database, err: SqliteError | null) => void,
+    ): this;
+    /**
+     * Serializes the database to bytes.
+     *
+     * @internal
+     * @param database the attached database name.
+     * @param callback receives the bytes.
+     * @returns this database, for chaining.
+     */
+    _serializeToBytes(
+        database: string,
+        callback?: (
+            this: Database,
+            err: SqliteError | null,
+            bytes: Uint8Array,
+        ) => void,
+    ): this;
+    /**
+     * Installs serialized bytes as this connection's `main` schema.
+     *
+     * @internal
+     * @param bytes the serialized database (copied into SQLite-owned
+     *   memory; see deserializeFromBytes).
+     * @param flags SQLITE_DESERIALIZE_RESIZEABLE / READONLY bits.
+     * @param callback called once the image is installed and validated.
+     * @returns this database, for chaining.
+     */
+    _deserialize(
+        bytes: ChangesetBytes,
+        flags: number,
+        callback?: (this: Database, err: SqliteError | null) => void,
+    ): this;
+
     /**
      * Rows changed by the most recent statement on this connection
      * (`sqlite3_changes64`), subject to the integer mode.
@@ -693,6 +752,276 @@ export interface ColumnMetadata {
     table?: string;
     /** The column's original name (before an alias). */
     origin?: string;
+}
+
+// ---- Sessions, changesets, serialization and blob I/O (Deliverable 08)
+
+/**
+ * Binary input the changeset/serialization APIs accept.
+ *
+ * @since 9.0.0
+ */
+export type ChangesetBytes = Uint8Array | ArrayBuffer | DataView;
+
+/**
+ * Options for `Database#session`.
+ *
+ * @since 9.0.0
+ */
+export type SessionOptions = {
+    /** The attached database to record (default `'main'`). */
+    db?: string;
+    /** Record only this table; omit to record every table with a primary key. */
+    table?: string;
+    /**
+     * Mark the recorded changes indirect (sqlite3session_indirect): the
+     * changeset consumer decides whether to apply indirect changes.
+     */
+    indirect?: boolean;
+};
+
+/**
+ * One change reported by a changeset iterator
+ * (`sqlite3.iterateChangeset`). `oldRow`/`newRow` are plain value arrays
+ * (integer mode `mixed`: numbers when safe, BigInt otherwise); an
+ * UPDATE's arrays carry `null` in the positions sqlite left unset (only
+ * primary-key and modified columns are stored).
+ *
+ * @since 9.0.0
+ */
+export interface ChangesetOp {
+    /** `'insert'`, `'update'` or `'delete'`. */
+    op: 'insert' | 'update' | 'delete';
+    /** The table the change was recorded on. */
+    table: string;
+    /** Whether the change was marked indirect. */
+    indirect: boolean;
+    /** Which columns (by position) are primary keys. */
+    primaryKey: boolean[];
+    /** The pre-change row, for update/delete changes. */
+    oldRow?: unknown[];
+    /** The post-change row, for insert/update changes. */
+    newRow?: unknown[];
+}
+
+/**
+ * The conflict description handed to a `Database#applyChangeset` conflict
+ * handler. `conflictRow` is the existing database row for `'data'` and
+ * `'conflict'` conflicts; `oldRow`/`newRow` carry the change itself.
+ *
+ * @since 9.0.0
+ */
+export interface ChangesetConflict {
+    /** `'insert'`, `'update'` or `'delete'`. */
+    op: 'insert' | 'update' | 'delete';
+    /** The table the conflicting change targets. */
+    table: string;
+    /**
+     * Why the handler fired: `'data'` (row changed underneath),
+     * `'notFound'` (row gone), `'conflict'` (insert hits an existing
+     * key), `'constraint'` or `'foreignKey'`.
+     */
+    conflict: 'data' | 'notFound' | 'conflict' | 'constraint' | 'foreignKey';
+    /** The table's column count at record time. */
+    columnCount: number;
+    /** Which columns (by position) are primary keys. */
+    primaryKey: boolean[];
+    /** The existing row, for `'data'`/`'conflict'` conflicts. */
+    conflictRow?: unknown[];
+    /** The change's pre-change row, for update/delete changes. */
+    oldRow?: unknown[];
+    /** The change's post-change row, for insert/update changes. */
+    newRow?: unknown[];
+}
+
+/**
+ * Options for `Database#applyChangeset`.
+ *
+ * @since 9.0.0
+ */
+export interface ApplyChangesetOptions {
+    /**
+     * The conflict policy: `'abort'` (default) rolls the whole apply
+     * back, `'omit'` skips the conflicting change, `'replace'` overwrites
+     * the conflicting row, or a function returning one of those decisions
+     * per conflict (a blocking round trip; avoid the synchronous methods
+     * on the connection from inside it).
+     */
+    conflict?:
+        | 'abort'
+        | 'omit'
+        | 'replace'
+        | ((info: ChangesetConflict) => 'abort' | 'omit' | 'replace');
+    /** Alias of `conflict`. */
+    onConflict?: ApplyChangesetOptions['conflict'];
+    /** Receives each affected table name; return false to skip it. */
+    filter?: (table: string) => boolean;
+}
+
+/**
+ * Options for `sqlite3.deserializeFromBytes`.
+ *
+ * @since 9.0.0
+ */
+export type DeserializeOptions = {
+    /** The deserialized database rejects writes (`SQLITE_READONLY`). */
+    readOnly?: boolean;
+    /** Let SQLite grow the buffer when the database outgrows the copy. */
+    resizable?: boolean;
+};
+
+/**
+ * Options for `Database#openBlob`.
+ *
+ * @since 9.0.0
+ */
+export type OpenBlobOptions = {
+    /** The table holding the blob column. */
+    table: string;
+    /** The blob column's name. */
+    column: string;
+    /** The row's rowid. */
+    rowid: number;
+    /** The attached database (default `'main'`). */
+    db?: string;
+    /** Open read-only; writes then fail with `SQLITE_READONLY`. */
+    readOnly?: boolean;
+};
+
+/**
+ * The payload of a `'preupdate'` event: what the row looked like before
+ * and after each write. `oldRow` is null for inserts, `newRow` null for
+ * deletes; `oldRowid`/`rowid` differ exactly on a rowid-changing update.
+ * Note that `sqlite3_blob_write` fires the hook as a delete (the new
+ * values are not yet available there).
+ *
+ * @since 9.0.0
+ */
+export interface PreupdateEventInfo {
+    /** `'insert'`, `'update'` or `'delete'`. */
+    op: 'insert' | 'update' | 'delete';
+    /** The attached database name. */
+    database: string;
+    /** The table. */
+    table: string;
+    /** The rowid being inserted/deleted/updated (null on insert). */
+    oldRowid: number | bigint | null;
+    /** The rowid after the change (the new rowid on a rowid-changing update). */
+    rowid: number | bigint;
+    /** The pre-change row values, or null on insert. */
+    oldRow: unknown[] | null;
+    /** The post-change row values, or null on delete. */
+    newRow: unknown[] | null;
+}
+
+/**
+ * A change-recording session, created with `db.session()`. Records
+ * INSERT/UPDATE/DELETE on the attached tables until
+ * `changeset()` harvests the changes or the session is closed.
+ *
+ * One preupdate hook exists per connection and is shared with the
+ * `'preupdate'` event: a session and a `'preupdate'` listener cannot
+ * coexist on one connection, and attempting it fails loudly in both
+ * directions.
+ */
+export declare class Session extends EventEmitter {
+    /**
+     * Creates a session. Prefer `db.session()`, which validates options.
+     *
+     * @param database the connection to record changes on.
+     * @param dbName the attached database (usually `'main'`).
+     * @param table the table to record, or `''` for every table with a
+     *   primary key.
+     * @param indirect mark the recorded changes indirect.
+     * @param callback called once recording started.
+     * @throws {TypeError} Unless called with `new` and these arguments,
+     *   or when a 'preupdate' listener is registered on the connection.
+     */
+    constructor(
+        database: Database,
+        dbName: string,
+        table: string,
+        indirect: boolean,
+        callback?: (this: Session, err: SqliteError | null) => void,
+    );
+
+    /** The attached database name this session records. */
+    readonly db: string;
+
+    /** The table this session records (`''` = every table). */
+    readonly table: string;
+
+    /** Whether the recorded changes are marked indirect. */
+    readonly indirect: boolean;
+
+    /** True once closed — explicitly, by `db.close()`, or after a failed create. */
+    readonly closed: boolean;
+}
+
+/**
+ * An incremental blob handle, created with `db.openBlob()`. Reads and
+ * writes the blob in place, chunk by chunk, without materialising the
+ * whole value.
+ */
+export declare class Blob extends EventEmitter {
+    /**
+     * Opens a blob handle. Prefer `db.openBlob()`, which validates
+     * options.
+     *
+     * @param database the connection.
+     * @param dbName the attached database (usually `'main'`).
+     * @param table the table holding the blob column.
+     * @param column the blob column.
+     * @param rowid the row.
+     * @param readOnly open read-only.
+     * @param callback called once the handle is open.
+     * @throws {TypeError} Unless called with `new` and these arguments.
+     */
+    constructor(
+        database: Database,
+        dbName: string,
+        table: string,
+        column: string,
+        rowid: number,
+        readOnly: boolean,
+        callback?: (this: Blob, err: SqliteError | null) => void,
+    );
+
+    /** The attached database name the handle was opened on. */
+    readonly db: string;
+
+    /** The table. */
+    readonly table: string;
+
+    /** The blob column. */
+    readonly column: string;
+
+    /** The rowid the handle was opened on (before any `reopen`). */
+    readonly rowid: number;
+
+    /** Whether the handle is read-only. */
+    readonly readOnly: boolean;
+
+    /** The blob's size in bytes (`sqlite3_blob_bytes`). */
+    readonly size: number;
+
+    /** True once closed — explicitly or by `db.close()`. */
+    readonly closed: boolean;
+}
+
+/**
+ * The iterator `sqlite3.iterateChangeset` returns: sync-re iterable over
+ * the recorded changes.
+ *
+ * @since 9.0.0
+ */
+export interface ChangesetIterable extends Iterable<ChangesetOp> {
+    /**
+     * Advances to the next change.
+     *
+     * @returns The next change, or `{done: true}`.
+     */
+    next(): IteratorResult<ChangesetOp>;
 }
 
 /**
@@ -956,6 +1285,43 @@ declare const binding: {
     /** The Backup class constructor. */
     Backup: typeof Backup;
 
+    /** The Session class constructor (create via `db.session()`). @since 9.0.0 */
+    Session: typeof Session;
+
+    /** The Blob class constructor (create via `db.openBlob()`). @since 9.0.0 */
+    Blob: typeof Blob;
+
+    /**
+     * Inverts a changeset: applying the result undoes applying the input.
+     * Synchronous and connection-free; throws on a malformed changeset.
+     *
+     * @param changeset the changeset bytes.
+     * @returns the inverted changeset.
+     * @since 9.0.0
+     */
+    invertChangeset(changeset: ChangesetBytes): Uint8Array;
+
+    /**
+     * Concatenates two changesets into one equivalent to applying both in
+     * order. Synchronous and connection-free; throws on malformed input.
+     *
+     * @param a the first changeset.
+     * @param b the changeset applied after `a`.
+     * @returns the combined changeset.
+     * @since 9.0.0
+     */
+    concatChangeset(a: ChangesetBytes, b: ChangesetBytes): Uint8Array;
+
+    /**
+     * Iterates a changeset's changes synchronously (`for (const op of …)`).
+     * Walks a private copy of the bytes; throws on a malformed changeset.
+     *
+     * @param changeset the changeset bytes.
+     * @returns an iterator over the recorded changes.
+     * @since 9.0.0
+     */
+    iterateChangeset(changeset: ChangesetBytes): ChangesetIterable;
+
     // Open flags for the `mode` argument of `new Database(filename, mode)`.
     /** Open flag: open the database for reading only. */ readonly OPEN_READONLY: 1;
     /** Open flag: open the database for reading and writing. */ readonly OPEN_READWRITE: 2;
@@ -1157,6 +1523,17 @@ declare const binding: {
     /** Checkpoint mode: wait for writers, checkpoint everything. @since 9.0.0 */ readonly CHECKPOINT_FULL: 1;
     /** Checkpoint mode: full, then wait for readers to restart the WAL. @since 9.0.0 */ readonly CHECKPOINT_RESTART: 2;
     /** Checkpoint mode: restart, then truncate the WAL file. @since 9.0.0 */ readonly CHECKPOINT_TRUNCATE: 3;
+
+    // Changeset decisions (what a conflict handler answers) and conflict
+    // codes (why it was asked), for `Database#applyChangeset`. @since 9.0.0
+    /** Conflict decision: skip the conflicting change. @since 9.0.0 */ readonly CHANGESET_OMIT: 0;
+    /** Conflict decision: overwrite the conflicting row. @since 9.0.0 */ readonly CHANGESET_REPLACE: 1;
+    /** Conflict decision: roll the whole apply back (the default). @since 9.0.0 */ readonly CHANGESET_ABORT: 2;
+    /** Conflict code: the row changed since the changeset was recorded. @since 9.0.0 */ readonly CHANGESET_DATA: 1;
+    /** Conflict code: the row no longer exists. @since 9.0.0 */ readonly CHANGESET_NOTFOUND: 2;
+    /** Conflict code: an insert hit an existing primary key. @since 9.0.0 */ readonly CHANGESET_CONFLICT: 3;
+    /** Conflict code: a non-key constraint failed. @since 9.0.0 */ readonly CHANGESET_CONSTRAINT: 4;
+    /** Conflict code: the apply would violate a foreign key. @since 9.0.0 */ readonly CHANGESET_FOREIGN_KEY: 5;
 };
 
 /**

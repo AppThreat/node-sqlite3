@@ -30,17 +30,18 @@ export type CachedRegistry = {
 };
 /**
  * The public `sqlite3` namespace object the package exports as its
- * default: the native binding (the three classes and every SQLite
+ * default: the native binding (the five classes and every SQLite
  * constant with its literal value) plus the JS-layer `verbose`,
- * `cached` and `open`.
+ * `cached`, `open` and `deserializeFromBytes`.
  */
 export type sqlite3 = import("./sqlite3-binding.js").NativeBinding & {
     verbose: () => sqlite3;
     cached: CachedRegistry;
     open: import("./promises.js").OpenFunction;
+    deserializeFromBytes: (bytes: Uint8Array | ArrayBuffer | DataView, options?: import("./native.js").DeserializeOptions) => Promise<import("./sqlite3-binding.js").Database>;
 };
 declare const sqlite3: sqlite3;
-export { Backup, Database, Statement } from "./sqlite3-binding.js";
+export { Backup, Blob, Database, Session, Statement } from "./sqlite3-binding.js";
 import './augment.js';
 export type {
     FetchCallback,
@@ -51,21 +52,30 @@ export type {
 } from './promises.js';
 export type {
     AggregateDefinition,
+    ApplyChangesetOptions,
     AuthorizerPolicy,
     AuthorizerRule,
     BindParams,
     BindValue,
     CancellationToken,
+    ChangesetBytes,
+    ChangesetConflict,
+    ChangesetIterable,
+    ChangesetOp,
     CheckpointMode,
     CheckpointOptions,
     CheckpointResult,
     ColumnMetadata,
     DatabaseState,
+    DeserializeOptions,
     FunctionOptions,
     IntegerMode,
     NativeBinding,
+    OpenBlobOptions,
+    PreupdateEventInfo,
     Row,
     RunResult,
+    SessionOptions,
     SqliteError,
     StatementRunSyncResult,
     TableColumnInfo,

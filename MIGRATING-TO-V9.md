@@ -254,6 +254,42 @@ delivers the error to its completion handler — or, if it was called
 without one, to its row callback; it is never handed to both, and the row
 callback is never invoked with a row-shaped call it has no row for.
 
+## New surfaces: sessions, snapshots and blob handles
+
+Everything here is additive; no v8 behaviour changed to make room.
+
+- `db.session(options?)` records changes and harvests them as
+  `session.changeset()`/`patchset()` (`Uint8Array`); `db.applyChangeset(
+  bytes, { conflict, filter })` replays them inside one savepoint, and
+  `sqlite3.invertChangeset`/`concatChangeset`/`iterateChangeset` work on
+  any changeset bytes. A session and a `'preupdate'` listener cannot
+  coexist on one connection (SQLite has one preupdate hook); both
+  directions fail loudly.
+- The `'preupdate'` event carries `{ op, database, table, rowid,
+  oldRowid, oldRow, newRow }` — the old row values the `'change'` event
+  has never been able to give you.
+- `db.serializeToBytes(dbName?)` is a `Uint8Array` snapshot of the
+  database. The name is deliberate: `db.serialize()` still means "run
+  these statements in FIFO order". `sqlite3.deserializeFromBytes(bytes,
+  { readonly, resizable })` builds a fresh connection from bytes
+  (copied; corrupt input rejects with `SQLITE_NOTADB`).
+- `db.openBlob({ table, column, rowid, readOnly? })` returns a handle
+  with `read`/`write` at offsets, `size`, `reopen(rowid)`,
+  `close()`, `createReadStream()` and `createWriteStream()`. Any write
+  to the row invalidates open handles (`SQLITE_ABORT`, with a message
+  saying so).
+- `Session` and `Blob` are exported alongside `Database`, `Statement`
+  and `Backup`, and both support `using`/`await using` disposal. A
+  session or blob left open is closed by `db.close()`; closing twice is
+  a benign no-op.
+- Changeset constants (`CHANGESET_OMIT/REPLACE/ABORT`, the
+  `CHANGESET_DATA/…/FOREIGN_KEY` conflict codes) live on the namespace
+  like the other SQLite constants.
+- The declarative authorizer now distinguishes an explicitly-passed
+  empty-string rule field (matches only an empty argument) from an
+  omitted one (matches anything); previously the empty-string target
+  was unexpressible.
+
 ## Minor notes
 
 - `Date` still binds as epoch milliseconds (REAL) and reads back as a

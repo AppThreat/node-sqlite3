@@ -49,10 +49,12 @@
       ],
       "sources": [
         "src/backup.cc",
+        "src/blob.cc",
         "src/convert.cc",
         "src/database.cc",
         "src/function.cc",
         "src/node_sqlite3.cc",
+        "src/session.cc",
         "src/statement.cc"
       ],
       "defines": [ "NAPI_VERSION=<(napi_build_version)", "NAPI_DISABLE_CPP_EXCEPTIONS=1" ]

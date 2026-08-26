@@ -433,6 +433,105 @@ rather than nulled. Integer modes apply to `changes`/`totalChanges` as
 everywhere else. `tableInfo` runs a `PRAGMA table_info`, so a
 deny-by-default authorizer must allow `sqlite3.PRAGMA`.
 
+## Sessions, changesets and the preupdate event (v9)
+
+A session records every INSERT, UPDATE and DELETE made through the
+connection (tables need a primary key to be recordable), and harvests
+them as a changeset — a `Uint8Array` you can store, ship, or apply to
+another connection:
+
+```js
+const session = db.session({ table: 'users' });   // or every table
+await db.run('UPDATE users SET name = ? WHERE id = ?', 'x', 1);
+const changeset = await session.changeset();      // Uint8Array
+const patchset = await session.patchset();        // new rows only, smaller
+await session.close();
+
+await target.applyChangeset(changeset, { conflict: 'replace' });
+await target.applyChangeset(changeset, {
+    // the fully general form — runs per conflict:
+    conflict: (info) => (info.conflict === 'notFound' ? 'omit' : 'replace'),
+    filter: (table) => table !== 'audit',
+});
+
+for (const op of sqlite3.iterateChangeset(changeset)) {
+    console.log(op.op, op.table, op.oldRow, op.newRow);
+}
+const inverse = sqlite3.invertChangeset(changeset); // undoes the apply
+const both = sqlite3.concatChangeset(a, b);         // a then b
+```
+
+`applyChangeset` wraps the apply in one savepoint: either every change
+lands or the whole apply rolls back. `conflict` decides what happens on
+a collision — `'abort'` (the default) rolls back, `'omit'` skips the
+change, `'replace'` overwrites the row — or a function returning one of
+those per conflict. The function form is a blocking round trip from the
+applying thread (like a user-defined JS function), so it must not use
+the synchronous methods on that connection.
+
+The `'preupdate'` event fires for every write with the row's before and
+after values — the old values `change` events cannot give you:
+
+```js
+db.on('preupdate', ({ op, table, rowid, oldRowid, oldRow, newRow }) => {
+    audit.log(op, table, oldRow, newRow);
+});
+```
+
+`oldRowid` and `rowid` differ exactly on a rowid-changing update.
+One preupdate hook exists per connection and is shared with the session
+machinery, so a session and a `'preupdate'` listener cannot coexist on
+one connection — attempting either direction fails loudly instead of
+silently stopping the other.
+
+## In-memory snapshots: serializeToBytes / deserializeFromBytes (v9)
+
+The whole database as bytes — snapshotting, shipping a prebuilt
+database, fast fixtures, moving a database between threads:
+
+```js
+const bytes = await db.serializeToBytes();        // Uint8Array snapshot
+const copy = await sqlite3.deserializeFromBytes(bytes, {
+    readonly: false,
+    resizable: true,
+});
+```
+
+`serializeToBytes` returns the exact bytes a file copy would contain
+(the FIFO-ordering `db.serialize()` keeps its old meaning). The bytes
+are named deliberately: overloading `serialize()` would be the worst
+API decision available. `deserializeFromBytes` **copies** into
+SQLite-owned memory — handing a JS buffer to SQLite directly is a
+use-after-free waiting to happen — and rejects corrupt input with
+`SQLITE_NOTADB` rather than crashing later.
+
+## Incremental blob I/O (v9)
+
+Reading a 500 MB blob as one value materialises it as a single buffer;
+`openBlob` gives you a handle that streams it instead:
+
+```js
+const blob = await db.openBlob({ table: 'files', column: 'data', rowid: 1 });
+const chunk = new Uint8Array(65536);
+const n = await blob.read(chunk, 0);       // n bytes at blob offset 0
+await blob.write(source, 4096);            // write at an offset
+blob.size;                                 // sqlite3_blob_bytes
+
+await pipeline(blob.createReadStream(), fs.createWriteSink(path));
+await pipeline(fs.createReadStream(path), blob.createWriteStream());
+await blob.close();
+```
+
+Streams read and write in chunks (default 64 KiB), so memory stays flat
+regardless of the blob's size. Any write to the row invalidates open
+handles with `SQLITE_ABORT` (and a message saying so); an aborted handle
+cannot be reopened — close and open a fresh one — while `blob.reopen(
+rowid)` cheaply re-aims a *healthy* handle at another row. The blob
+cannot grow through the handle: size the column first (e.g.
+`UPDATE ... SET data = zeroblob(n)`) and then stream into it. Writing
+through a blob handle surfaces as a `'preupdate'` delete event (the new
+values are not yet available inside `sqlite3_blob_write`).
+
 ## Source install
 
 To skip searching for pre-compiled binaries, and force a build from source, use

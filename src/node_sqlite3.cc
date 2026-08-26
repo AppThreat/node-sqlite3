@@ -8,6 +8,8 @@
 #include "database.h"
 #include "statement.h"
 #include "backup.h"
+#include "session.h"
+#include "blob.h"
 
 using namespace node_sqlite3;
 
@@ -19,6 +21,16 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
     Database::Init(env, exports);
     Statement::Init(env, exports);
     Backup::Init(env, exports);
+    Session::Init(env, exports);
+    ChangesetIter::Init(env, exports);
+    Blob::Init(env, exports);
+
+    exports.Set("invertChangeset",
+        Napi::Function::New(env, InvertChangeset));
+    exports.Set("concatChangeset",
+        Napi::Function::New(env, ConcatChangeset));
+    exports.Set("iterateChangeset",
+        Napi::Function::New(env, IterateChangeset));
 
     exports.DefineProperties({
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_READONLY, OPEN_READONLY)
@@ -222,6 +234,18 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHECKPOINT_FULL, CHECKPOINT_FULL)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHECKPOINT_RESTART, CHECKPOINT_RESTART)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHECKPOINT_TRUNCATE, CHECKPOINT_TRUNCATE)
+
+        // Changeset conflict-handler decisions (Deliverable 08): what
+        // db.applyChangeset does when a change cannot be applied. The
+        // conflict codes below describe why the handler fired.
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_OMIT, CHANGESET_OMIT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_REPLACE, CHANGESET_REPLACE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_ABORT, CHANGESET_ABORT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_DATA, CHANGESET_DATA)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_NOTFOUND, CHANGESET_NOTFOUND)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_CONFLICT, CHANGESET_CONFLICT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_CONSTRAINT, CHANGESET_CONSTRAINT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_FOREIGN_KEY, CHANGESET_FOREIGN_KEY)
     });
 
     return exports;
