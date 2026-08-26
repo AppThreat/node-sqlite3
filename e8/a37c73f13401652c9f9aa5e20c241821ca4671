@@ -1,0 +1,27 @@
+deps/sqlite3.gyp
+  s_e274b9ff27fe7b::t_80ee5db49769fc 82-87,107-108
+src/database.h
+  s_e274b9ff27fe7b::t_4ea5a1996484c2 7,10,33-51,139-209,226-233,236-241,255,283-284,351-435,439-447,449-450,498-504,540-577
+src/function.h
+  s_e274b9ff27fe7b::t_bfb0e2749e4a5d 82
+src/node_sqlite3.cc
+  s_e274b9ff27fe7b::t_e4cbe1ded76e3d 160-224
+src/statement.cc
+  s_e274b9ff27fe7b::t_740e9e9ab0fc19 69-77,191-206,221-223,269-271,1267-1271,1273-1279,1470-1612
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e8a37c73f13401652c9f9aa5e20c241821ca4671",
+  "prompts": {},
+  "sessions": {
+    "s_e274b9ff27fe7b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8067528-3215-4987-8ddf-7379117b2c68",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
