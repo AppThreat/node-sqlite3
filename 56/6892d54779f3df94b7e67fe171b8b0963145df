@@ -1,0 +1,41 @@
+lib/sqlite3.js
+  s_1246da50fbe044::t_7907a15670819e 1015-1023,1035-1037
+  s_1246da50fbe044::t_08cd241987823d 1088-1091,1100
+  s_1246da50fbe044::t_1096c6aa98ffca 1007-1008
+  s_1246da50fbe044::t_886958e330be77 995
+  s_1246da50fbe044::t_d49828c59acc6d 1038
+src/statement.cc
+  s_1246da50fbe044::t_a305062a04b8d9 222-223,225
+  s_1246da50fbe044::t_b0f8c432f07823 1512,1514-1524,1529,1534,1540-1541,1544,1546,1554
+  s_1246da50fbe044::t_32a1c7759e4064 1480-1482,1484-1485,1487-1489,1491,1495
+  s_1246da50fbe044::t_78573d987c4d65 335-337
+  s_1246da50fbe044::t_0c68f0440124bb 1556,1558,1562,1564,1566-1568,1570-1571,1573-1574
+src/statement.h
+  s_1246da50fbe044::t_e17291fa52e221 387-392
+  s_1246da50fbe044::t_c05dadbf6f6aac 277-293,301-306,308
+test/introspection.test.js
+  s_1246da50fbe044::t_5fb6ea643595d3 132-138,140-141,149,152-155,157-159
+  s_1246da50fbe044::t_a788038644f3bf 142-148,150-151,156
+lib/native.d.ts
+  s_1246da50fbe044::t_d34cf9790edc39 621-628
+test/progress.test.js
+  s_1246da50fbe044::t_77940acbaed875 245-287
+  s_1246da50fbe044::t_b67e1ab28bf057 129-134
+  s_1246da50fbe044::t_ab0f06c4250164 18-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "566892d54779f3df94b7e67fe171b8b0963145df",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
