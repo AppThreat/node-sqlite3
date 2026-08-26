@@ -1,0 +1,50 @@
+src/blob.cc
+  s_1246da50fbe044::t_b6affbf02aae2d 723-725,731-735
+  s_1246da50fbe044::t_bcc89cf9738458 388-402
+  s_1246da50fbe044::t_c725830831043e 719-722,726-730
+  s_1246da50fbe044::t_f780c4751f7851 338-339,370-381,405,410
+  s_1246da50fbe044::t_2292d249fc9db6 403-404
+src/session.cc
+  s_1246da50fbe044::t_bcc89cf9738458 843-845
+  s_1246da50fbe044::t_1ecff3e5cf2d1f 175,1105,1126,1176-1177
+  s_1246da50fbe044::t_2dba61cdb37298 1511-1512,1640-1641
+  s_1246da50fbe044::t_62010bab23ddcc 810-811,831-836,1006,1014
+src/blob.h
+  s_1246da50fbe044::t_f780c4751f7851 126
+src/session.h
+  s_1246da50fbe044::t_62010bab23ddcc 140
+test/blob_io.test.js
+  s_1246da50fbe044::t_15122176114be4 202-218
+src/database.h
+  s_1246da50fbe044::t_169ed3b0e43e32 656-665,670
+  s_1246da50fbe044::t_1ecff3e5cf2d1f 489-490,535
+  s_1246da50fbe044::t_2dba61cdb37298 89-100,106-107
+  s_1246da50fbe044::t_62010bab23ddcc 315-318,511-512
+test/support/teardown_exit_child.mjs
+  s_1246da50fbe044::t_0c08f4c56ab228 4-9,16-17
+  s_1246da50fbe044::t_9fdbfb8255e772 24-31,33,36-37
+  s_1246da50fbe044::t_1cafdc76a02aa0 1-3,10-15,18-23,32,34-35
+test/session.test.js
+  s_1246da50fbe044::t_326686052ae10c 6,8,483-512
+  s_1246da50fbe044::t_e96b2026a0ee3e 201-219,224-262,513
+  s_1246da50fbe044::t_0858a10ad3bf54 220-223
+  s_1246da50fbe044::t_376f5eaf3220e5 514-515
+src/database.cc
+  s_1246da50fbe044::t_2dba61cdb37298 65,68-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "866e2fc55b1a744a5b57fb70318fe864ef2e6067",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
