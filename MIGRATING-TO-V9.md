@@ -52,6 +52,26 @@ run to completion; its result is dropped. The signal listener is removed
 when the call settles, so one long-lived signal does not accumulate
 listeners.
 
+## User-defined functions, aggregates, window functions and collations (new)
+
+`db.function()`, `db.aggregate()`, `db.collation()`, `db.removeFunction()`
+and `db.removeCollation()` are new — there is nothing to migrate. Two
+restrictions they bring are behavioural and worth knowing up front:
+
+- A JS function invoked from a **synchronous method**
+  (`getSync`/`runSync`/`allSync`/`prepareSync`) fails with an explicit
+  `SQLITE_ERROR` explaining the deadlock it refused to attempt, instead
+  of hanging. The synchronous methods keep working for statements that
+  never reach a JS function.
+- While a JS **collation** is registered, the synchronous methods throw
+  until `removeCollation()` is called: a collation callback cannot report
+  an error mid-comparison, so refusing up front is the only sound
+  behaviour.
+
+Also new: each round trip to JS costs ~18 µs (measured; see the README's
+"User-defined functions" section for the full cost table), and every
+registration, replacement or removal flushes the statement cache.
+
 ## `map()` single-column results are rows, not `undefined`
 
 `db.map('SELECT id FROM t')` used to build `{ id: undefined }` (the

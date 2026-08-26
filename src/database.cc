@@ -22,6 +22,14 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("configure", &Database::Configure, napi_default_method),
         InstanceMethod("interrupt", &Database::Interrupt, napi_default_method),
         InstanceMethod("_queueBusy", &Database::QueueBusy, napi_default_method),
+        // User-defined functions (Deliverable 06): internal entry points
+        // wrapped by lib/sqlite3.js, which parses options and flushes the
+        // statement cache.
+        InstanceMethod("_registerFunction", &Database::RegisterUserFunction, napi_default_method),
+        InstanceMethod("_registerAggregate", &Database::RegisterUserAggregate, napi_default_method),
+        InstanceMethod("_registerCollation", &Database::RegisterUserCollation, napi_default_method),
+        InstanceMethod("_removeFunction", &Database::RemoveUserFunction, napi_default_method),
+        InstanceMethod("_removeCollation", &Database::RemoveUserCollation, napi_default_method),
         InstanceAccessor("open", &Database::Open, nullptr),
         InstanceAccessor("integerMode", &Database::IntegerModeGetter, nullptr),
         InstanceAccessor("state", &Database::StateGetter, nullptr),
@@ -305,6 +313,12 @@ void Database::Work_BeginClose(Baton* baton) {
 
     baton->db->pending++;
     baton->db->RemoveCallbacks();
+    // Registered JS functions must not survive to sqlite3_close: they
+    // capture this Database and fire from whatever thread touches the
+    // handle. Main-thread here, with nothing in flight — the same
+    // conditions RemoveCallbacks relies on for the hooks.
+    baton->db->RemoveUserFunctions();
+    baton->db->ReleaseJsChannelIfIdle();
     baton->db->db_state = DbState::Closing;
 
     auto env = baton->db->Env();
@@ -507,19 +521,36 @@ Napi::Value Database::Interrupt(const Napi::CallbackInfo& info) {
 void Database::SetBusyTimeout(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
 
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(SetBusyTimeout, baton.release(), true);
+        return;
+    }
+
     assert(baton->db->IsOpen());
     assert(baton->db->_handle);
 
     sqlite3_busy_timeout(baton->db->_handle, baton->timeout);
+
+    // Exclusive when deferred: hand the database back.
+    baton->db->exclusiveHeld = false;
+    baton->db->Process();
 }
 
 void Database::SetLimit(Baton* b) {
     std::unique_ptr<LimitBaton> baton(static_cast<LimitBaton*>(b));
 
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(SetLimit, baton.release(), true);
+        return;
+    }
+
     assert(baton->db->IsOpen());
     assert(baton->db->_handle);
 
     sqlite3_limit(baton->db->_handle, baton->id, baton->value);
+
+    baton->db->exclusiveHeld = false;
+    baton->db->Process();
 }
 
 // Recompute the sqlite3_trace_v2 mask from the registered JS hooks and
@@ -538,8 +569,15 @@ void Database::UpdateTraceMask(Database* db, sqlite3* handle) {
 
 void Database::RegisterTraceCallback(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(RegisterTraceCallback, baton.release(), true);
+        return;
+    }
     assert(baton->db->IsOpen());
     assert(baton->db->_handle);
+    // Nothing in flight: the deferral above guarantees it, and the sqlite
+    // call below would otherwise race a worker for the connection mutex.
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
     auto* db = baton->db;
 
     if (db->debug_trace == NULL) {
@@ -552,6 +590,14 @@ void Database::RegisterTraceCallback(Baton* b) {
         db->debug_trace = NULL;
     }
     UpdateTraceMask(db, db->_handle);
+
+    // Only now: Process() dispatches queued statement work, and the moment
+    // it does a worker may be inside a round trip holding the connection
+    // mutex that sqlite3_trace_v2 above needs. Releasing first would put
+    // this thread back in exactly the deadlock the deferral above exists
+    // to avoid.
+    db->exclusiveHeld = false;
+    db->Process();
 }
 
 // Note: This function is called in the sqlite worker thread.
@@ -592,8 +638,15 @@ void Database::TraceCallback(Database* db, std::string* s) {
 
 void Database::RegisterProfileCallback(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(RegisterProfileCallback, baton.release(), true);
+        return;
+    }
     assert(baton->db->IsOpen());
     assert(baton->db->_handle);
+    // Nothing in flight: the deferral above guarantees it, and the sqlite
+    // call below would otherwise race a worker for the connection mutex.
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
     auto* db = baton->db;
 
     if (db->debug_profile == NULL) {
@@ -606,6 +659,10 @@ void Database::RegisterProfileCallback(Baton* b) {
         db->debug_profile = NULL;
     }
     UpdateTraceMask(db, db->_handle);
+
+    // Release only after the sqlite call; see RegisterTraceCallback.
+    db->exclusiveHeld = false;
+    db->Process();
 }
 
 void Database::ProfileCallback(Database *db, ProfileInfo* i) {
@@ -623,8 +680,15 @@ void Database::ProfileCallback(Database *db, ProfileInfo* i) {
 
 void Database::RegisterUpdateCallback(Baton* b) {
     auto baton = std::unique_ptr<Baton>(b);
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(RegisterUpdateCallback, baton.release(), true);
+        return;
+    }
     assert(baton->db->IsOpen());
     assert(baton->db->_handle);
+    // Nothing in flight: the deferral above guarantees it, and the sqlite
+    // call below would otherwise race a worker for the connection mutex.
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
     auto* db = baton->db;
 
     if (db->update_event == NULL) {
@@ -638,6 +702,10 @@ void Database::RegisterUpdateCallback(Baton* b) {
         db->update_event->finish();
         db->update_event = NULL;
     }
+
+    // Release only after the sqlite call; see RegisterTraceCallback.
+    db->exclusiveHeld = false;
+    db->Process();
 }
 
 void Database::UpdateCallback(void* db, int type, const char* database,
@@ -724,6 +792,7 @@ void Database::Work_AfterExec(napi_env e, napi_status status, void* data) {
 
     if (baton->status != SQLITE_OK) {
         EXCEPTION(baton->message, baton->status, exception);
+        db->AttachPendingJsError(exception_obj);
 
         if (IS_FUNCTION(cb)) {
             Napi::Value argv[] = { exception };

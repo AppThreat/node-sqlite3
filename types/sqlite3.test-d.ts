@@ -342,6 +342,58 @@ expectType<string>(backup.destName);
 expectType<boolean>(backup.filenameIsDest);
 expectType<Promise<void>>(backup[Symbol.asyncDispose]());
 
+// --- User-defined functions, aggregates, collations ------------------------
+
+import type { AggregateDefinition, FunctionOptions } from '../lib/sqlite3.js';
+
+expectType<Database>(db.function('regexp', (_pattern, _value) => 1));
+expectType<Database>(db.function('regexp', { deterministic: true }, (_p) => 1));
+expectType<Database>(
+    db.function('seventh', { varargs: true }, (..._args: unknown[]) => 1),
+);
+expectType<Database>(
+    db.aggregate('median', {
+        start: () => [],
+        step: (acc, _v) => acc,
+        result: (acc) => acc,
+        inverse: (acc, _v) => acc,
+    }),
+);
+expectType<Database>(
+    db.collation('german', (a, b) => a.localeCompare(b, 'de')),
+);
+expectType<Database>(db.removeFunction('regexp'));
+expectType<Database>(db.removeCollation('german'));
+
+// The option and aggregate types are exported from the package root.
+declare const opts: FunctionOptions;
+expectType<boolean | undefined>(opts.deterministic);
+expectType<boolean | undefined>(opts.directOnly);
+expectType<boolean | undefined>(opts.innocuous);
+expectType<boolean | undefined>(opts.varargs);
+declare const spec: AggregateDefinition;
+// Assignability (not invocation: the implementations are `this: undefined`).
+const aggStart: (this: undefined) => unknown = spec.start;
+const aggStep: (this: undefined, acc: unknown, ...args: unknown[]) => unknown =
+    spec.step;
+const aggResult: (this: undefined, acc: unknown) => unknown = spec.result;
+type InverseFn = (this: undefined, acc: unknown, ...args: unknown[]) => unknown;
+const aggInverse: InverseFn | undefined = spec.inverse;
+void aggStart;
+void aggStep;
+void aggResult;
+void aggInverse;
+// The aggregate definition carries the function options.
+declare const asOptions: FunctionOptions;
+const withFlags: AggregateDefinition = {
+    deterministic: true,
+    ...asOptions,
+    start: () => 0,
+    step: (acc) => acc,
+    result: (acc) => acc,
+};
+void withFlags;
+
 // --- Errors ----------------------------------------------------------------
 
 expectType<string>(err.code);

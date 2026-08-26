@@ -45,6 +45,56 @@ export type BindParams =
     | [Record<string, BindValue>];
 
 /**
+ * Options accepted by `Database#function` and `Database#aggregate`.
+ *
+ * - `deterministic` claims the function always returns the same output
+ *   for the same input — required for indexes and generated columns, and
+ *   a false claim silently corrupts results, hence opt-in.
+ * - `directOnly` (default `true`) keeps the function out of triggers,
+ *   views, CHECK constraints and index expressions in attacker-supplied
+ *   schema SQL; opting out must be explicit.
+ * - `innocuous` marks the function as safe inside schema SQL even when
+ *   used without `directOnly`.
+ * - `varargs` accepts any number of arguments; without it the arity comes
+ *   from the implementation's `length`.
+ *
+ * @since 9.0.0
+ */
+export type FunctionOptions = {
+    /** Claim output depends only on the inputs (SQLITE_DETERMINISTIC). */
+    deterministic?: boolean;
+    /** Restrict to direct top-level SQL (SQLITE_DIRECTONLY). Default true. */
+    directOnly?: boolean;
+    /** Mark safe for schema SQL (SQLITE_INNOCUOUS). */
+    innocuous?: boolean;
+    /** Accept any number of arguments. */
+    varargs?: boolean;
+};
+
+/**
+ * The implementation object `Database#aggregate` registers: `start`
+ * creates an accumulator, `step` folds one row into it, `result` produces
+ * the final value, and a provided `inverse` turns the aggregate into a
+ * window function by removing a row that left the frame.
+ *
+ * @since 9.0.0
+ */
+export type AggregateDefinition = FunctionOptions & {
+    /** Creates the accumulator for a new group. */
+    start: (this: undefined) => unknown;
+    /** Folds one row's arguments into the accumulator; returns the new one. */
+    step: (this: undefined, acc: unknown, ...args: unknown[]) => unknown;
+    /** Produces the aggregate's value from the accumulator. */
+    result: (this: undefined, acc: unknown) => unknown;
+    /**
+     * Removes one row's arguments from the accumulator (window functions
+     * only). Providing it registers the aggregate via
+     * `sqlite3_create_window_function`.
+     */
+    inverse?: (this: undefined, acc: unknown, ...args: unknown[]) => unknown;
+};
+
+/**
  * One result row of an untyped query: column names to marshalled values.
  * Values are `number | bigint` for INTEGER columns depending on the
  * integer mode, `string`, `Uint8Array` for BLOBs, and `null`.
@@ -259,6 +309,82 @@ export declare class Database extends EventEmitter {
      * @since 9.0.0
      */
     readonly queued: number;
+
+    // Internal user-function registration entry points (Deliverable 06):
+    // option parsing, arity computation and the statement cache flush live
+    // in the public wrappers in lib/sqlite3.js. `flags` is the
+    // SQLITE_DETERMINISTIC / SQLITE_DIRECTONLY / SQLITE_INNOCUOUS word.
+
+    /**
+     * Registers a scalar function implementation.
+     *
+     * @internal
+     * @param name the SQL function name.
+     * @param nArg the arity, or -1 for varargs.
+     * @param flags the SQLITE_DETERMINISTIC/DIRECTONLY/INNOCUOUS word.
+     * @param fn the implementation.
+     * @returns this database, for chaining.
+     */
+    _registerFunction(
+        name: string,
+        nArg: number,
+        flags: number,
+        fn: (this: undefined, ...args: unknown[]) => unknown,
+    ): this;
+    /**
+     * Registers an aggregate (or, with `inverse`, a window function).
+     *
+     * @internal
+     * @param name the SQL function name.
+     * @param nArg the arity, or -1 for varargs.
+     * @param flags ignored for window functions (no flag slot exists).
+     * @param start creates the accumulator.
+     * @param step folds one row into the accumulator.
+     * @param result produces the final value.
+     * @param inverse removes a row (window functions only).
+     * @returns this database, for chaining.
+     */
+    _registerAggregate(
+        name: string,
+        nArg: number,
+        flags: number,
+        start: (this: undefined) => unknown,
+        step: (this: undefined, acc: unknown, ...args: unknown[]) => unknown,
+        result: (this: undefined, acc: unknown) => unknown,
+        inverse?: (
+            this: undefined,
+            acc: unknown,
+            ...args: unknown[]
+        ) => unknown,
+    ): this;
+    /**
+     * Registers a collation comparator.
+     *
+     * @internal
+     * @param name the collation name.
+     * @param fn the comparator (negative / zero / positive).
+     * @returns this database, for chaining.
+     */
+    _registerCollation(
+        name: string,
+        fn: (a: string, b: string) => number,
+    ): this;
+    /**
+     * Removes every registration under the function name.
+     *
+     * @internal
+     * @param name the function name to remove.
+     * @returns this database, for chaining.
+     */
+    _removeFunction(name: string): this;
+    /**
+     * Removes the collation under the name.
+     *
+     * @internal
+     * @param name the collation name to remove.
+     * @returns this database, for chaining.
+     */
+    _removeCollation(name: string): this;
 }
 
 /**

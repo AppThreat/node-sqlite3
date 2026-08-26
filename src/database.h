@@ -11,12 +11,17 @@
 #include <napi.h>
 
 #include "async.h"
+#include "macros.h"
 
 using namespace Napi;
 
 namespace node_sqlite3 {
 
 class Database;
+struct JsFunc;
+struct FunctionBaton;
+struct RemoveFunctionBaton;
+struct UserFunctionOps;
 
 
 class Database : public Napi::ObjectWrap<Database> {
@@ -146,11 +151,30 @@ public:
 
     friend class Statement;
     friend class Backup;
+    friend struct UserFunctionOps;
+
+    // Marks that the JavaScript thread is itself inside a sqlite call on
+    // this connection and therefore cannot service the ThreadSafeFunction
+    // round trip a user-defined function needs. Set by every main-thread
+    // sqlite-driving path (the *Sync methods, the synchronous prepare, and
+    // every sqlite3_finalize — an aggregate's xFinal can fire from any of
+    // them). Main-thread-only state; the worker callbacks read it as the
+    // deadlock refusal test.
+    unsigned sync_sqlite_depth = 0;
+
+    struct SyncSqliteGuard {
+        Database* db;
+        explicit SyncSqliteGuard(Database* db_) : db(db_) { db->sync_sqlite_depth++; }
+        ~SyncSqliteGuard() { db->sync_sqlite_depth--; }
+        SyncSqliteGuard(const SyncSqliteGuard&) = delete;
+        SyncSqliteGuard& operator=(const SyncSqliteGuard&) = delete;
+    };
 
     Database(const Napi::CallbackInfo& info);
 
     ~Database() {
         RemoveCallbacks();
+        RemoveUserFunctions();
         sqlite3_close(_handle);
         _handle = NULL;
         db_state = DbState::Closed;
@@ -199,6 +223,12 @@ protected:
     static void SetBusyTimeout(Baton* baton);
     static void SetLimit(Baton* baton);
 
+    // Deferred main-thread sqlite work (see MayBlockOnWorkerRoundTrip):
+    // exclusive, so each dispatches only once pending == 0 and the
+    // connection mutex is provably free. Definitions in statement.cc.
+    static void Work_DeferredStatementFinalize(Baton* baton);
+    static void Work_DeferredHandleFinalize(Baton* baton);
+
     static void RegisterTraceCallback(Baton* baton);
     static void UpdateTraceMask(Database* db, sqlite3* handle);
     static int TraceV2Callback(unsigned int type, void* ctx, void* p, void* x);
@@ -212,6 +242,77 @@ protected:
     static void UpdateCallback(Database* db, UpdateInfo* info);
 
     void RemoveCallbacks();
+
+    // True when a main-thread sqlite call on this connection could block
+    // on the connection mutex: a JS function or collation is registered
+    // and statement work is in flight — a worker may be sitting inside a
+    // round trip holding that mutex while it waits for this very thread.
+    // Callers on the JS thread must defer their sqlite call (the exclusive
+    // queue runs it once nothing is in flight) instead of touching the
+    // handle. Without registered functions in-flight work never waits on
+    // the JS thread, so the mutex is only ever held briefly and blocking
+    // on it is fine — which is why every pre-existing path is unchanged.
+    bool MayBlockOnWorkerRoundTrip() {
+        return (!(js_functions.empty() && js_collations.empty()))
+            && pending > 0;
+    }
+
+    // --- User-defined functions, aggregates, window functions and
+    // collations (Deliverable 06). Implementation in src/function.cc.
+
+    // JS-visible entry points. They validate argument types and schedule
+    // the registration through the exclusive queue; the JS layer
+    // (lib/sqlite3.js) wraps them with option parsing and the statement
+    // cache flush.
+    Napi::Value RegisterUserFunction(const Napi::CallbackInfo& info);
+    Napi::Value RegisterUserAggregate(const Napi::CallbackInfo& info);
+    Napi::Value RegisterUserCollation(const Napi::CallbackInfo& info);
+    Napi::Value RemoveUserFunction(const Napi::CallbackInfo& info);
+    Napi::Value RemoveUserCollation(const Napi::CallbackInfo& info);
+
+    // Registration handlers. Exclusive: they touch the connection mutex
+    // (sqlite3_create_function_v2 / sqlite3_create_collation take it), and
+    // a worker blocked mid-round-trip inside sqlite3_step holds that mutex
+    // while waiting for the JS thread — so a registration dispatched while
+    // anything is in flight would deadlock the JS thread on the mutex.
+    // Waiting for pending == 0 (the exclusive semantic) guarantees the
+    // mutex is free.
+    static void Work_RegisterFunction(Baton* baton);
+    static void Work_RegisterAggregate(Baton* baton);
+    static void Work_RegisterCollation(Baton* baton);
+    static void Work_RemoveFunction(Baton* baton);
+    static void Work_RemoveCollation(Baton* baton);
+
+    // sqlite invokes these from whatever thread is stepping the statement.
+    static void JsScalarFunc(sqlite3_context* ctx, int argc, sqlite3_value** argv);
+    static void JsAggregateStep(sqlite3_context* ctx, int argc, sqlite3_value** argv);
+    static void JsAggregateFinal(sqlite3_context* ctx);
+    static void JsAggregateValue(sqlite3_context* ctx);
+    static void JsAggregateInverse(sqlite3_context* ctx, int argc, sqlite3_value** argv);
+    static int JsCollation(void* ctx, int len1, const void* d1, int len2, const void* d2);
+    // xDestroy for every registration. Runs on the JS thread by
+    // construction (see src/function.cc).
+    static void JsFuncDestroy(void* data);
+
+    // Unregisters and frees every user function and collation. Called from
+    // Work_BeginClose and ~Database, both main-thread with nothing in
+    // flight. Registrations sqlite refuses to drop (SQLITE_BUSY with a
+    // suspended cursor — which also makes the close fail) are kept alive
+    // with their holders, so the connection stays consistent.
+    void RemoveUserFunctions();
+
+    // Releases the callback channel when no registration is left. Only
+    // called from live-loop contexts (the removal handlers, Work_BeginClose)
+    // — never from a destructor, where it could re-enter the channel's own
+    // teardown and hang the process at exit.
+    void ReleaseJsChannelIfIdle();
+
+    // Attaches the most recently thrown JS error from a user function as
+    // `cause` on `err`, consuming it. The slot is set from the
+    // ThreadSafeFunction callback while a worker is blocked mid-round-trip;
+    // the step failure it causes is always the next error built for this
+    // connection, which is where this is called from.
+    void AttachPendingJsError(Napi::Object err);
 
 protected:
     sqlite3* _handle = NULL;
@@ -236,6 +337,26 @@ protected:
     AsyncTrace* debug_trace = NULL;
     AsyncProfile* debug_profile = NULL;
     AsyncUpdate* update_event = NULL;
+
+    // --- User-defined function state (Deliverable 06) ---
+
+    // Registered callbacks, owned. Main-thread-only access: population
+    // happens in the exclusive registration handlers, teardown in
+    // RemoveUserFunctions and the same handlers' failure paths.
+    std::vector<JsFunc*> js_functions;
+    std::vector<JsFunc*> js_collations;
+
+    // One raw ThreadSafeFunction per database carrying every user-function
+    // round trip. Created lazily by the first registration, Unref'd (so it
+    // never keeps the event loop alive) and released only when the last
+    // registration is gone and nothing can be in flight.
+    napi_threadsafe_function js_channel = NULL;
+
+    // The JS error thrown inside a user function that caused the current
+    // step failure: attached as `cause` on the SQLite error the statement
+    // then reports. JS-thread-only (set in the channel callback, consumed
+    // by the error builders).
+    Napi::Reference<Napi::Value> pending_js_error;
 };
 
 }

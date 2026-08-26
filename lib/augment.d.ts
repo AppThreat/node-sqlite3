@@ -27,9 +27,11 @@
 import type { Readable } from 'node:stream';
 
 import type {
+    AggregateDefinition,
     Backup,
     BindParams,
     BindValue,
+    FunctionOptions,
     Row,
     RunResult,
     SqliteError,
@@ -389,6 +391,78 @@ declare module './native.js' {
         /** `await using` support: closes the database. @since 9.0.0 */
         [Symbol.asyncDispose](): Promise<void>;
 
+        // ---- User-defined functions, aggregates, collations (v9).
+
+        /**
+         * Registers a scalar SQL function backed by a JavaScript callback.
+         *
+         * The callback runs on the JS thread while the worker stepping the
+         * statement blocks — a few microseconds per call. It cannot be
+         * invoked from the synchronous methods (`getSync`/`runSync`/
+         * `allSync`): those fail with an explicit error instead of
+         * deadlocking. Redefining a name replaces the function and flushes
+         * the statement cache.
+         *
+         * @since 9.0.0
+         * @example
+         * db.function('regexp', { deterministic: true },
+         *     (pattern, value) => (new RegExp(pattern).test(value) ? 1 : 0));
+         */
+        function(
+            name: string,
+            fn: (this: undefined, ...args: unknown[]) => unknown,
+        ): this;
+        /** Registers a scalar function with options. @since 9.0.0 */
+        function(
+            name: string,
+            options: FunctionOptions,
+            fn: (this: undefined, ...args: unknown[]) => unknown,
+        ): this;
+
+        /**
+         * Registers an aggregate SQL function: `start()` creates an
+         * accumulator, `step(acc, ...args)` folds a row into it and
+         * `result(acc)` produces the value. A provided `inverse` makes it
+         * a window function (flags cannot be applied to window functions;
+         * see the aggregate documentation in the README).
+         *
+         * @since 9.0.0
+         * @example
+         * db.aggregate('median', {
+         *     start: () => [],
+         *     step: (acc, v) => { acc.push(v); return acc; },
+         *     result: (acc) => acc.sort((a, b) => a - b)[acc.length >> 1],
+         * });
+         */
+        aggregate(name: string, spec: AggregateDefinition): this;
+
+        /**
+         * Registers a collation for `ORDER BY`, indexes and `COLLATE`.
+         * Each comparison is one JS round trip; while a JavaScript
+         * collation is registered the synchronous methods refuse to run.
+         *
+         * @since 9.0.0
+         * @example
+         * db.collation('locale', (a, b) => a.localeCompare(b, 'de'));
+         */
+        collation(name: string, fn: (a: string, b: string) => number): this;
+
+        /**
+         * Removes every function and aggregate registered under `name`
+         * (a no-op for unknown names) and flushes the statement cache.
+         *
+         * @since 9.0.0
+         */
+        removeFunction(name: string): this;
+
+        /**
+         * Removes the collation registered under `name`; the synchronous
+         * methods work again once no JavaScript collation remains.
+         *
+         * @since 9.0.0
+         */
+        removeCollation(name: string): this;
+
         /**
          * Enables the opt-in LRU cache of prepared statements for
          * run/get/all/each/map, keyed on the SQL string. Defaults to 64
@@ -471,6 +545,8 @@ declare module './native.js' {
             statement: Statement;
             transient: boolean;
         };
+        /** Finalizes every cached statement, emptying the cache. @internal */
+        _drainStatementCache(): void;
     }
 
     interface Statement {

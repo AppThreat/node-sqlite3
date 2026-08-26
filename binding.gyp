@@ -49,7 +49,9 @@
       ],
       "sources": [
         "src/backup.cc",
+        "src/convert.cc",
         "src/database.cc",
+        "src/function.cc",
         "src/node_sqlite3.cc",
         "src/statement.cc"
       ],

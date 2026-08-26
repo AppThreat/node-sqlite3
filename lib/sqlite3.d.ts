@@ -50,9 +50,11 @@ export type {
     TransactionOptions,
 } from './promises.js';
 export type {
+    AggregateDefinition,
     BindParams,
     BindValue,
     DatabaseState,
+    FunctionOptions,
     IntegerMode,
     NativeBinding,
     Row,

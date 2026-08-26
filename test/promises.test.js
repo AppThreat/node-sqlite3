@@ -172,16 +172,21 @@ describe('promise API', function () {
                 function (err) {
                     if (err) throw err;
                     ran++;
+                    // Issued from the run's callback: two separate
+                    // statements in parallel mode have no cross-statement
+                    // FIFO guarantee (statement operations bypass the
+                    // database queue), so the read must follow the write
+                    // explicitly rather than by assumption.
+                    assert.strictEqual(
+                        db.get('SELECT a FROM t', function (err2, row) {
+                            if (err2) throw err2;
+                            assert.deepStrictEqual(row, { a: 1 });
+                        }),
+                        db,
+                    );
                 },
             );
             assert.strictEqual(out, db);
-            assert.strictEqual(
-                db.get('SELECT a FROM t', function (err, row) {
-                    if (err) throw err;
-                    assert.deepStrictEqual(row, { a: 1 });
-                }),
-                db,
-            );
             await db.wait();
             assert.strictEqual(ran, 1);
             await db.close();

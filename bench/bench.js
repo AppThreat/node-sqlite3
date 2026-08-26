@@ -334,8 +334,138 @@ async function main() {
         }),
     );
 
+    // --- User-defined functions (Deliverable 06): the JS round trip is
+    // the cost that decides when a JS function is the wrong tool. Three
+    // equivalent 100k-row filters — in SQL, in a JS function called per
+    // row, and in plain JS after all() — plus the raw per-call cost of a
+    // minimal JS scalar, an aggregate step, and a collation comparison.
+
+    {
+        const dbf = new sqlite3.Database(':memory:');
+        await new Promise((r) =>
+            dbf.exec(
+                'CREATE TABLE f (a INT, b REAL, c TEXT, d BLOB);\n' +
+                    "INSERT INTO f SELECT x, x+0.5, 'text-'||x, zeroblob(64) " +
+                    'FROM (WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 100000) SELECT x FROM cnt);',
+                r,
+            ),
+        );
+
+        const sqlMs = await benchAsync(
+            'filter 100k: in SQL (a % 7 = 0)',
+            async () => {
+                const rows = await dbf.all('SELECT a FROM f WHERE a % 7 = 0');
+                if (rows.length !== 14285) throw new Error('bad count');
+            },
+        );
+
+        dbf.function('seventh', { deterministic: true }, (a) =>
+            a % 7 === 0 ? 1 : 0,
+        );
+        const jsFnMs = await benchAsync(
+            'filter 100k: JS fn per row (seventh)',
+            async () => {
+                const rows = await dbf.all(
+                    'SELECT a FROM f WHERE seventh(a) = 1',
+                );
+                if (rows.length !== 14285) throw new Error('bad count');
+            },
+        );
+        dbf.removeFunction('seventh');
+
+        const jsPostMs = await benchAsync(
+            'filter 100k: JS after all()',
+            async () => {
+                const rows = await dbf.all('SELECT a FROM f');
+                const kept = rows.filter((r) => r.a % 7 === 0);
+                if (kept.length !== 14285) throw new Error('bad count');
+            },
+        );
+
+        results.push(sqlMs, jsFnMs, jsPostMs);
+
+        // Raw round-trip cost: one minimal JS call per row, no filtering.
+        dbf.function('noop', { deterministic: true }, (_a) => 1);
+        const noopMs = await benchAsync(
+            'JS round trip: 100k minimal calls',
+            async () => {
+                await dbf.all('SELECT noop(a) FROM f');
+            },
+        );
+        results.push(noopMs);
+        const perCallUs = (noopMs.ms * 1000) / 100000;
+        results.push({
+            name: 'JS round trip: per call',
+            ms: perCallUs,
+            unit: 'us',
+        });
+
+        dbf.aggregate('accumulate', {
+            start: () => 0,
+            step: (acc, _v) => acc + 1,
+            result: (acc) => acc,
+        });
+        const aggMs = await benchAsync(
+            'JS aggregate step: 100k rows',
+            async () => {
+                const row = await dbf.get('SELECT accumulate(a) AS v FROM f');
+                if (row.v !== 100000) throw new Error('bad count');
+            },
+        );
+        results.push(aggMs);
+
+        dbf.collation('natsort', (x, y) => (x < y ? -1 : x > y ? 1 : 0));
+        const collMs = await benchAsync(
+            'JS collation: sort 100k as text',
+            async () => {
+                await dbf.all(
+                    'SELECT a FROM f ORDER BY CAST(a AS TEXT) COLLATE natsort',
+                );
+            },
+        );
+        results.push(collMs);
+
+        // db.transaction() reading (D05 follow-up: AsyncLocalStorage sits
+        // on the transaction path and nothing had measured it). The raw
+        // BEGIN/COMMIT comparator separates the engine cost from the
+        // wrapper's (AsyncLocalStorage, the flow-store copy, validation).
+        const txMs = await benchAsync(
+            'db.transaction: 200 empty bodies',
+            async () => {
+                for (let i = 0; i < 200; i++) {
+                    await dbf.transaction(async (tx) => {
+                        await tx.get('SELECT 1 AS v');
+                    });
+                }
+            },
+        );
+        results.push(txMs);
+        const rawTxMs = await benchAsync(
+            'raw BEGIN+COMMIT: 200 pairs',
+            async () => {
+                for (let i = 0; i < 200; i++) {
+                    await dbf.exec('BEGIN');
+                    await dbf.exec('COMMIT');
+                }
+            },
+        );
+        results.push(rawTxMs);
+        const txOverheadUs = ((txMs.ms - rawTxMs.ms) * 1000) / 200;
+        results.push({
+            name: 'db.transaction: wrapper overhead',
+            ms: txOverheadUs,
+            unit: 'us',
+        });
+
+        await dbf.close();
+    }
+
     for (const r of results) {
-        console.log(r.name.padEnd(40), `${r.ms.toFixed(1).padStart(8)} ms`);
+        const value =
+            'unit' in r && r.unit === 'us'
+                ? `${r.ms.toFixed(2).padStart(8)} us`
+                : `${r.ms.toFixed(1).padStart(8)} ms`;
+        console.log(r.name.padEnd(40), value);
     }
     await new Promise((r) =>
         db.close(() => db2.close(() => db3.close(() => db4.close(r)))),

@@ -247,6 +247,89 @@ Errors carry three properties: `err.code` (the extended name, e.g.
 `SQLITE_AUTH_USER` constants are exported, as are the previously missing
 open flags `OPEN_NOMUTEX`, `OPEN_MEMORY` and `OPEN_EXRESCODE`.
 
+## User-defined functions, aggregates and collations (v9)
+
+```js
+// Scalar functions — this makes WHERE x REGEXP ? work:
+db.function('regexp', { deterministic: true },
+    (pattern, value) => new RegExp(pattern).test(value) ? 1 : 0);
+
+// Aggregates: start() builds an accumulator, step() folds a row into it,
+// result() produces the value. Providing inverse makes it a window
+// function usable with OVER (...).
+db.aggregate('median', {
+    start: () => [],
+    step: (acc, v) => { acc.push(v); return acc; },
+    result: (acc) => {
+        acc.sort((a, b) => a - b);
+        return acc.length ? acc[acc.length >> 1] : null;
+    },
+});
+await db.get('SELECT median(salary) AS m FROM employees');
+
+// Collations — ORDER BY, indexes, COLLATE:
+db.collation('german', (a, b) => a.localeCompare(b, 'de'));
+await db.all('SELECT name FROM t ORDER BY name COLLATE german');
+
+db.removeFunction('regexp');
+db.removeCollation('german');
+```
+
+Arguments and return values use exactly the bind-marshalling rules above
+(int64/BigInt, buffers for blobs, strict types: an unsupported return
+value is an error, never a coerced string). Without `varargs: true` the
+arity comes from the implementation's `length` (minus the accumulator for
+aggregates), and calls with any other argument count are SQL errors.
+
+Options: `deterministic` (required for index/generated-column use, and a
+false claim corrupts results — opt-in), `directOnly` (default **true**:
+schema SQL — triggers, views, CHECK constraints, index expressions —
+cannot invoke the function; opt out explicitly), `innocuous`, `varargs`.
+Window functions (aggregates with `inverse`) are registered through
+`sqlite3_create_window_function`, which has no flag slot, so the flag
+options do not apply to them.
+
+### The threading model, and what it costs
+
+SQLite invokes a function callback on whatever thread is executing the
+statement — here a worker thread. Each call therefore makes a blocking
+round trip to the JS thread: the worker marshals the arguments and waits
+while the JS thread runs your function and posts the result back.
+
+Measured cost (`pnpm run bench`, Apple Silicon, Node 26): **~18 µs per
+call**. Consequences, with one decimal of honesty:
+
+| Filtering 100,000 rows | Time |
+|---|---|
+| the predicate in SQL | 5 ms |
+| the predicate in JS after `all()` | 25 ms |
+| the predicate in a JS function per row | 1,830 ms |
+
+A JS function called per row is the wrong tool for bulk filtering —
+fetch and filter in JS (or write the predicate in SQL). A JS collation is
+even sharper: sorting 100k rows costs O(N log N) round trips (~17 s).
+Where they shine is pushing *logic* into a query — a regexp, a domain
+checksum, a custom aggregate over a bounded group.
+
+Two deliberate restrictions follow from the threading model:
+
+- A JS function reached from a **synchronous method**
+  (`getSync`/`runSync`/`allSync`/`prepareSync`) fails with an explicit
+  error instead of deadlocking: the JS thread is the one blocked inside
+  SQLite there and cannot run the callback. Use the async API.
+- While a JS **collation** is registered, the synchronous methods refuse
+  to run entirely (remove it with `removeCollation()` or use the async
+  API): a comparison would need the blocked JS thread, and unlike
+  functions, a collation callback has no way to report an error.
+
+Errors: a throwing callback surfaces as a `SQLITE_ERROR` whose message
+names the function, with the original JS error attached as `err.cause`;
+the connection stays usable. Registration and replacement are refused
+with `SQLITE_BUSY` (reported on the connection's `'error'` event) while
+a cursor is suspended mid-query; the statement cache is flushed on every
+registration, replacement and removal, so no statement compiled against
+the old implementation is handed back.
+
 ## Source install
 
 To skip searching for pre-compiled binaries, and force a build from source, use

@@ -10,6 +10,7 @@
 #include <napi.h>
 #include <uv.h>
 
+#include "convert.h"
 #include "database.h"
 #include "threading.h"
 
@@ -17,113 +18,19 @@ using namespace Napi;
 
 namespace node_sqlite3 {
 
-namespace Values {
-    struct Field {
-        inline Field(unsigned short _index, unsigned short _type = SQLITE_NULL) :
-            type(_type), index(_index) {}
-        inline Field(const char* _name, unsigned short _type = SQLITE_NULL) :
-            type(_type), index(0), name(_name) {}
-
-        unsigned short type;
-        unsigned short index;
-        std::string name;
-        // Set when the value came from an explicit `undefined` (as opposed
-        // to `null`): used only to recognise the historical
-        // "accidental undefined" call shape against statements without
-        // parameters.
-        bool from_undefined = false;
-
-        virtual ~Field() = default;
-    };
-
-    struct Integer : Field {
-        template <class T> inline Integer(T _name, int64_t val) :
-            Field(_name, SQLITE_INTEGER), value(val) {}
-        int64_t value;
-        virtual ~Integer() override = default;
-    };
-
-    struct Float : Field {
-        template <class T> inline Float(T _name, double val) :
-            Field(_name, SQLITE_FLOAT), value(val) {}
-        double value;
-        virtual ~Float() override = default;
-    };
-
-    struct Text : Field {
-        template <class T> inline Text(T _name, size_t len, const char* val) :
-            Field(_name, SQLITE_TEXT), value(val, len) {}
-        std::string value;
-        virtual ~Text() override = default;
-    };
-
-    struct Blob : Field {
-        template <class T> inline Blob(T _name, size_t len, const void* val) :
-                Field(_name, SQLITE_BLOB), length(len) {
-            value = new char[len];
-            if (len > 0) {
-                memcpy(value, val, len);
-            }
-        }
-        inline virtual ~Blob() override {
-            delete[] value;
-        }
-        size_t length;
-        char* value;
-    };
-
-    typedef Field Null;
-}
-
-// A converted result cell: a flat value type instead of a per-cell heap
-// object. TEXT payload and BLOB bytes live in `str` (binary-safe).
-struct Cell {
-    unsigned short type = SQLITE_NULL;
-    int64_t integer = 0;
-    double real = 0.;
-    std::string str;
-
-    Cell() = default;
-    explicit Cell(unsigned short t) : type(t) {}
-    Cell(const Cell&) = default;
-    Cell(Cell&&) = default;
-    Cell& operator=(const Cell&) = default;
-    Cell& operator=(Cell&&) = default;
-};
-
-typedef std::vector<Cell> Row;
-typedef std::vector<Row> Rows;
-typedef std::vector<std::unique_ptr<Values::Field>> Parameters;
-
-// Result column names captured from a prepared statement, shared by every
-// row of one batch instead of being stored per cell.
-//
-// The shape is fixed for one execution: sqlite3_prepare_v2 may re-prepare
-// transparently behind sqlite3_step() when the schema changed, but it keeps
-// the original result columns. Capturing once per call therefore stays
-// correct without relying on the names surviving across calls.
-struct Columns {
-    std::vector<std::string> names;
-
-    // Populates the names on first use. Called on the thread that steps the
-    // statement, once per execution.
-    inline void EnsureLoaded(sqlite3_stmt* stmt) {
-        if (!names.empty()) return;
-        int cols = sqlite3_column_count(stmt);
-        names.reserve(cols);
-        for (int i = 0; i < cols; i++) {
-            const char* name = sqlite3_column_name(stmt, i);
-            names.emplace_back(name != NULL ? name : "");
-        }
-    }
-};
-
 
 
 class Statement : public Napi::ObjectWrap<Statement> {
 public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
     static Napi::Value New(const Napi::CallbackInfo& info);
+
+    friend class Database;
+
+    // Runs the finalize work of an original finalize baton (directly, or
+    // via the deferred wrappers below).
+    struct Baton;
+    static void FinishFinalizeBaton(Baton* baton);
 
     struct Baton {
         napi_async_work request = NULL;
@@ -255,6 +162,26 @@ public:
         Call(Work_Callback cb_, Baton* baton_) : callback(cb_), baton(baton_) {};
         Work_Callback callback;
         Baton* baton;
+    };
+
+    // Deferral wrappers for the main-thread finalize paths (see
+    // Database::MayBlockOnWorkerRoundTrip): they carry the original work
+    // through the database's exclusive queue so the sqlite3_finalize runs
+    // on this thread only once no worker can hold the connection mutex.
+    struct DeferredFinalizeBaton : Database::Baton {
+        Statement::Baton* inner;
+        DeferredFinalizeBaton(Database* db_, Statement::Baton* inner_) :
+                Baton(db_, Napi::Function()), inner(inner_) {}
+        virtual ~DeferredFinalizeBaton() override {
+            delete inner;
+        }
+    };
+
+    struct HandleFinalizeBaton : Database::Baton {
+        sqlite3_stmt* handle;
+        HandleFinalizeBaton(Database* db_, sqlite3_stmt* handle_) :
+                Baton(db_, Napi::Function()), handle(handle_) {}
+        virtual ~HandleFinalizeBaton() override = default;
     };
 
     struct Async {

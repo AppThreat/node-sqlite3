@@ -6,56 +6,13 @@
 #include <uv.h>
 
 #include "macros.h"
+#include "convert.h"
 #include "database.h"
 #include "statement.h"
 
 using namespace node_sqlite3;
 
 namespace {
-
-// Element size in bytes for each typed-array kind.
-inline size_t TypedArrayElementSize(napi_typedarray_type type) {
-    switch (type) {
-        case napi_int8_array:
-        case napi_uint8_array:
-        case napi_uint8_clamped_array:      return 1;
-        case napi_int16_array:
-        case napi_uint16_array:             return 2;
-        case napi_int32_array:
-        case napi_uint32_array:
-        case napi_float32_array:            return 4;
-        case napi_float64_array:
-        case napi_bigint64_array:
-        case napi_biguint64_array:          return 8;
-        default:                            return 0;
-    }
-}
-
-// Human-readable type name for "unsupported type" errors. Never throws;
-// falls back to a generic name when the constructor is inaccessible
-// (e.g. a Proxy whose get trap throws).
-std::string BindTypeName(const Napi::Value& source) {
-    auto env = source.Env();
-    switch (source.Type()) {
-        case napi_symbol:   return "Symbol";
-        case napi_function: return "Function";
-        case napi_external: return "External";
-        default: break;
-    }
-    if (source.IsObject()) {
-        Napi::Object obj = source.As<Napi::Object>();
-        Napi::Value ctor = obj.Get("constructor");
-        if (!env.IsExceptionPending() && ctor.IsObject()) {
-            Napi::Value name = ctor.As<Napi::Object>().Get("name");
-            if (!env.IsExceptionPending() && name.IsString()) {
-                std::string s = name.As<Napi::String>().Utf8Value();
-                if (!s.empty()) return s;
-            }
-        }
-        return "Object";
-    }
-    return "value";
-}
 
 // "parameter 3" / "parameter $name" for bind error messages.
 template <class T>
@@ -65,15 +22,6 @@ std::string DescribeBindPosition(T pos) {
     } else {
         return std::string("parameter ") + pos;
     }
-}
-
-template <class T>
-void ThrowUnsupportedBindType(const Napi::Value& source, T pos) {
-    auto env = source.Env();
-    std::string msg = "Cannot bind " + DescribeBindPosition(pos) +
-        ": unsupported type " + BindTypeName(source) +
-        ". Serialize it explicitly (e.g. JSON.stringify) before binding.";
-    Napi::TypeError::New(env, msg).ThrowAsJavaScriptException();
 }
 
 // Takes over a pending JS exception (e.g. the RangeError thrown by an
@@ -87,12 +35,6 @@ Napi::Value TakePendingError(Napi::Env env) {
     }
     return Napi::Value(env, pending);
 }
-
-// Range of doubles that convert to int64 without undefined behaviour.
-// The upper bound is inclusive: JS cannot express 2^63-1, so the double
-// 2^63 is the rounded form of it and clamps to INT64_MAX.
-const double kInt64MinAsDouble = -9223372036854775808.0;   // -(2^63)
-const double kInt64MaxAsDouble = 9223372036854775808.0;    //   2^63
 
 } // namespace
 
@@ -176,6 +118,9 @@ template <class T> void Statement::Error(T* baton) {
     // Fail hard on logic errors.
     assert(stmt->status != 0);
     EXCEPTION(stmt->message, stmt->status, exception);
+    // A user-defined function that threw during the step kept its JS error
+    // on the database as the pending cause of exactly this failure.
+    stmt->db->AttachPendingJsError(exception_obj);
 
     Napi::Function cb = baton->callback.Value();
 
@@ -237,11 +182,17 @@ Statement::Statement(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Statemen
 
         sqlite3_mutex* mtx = sqlite3_db_mutex(db->_handle);
         sqlite3_mutex_enter(mtx);
-        status = sqlite3_prepare_v2(db->_handle, sql_str.c_str(),
-            sql_str.size(), &_handle, NULL);
-        if (status != SQLITE_OK) {
-            message = std::string(sqlite3_errmsg(db->_handle));
-            _handle = NULL;
+        {
+            // Same guard as the *Sync methods: while this thread drives
+            // sqlite, user callbacks reached from it must refuse their
+            // round trip instead of deadlocking on this thread.
+            Database::SyncSqliteGuard sync_guard(db);
+            status = sqlite3_prepare_v2(db->_handle, sql_str.c_str(),
+                sql_str.size(), &_handle, NULL);
+            if (status != SQLITE_OK) {
+                message = std::string(sqlite3_errmsg(db->_handle));
+                _handle = NULL;
+            }
         }
         sqlite3_mutex_leave(mtx);
 
@@ -358,141 +309,17 @@ void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
 
 template <class T> std::unique_ptr<Values::Field>
                    Statement::BindParameter(const Napi::Value source, T pos) {
-    // Exhaustive dispatch. Order matters for the hot path: cheap primitive
-    // checks run before the object checks (InstanceOf lookups hit the
-    // global object). Every JS type either maps to a field or throws —
-    // returning nullptr therefore always implies a pending exception, so
-    // nothing can silently skip a parameter.
-    if (source.IsNumber()) {
-        double val = source.As<Napi::Number>().DoubleValue();
-        // Number.isInteger within the int64 range binds as INTEGER (64-bit,
-        // not the old Int32 round-trip). NaN and ±Infinity fail the
-        // trunc/finiteness test and bind as REAL (NaN becomes NULL, per
-        // sqlite's bind_double semantics).
-        if (std::isfinite(val) && val == std::trunc(val)
-                && val >= kInt64MinAsDouble && val < kInt64MaxAsDouble) {
-            return std::make_unique<Values::Integer>(pos,
-                static_cast<int64_t>(val));
-        }
-        if (val == kInt64MaxAsDouble) {
-            // 2^63 as a double is the rounded form of 2^63-1: clamp so the
-            // top of the int64 range stays reachable from JS numbers.
-            return std::make_unique<Values::Integer>(pos, INT64_MAX);
-        }
-        return std::make_unique<Values::Float>(pos, val);
+    // The full dispatch lives in ConvertToField (src/convert.cc) since
+    // Deliverable 06: statement binding and user-function results share one
+    // converter so their type behaviour cannot drift. Only the position
+    // naming and the position itself (index vs name) are bind-specific.
+    if constexpr (std::is_integral_v<T>) {
+        return ConvertToField(source, DescribeBindPosition(pos),
+            FieldPos{ static_cast<int>(pos), "" });
+    } else {
+        return ConvertToField(source, DescribeBindPosition(pos),
+            FieldPos{ 0, pos });
     }
-    else if (source.IsString()) {
-        std::string val = source.As<Napi::String>().Utf8Value();
-        return std::make_unique<Values::Text>(pos, val.length(), val.c_str());
-    }
-    else if (source.IsBoolean()) {
-        return std::make_unique<Values::Integer>(pos, source.As<Napi::Boolean>().Value() ? 1 : 0);
-    }
-    else if (source.IsNull()) {
-        return std::make_unique<Values::Null>(pos);
-    }
-    else if (source.IsUndefined()) {
-        // Binds as NULL, matching null: object shorthand
-        // { $x: obj.maybeMissing } is a common call shape. Typo'd property
-        // names are caught by the named-parameter and arity checks in
-        // Bind(Parameters&&, bool), not by rejecting undefined.
-        auto field = std::make_unique<Values::Null>(pos);
-        field->from_undefined = true;
-        return field;
-    }
-    else if (source.IsBigInt()) {
-        bool lossless = false;
-        int64_t val = source.As<Napi::BigInt>().Int64Value(&lossless);
-        if (!lossless) {
-            std::string digits = source.ToString().Utf8Value();
-            Napi::RangeError::New(source.Env(),
-                "Cannot bind " + DescribeBindPosition(pos) + ": BigInt " +
-                digits + " is outside the signed 64-bit integer range"
-            ).ThrowAsJavaScriptException();
-            return nullptr;
-        }
-        return std::make_unique<Values::Integer>(pos, val);
-    }
-    else if (source.IsDataView()) {
-        // Must be tested before IsBuffer(): napi_is_buffer() also answers
-        // true for DataViews, and routing one through Napi::Buffer fails
-        // ("Invalid argument"). data arrives already offset by
-        // byte_offset, like the typed-array call.
-        size_t bytes = 0;
-        void* data = NULL;
-        napi_get_dataview_info(source.Env(), source, &bytes, &data,
-            NULL, NULL);
-        if (bytes > static_cast<size_t>(std::numeric_limits<int>::max())) {
-            Napi::RangeError::New(source.Env(),
-                "Cannot bind " + DescribeBindPosition(pos) + ": DataView of " +
-                std::to_string(bytes) + " bytes exceeds the bind size limit"
-            ).ThrowAsJavaScriptException();
-            return nullptr;
-        }
-        return std::make_unique<Values::Blob>(pos, bytes, data);
-    }
-    else if (source.IsBuffer()) {
-        // Node Buffers and plain Uint8Arrays: Data() and Length() honour
-        // byteOffset for both.
-        Napi::Buffer<char> buffer = source.As<Napi::Buffer<char>>();
-        if (buffer.Length() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-            // Buffers can exceed 2 GB on 64-bit Node; sqlite3_bind_blob takes
-            // an int, so without this the length narrows to a negative number.
-            Napi::RangeError::New(source.Env(),
-                "Cannot bind " + DescribeBindPosition(pos) + ": Buffer of " +
-                std::to_string(buffer.Length()) + " bytes exceeds the bind size limit"
-            ).ThrowAsJavaScriptException();
-            return nullptr;
-        }
-        return std::make_unique<Values::Blob>(pos, buffer.Length(), buffer.Data());
-    }
-    else if (source.IsTypedArray()) {
-        // Any other typed array (Uint16Array, Float64Array, ...): raw
-        // element count times the element size, with the data pointer
-        // already offset by byteOffset per napi_get_typedarray_info.
-        napi_typedarray_type type;
-        size_t elements = 0;
-        void* data = NULL;
-        napi_get_typedarray_info(source.Env(), source, &type,
-            &elements, &data, NULL, NULL);
-        size_t bytes = elements * TypedArrayElementSize(type);
-        if (bytes > static_cast<size_t>(std::numeric_limits<int>::max())) {
-            Napi::RangeError::New(source.Env(),
-                "Cannot bind " + DescribeBindPosition(pos) + ": typed array of " +
-                std::to_string(bytes) + " bytes exceeds the bind size limit"
-            ).ThrowAsJavaScriptException();
-            return nullptr;
-        }
-        return std::make_unique<Values::Blob>(pos, bytes, data);
-    }
-    else if (source.IsArrayBuffer()) {
-        Napi::ArrayBuffer buffer = source.As<Napi::ArrayBuffer>();
-        if (buffer.ByteLength() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-            Napi::RangeError::New(source.Env(),
-                "Cannot bind " + DescribeBindPosition(pos) + ": ArrayBuffer exceeds the bind size limit"
-            ).ThrowAsJavaScriptException();
-            return nullptr;
-        }
-        return std::make_unique<Values::Blob>(pos, buffer.ByteLength(), buffer.Data());
-    }
-    else if (source.IsDate()) {
-        // Documented v8/v9 behaviour: epoch milliseconds as REAL. Opt-in
-        // TEXT binding is deliberately out of scope for D02.
-        return std::make_unique<Values::Float>(pos, source.As<Napi::Date>().ValueOf());
-    }
-    else if (source.IsObject()) {
-        if (OtherInstanceOf(source.As<Object>(), "RegExp")) {
-            std::string val = source.ToString().Utf8Value();
-            return std::make_unique<Values::Text>(pos, val.length(), val.c_str());
-        }
-        // Plain objects, arrays, Maps, class instances: refused. The old
-        // behaviour bound the literal string "[object Object]".
-        ThrowUnsupportedBindType(source, pos);
-        return nullptr;
-    }
-    // Symbols, functions, anything else.
-    ThrowUnsupportedBindType(source, pos);
-    return nullptr;
 }
 
 template <class T> T* Statement::Bind(const Napi::CallbackInfo& info, int start, int last) {
@@ -1384,6 +1211,7 @@ bool Statement::IdleForInline() {
 
 void Statement::ThrowStatementError(Napi::Env env) {
     EXCEPTION(message, status, exception);
+    db->AttachPendingJsError(exception_obj);
     exception.As<Napi::Error>().ThrowAsJavaScriptException();
 }
 
@@ -1398,6 +1226,21 @@ template <class T> T* Statement::BindSync(const Napi::CallbackInfo& info) {
     if (!IdleForInline()) {
         Napi::Error::New(env,
             "database is busy: sync methods require a fully idle database"
+        ).ThrowAsJavaScriptException();
+        return NULL;
+    }
+    // A JavaScript collation cannot run on this thread: the comparison
+    // would need the JS thread, which is the one about to block inside
+    // SQLite — and unlike functions, a collation callback has no way to
+    // report an error, so refusing up front is the only sound answer.
+    // (Functions are handled per-invocation, with a precise error.)
+    if (!db->js_collations.empty()) {
+        Napi::Error::New(env,
+            "sync methods cannot be used while a JavaScript collation is "
+            "registered on this connection: a comparison would have to run "
+            "JS on the thread that is blocked inside SQLite (a deadlock), "
+            "and SQLite provides no way to fail a single comparison. "
+            "removeCollation() first, or use the asynchronous API"
         ).ThrowAsJavaScriptException();
         return NULL;
     }
@@ -1426,6 +1269,11 @@ Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
     RowBaton* baton = BindSync<RowBaton>(info);
     if (baton == NULL) return env.Null();
     std::unique_ptr<RowBaton> holder(baton);
+
+    // While this thread is inside sqlite, a user-defined function invoked
+    // by the statement must refuse to make its round trip (it would wait
+    // for this very thread) — the guard is what its refusal tests.
+    Database::SyncSqliteGuard sync_guard(stmt->db);
 
     // Mirrors Work_Get: step unless the cursor is already exhausted and
     // no new parameters were supplied.
@@ -1463,6 +1311,8 @@ Napi::Value Statement::RunSync(const Napi::CallbackInfo& info) {
     if (baton == NULL) return env.Null();
     std::unique_ptr<RunBaton> holder(baton);
 
+    Database::SyncSqliteGuard sync_guard(stmt->db);
+
     // Mirrors Work_Run, including the explicit reset for parameterless
     // re-execution.
     if (!holder->parameters.size() && !holder->bind_supplied) {
@@ -1496,6 +1346,8 @@ Napi::Value Statement::AllSync(const Napi::CallbackInfo& info) {
     RowsBaton* baton = BindSync<RowsBaton>(info);
     if (baton == NULL) return env.Null();
     std::unique_ptr<RowsBaton> holder(baton);
+
+    Database::SyncSqliteGuard sync_guard(stmt->db);
 
     if (!holder->parameters.size() && !holder->bind_supplied) {
         sqlite3_reset(stmt->_handle);
@@ -1548,30 +1400,7 @@ void Statement::SyncColumnKeys(Napi::Env env, const Columns& columns) {
 
 Napi::Value Statement::Int64ToJS(Napi::Env env, sqlite3_int64 value,
         const std::string& what) {
-    // A single range compare on the int64 — deliberately not a call into
-    // JS: this runs per integer cell.
-    const bool safe = value >= -(1LL << 53) + 1 && value < (1LL << 53);
-    switch (db->integer_mode) {
-        case Database::INTEGER_BIGINT:
-            return Napi::BigInt::New(env, static_cast<int64_t>(value));
-        case Database::INTEGER_MIXED:
-            if (!safe)
-                return Napi::BigInt::New(env, static_cast<int64_t>(value));
-            return Napi::Number::New(env, static_cast<double>(value));
-        default:
-            if (safe) return Napi::Number::New(env, static_cast<double>(value));
-            // The default throws instead of truncating: a silent double
-            // conversion is exactly the corruption this mode guards
-            // against. The callback-free sync paths surface this directly;
-            // async completions deliver it to the user callback.
-            Napi::RangeError::New(env,
-                "Integer " + std::to_string(value) + " in " + what +
-                " is outside the safe integer range (-(2^53-1) .. 2^53-1); "
-                "configure('integerMode', 'bigint' | 'mixed') to read it "
-                "exactly"
-            ).ThrowAsJavaScriptException();
-            return env.Null();
-    }
+    return ConvertInt64ToJS(env, value, db->integer_mode, what);
 }
 
 void Statement::RecordRunResult(sqlite3_int64 id, int changes) {
@@ -1609,58 +1438,12 @@ Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {
 
     size_t i = 0;
     for (auto& cell : *row) {
-        Napi::Value value;
-
-        switch (cell.type) {
-            case SQLITE_INTEGER: {
-                const std::string what = (i < column_keys_source.size())
-                    ? "column '" + column_keys_source[i] + "'"
-                    : std::string("result column ") + std::to_string(i);
-                value = Int64ToJS(env, cell.integer, what);
-                if (env.IsExceptionPending()) {
-                    return scope.Escape(env.Null());
-                }
-            } break;
-            case SQLITE_FLOAT: {
-                value = Napi::Number::New(env, cell.real);
-            } break;
-            case SQLITE_TEXT: {
-                value = Napi::String::New(env, cell.str.data(), cell.str.size());
-            } break;
-            case SQLITE_BLOB: {
-                // Zero-copy for large blobs: transfer ownership of the bytes
-                // to the Buffer finalizer. Small blobs are cheaper to copy
-                // (external-buffer bookkeeping outweighs the memcpy), and the
-                // copy fallback also covers environments without external
-                // buffer support (e.g. sandboxed renderers).
-                if (cell.str.size() >= 4096) {
-                    auto* payload = new std::string(std::move(cell.str));
-                    napi_value buf = NULL;
-                    napi_status st = napi_create_external_buffer(env,
-                        payload->size(), &(*payload)[0],
-                        [](napi_env, void*, void* hint) {
-                            delete static_cast<std::string*>(hint);
-                        },
-                        payload, &buf);
-                    if (st == napi_ok) {
-                        value = Napi::Buffer<char>(env, buf);
-                    }
-                    else {
-                        value = Napi::Buffer<char>::Copy(env,
-                            payload->data(), payload->size());
-                        delete payload;
-                    }
-                }
-                else {
-                    value = Napi::Buffer<char>::Copy(env,
-                        cell.str.data(), cell.str.size());
-                }
-            } break;
-            case SQLITE_NULL: {
-                value = env.Null();
-            } break;
-            default:
-                value = env.Null();
+        const std::string what = (i < column_keys_source.size())
+            ? "column '" + column_keys_source[i] + "'"
+            : std::string("result column ") + std::to_string(i);
+        Napi::Value value = CellToJS(env, cell, db->integer_mode, what, true);
+        if (env.IsExceptionPending()) {
+            return scope.Escape(env.Null());
         }
 
         // The keys always cover the row: both are derived from the same
@@ -1762,15 +1545,35 @@ Statement::~Statement() {
     if (!finalized) {
         finalized = true;
         CleanQueue();
-        sqlite3_finalize(_handle);
-        _handle = NULL;
+        // The guard: finalize can invoke an aggregate's xFinal (sqlite
+        // calls it for incomplete aggregates), and this is the JS thread —
+        // a blocking round trip from xFinal here would wait for itself.
+        // MayBlockOnWorkerRoundTrip covers the second hazard: the mutex
+        // itself, held by a worker waiting on a round trip this thread
+        // must service.
+        if (db && db->MayBlockOnWorkerRoundTrip() && _handle != NULL) {
+            db->Schedule(Database::Work_DeferredHandleFinalize,
+                new HandleFinalizeBaton(db, _handle), true);
+            _handle = NULL;
+        }
+        else if (db) {
+            Database::SyncSqliteGuard sync_guard(db);
+            sqlite3_finalize(_handle);
+            _handle = NULL;
+        }
+        else {
+            sqlite3_finalize(_handle);
+            _handle = NULL;
+        }
         bound_payloads.clear();
         if (db) db->Unref();
     }
 }
 
-void Statement::Finalize_(Baton* b) {
-    auto baton = std::unique_ptr<Baton>(b);
+// Runs the finalize work of an original finalize baton (directly, or via
+// the deferred wrapper below).
+void Statement::FinishFinalizeBaton(Baton* baton) {
+    std::unique_ptr<Statement::Baton> holder(baton);
     auto env = baton->stmt->Env();
     Napi::HandleScope scope(env);
 
@@ -1783,14 +1586,70 @@ void Statement::Finalize_(Baton* b) {
     }
 }
 
+// Exclusive: dispatched only when pending == 0, so the connection mutex
+// is free and the finalize cannot meet a worker blocked mid-round-trip.
+void Database::Work_DeferredStatementFinalize(Baton* b) {
+    auto baton = std::unique_ptr<Statement::DeferredFinalizeBaton>(
+        static_cast<Statement::DeferredFinalizeBaton*>(b));
+    auto* db = baton->db;
+
+    Statement::Baton* inner = baton->inner;
+    baton->inner = NULL; // ownership moves to FinishFinalizeBaton
+
+    Statement::FinishFinalizeBaton(inner);
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+void Database::Work_DeferredHandleFinalize(Baton* b) {
+    auto baton = std::unique_ptr<Statement::HandleFinalizeBaton>(
+        static_cast<Statement::HandleFinalizeBaton*>(b));
+    auto* db = baton->db;
+
+    sqlite3_finalize(baton->handle);
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+void Statement::Finalize_(Baton* b) {
+    Statement* stmt = b->stmt;
+    // Finalizing on this thread takes the connection mutex inside
+    // sqlite3_finalize. A worker blocked in a JS round trip holds that
+    // mutex while waiting for this thread — finalizing now would deadlock
+    // the two. Hand the work to the exclusive queue instead.
+    if (stmt->db->MayBlockOnWorkerRoundTrip()) {
+        auto* deferral = new DeferredFinalizeBaton(stmt->db, b);
+        stmt->db->Schedule(Database::Work_DeferredStatementFinalize,
+            deferral, true);
+        return;
+    }
+    FinishFinalizeBaton(b);
+}
+
 void Statement::Finalize_() {
     assert(!finalized);
     finalized = true;
     CleanQueue();
     // Finalize returns the status code of the last operation. We already fired
-    // error events in case those failed.
-    sqlite3_finalize(_handle);
-    _handle = NULL;
+    // error events in case those failed. The guard covers the xFinal an
+    // incomplete aggregate fires from here — this runs on the JS thread,
+    // where a blocking round trip would deadlock (see ~Statement).
+    if (db->MayBlockOnWorkerRoundTrip() && _handle != NULL) {
+        // Same hazard as Finalize_(Baton*): the mutex a round-tripping
+        // worker holds. The handle is finalized from the exclusive queue;
+        // the statement's own teardown proceeds (nothing else touches the
+        // handle once finalized is set and _handle is cleared).
+        db->Schedule(Database::Work_DeferredHandleFinalize,
+            new HandleFinalizeBaton(db, _handle), true);
+        _handle = NULL;
+    }
+    else {
+        Database::SyncSqliteGuard sync_guard(db);
+        sqlite3_finalize(_handle);
+        _handle = NULL;
+    }
     bound_payloads.clear();
     db->Unref();
 }
