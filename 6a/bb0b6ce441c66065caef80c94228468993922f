@@ -1,0 +1,69 @@
+lib/sqlite3.js
+  s_1246da50fbe044::t_7f7d74979298d7 860-862,874-876
+  s_1246da50fbe044::t_0c4f97ad27796e 857-859
+  s_1246da50fbe044::t_f5971b00b39ed3 863-865,871-873
+  s_1246da50fbe044::t_7eb70637a83647 877-879
+  s_1246da50fbe044::t_eb1e8f62dabf48 522,524-531,533-534,536,542-543,549-560,571-856,866-870,880-895
+lib/sqlite3.d.ts
+  s_1246da50fbe044::t_7f7d74979298d7 53,57
+src/database.cc
+  s_1246da50fbe044::t_aced117e6714c2 578-580,593-600,647-649,662-665,689-691,705-708
+  s_1246da50fbe044::t_eb1e8f62dabf48 25-32,316-321,524-528,533-536,542-546,551-553,572-575,641-644,683-686,795
+test/function.test.js
+  s_1246da50fbe044::t_3b12e5b7fd9b77 417
+  s_1246da50fbe044::t_013f7d86bbd8a3 429-431
+  s_1246da50fbe044::t_4afd11b42a7c17 402-416,418-428,432-444
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-401,445-465
+README.md
+  s_1246da50fbe044::t_eb1e8f62dabf48 250-332
+lib/native.d.ts
+  s_1246da50fbe044::t_eb1e8f62dabf48 47-96,312-387
+MIGRATING-TO-V9.md
+  s_1246da50fbe044::t_eb1e8f62dabf48 55-74
+src/convert.h
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-171
+src/database.h
+  s_1246da50fbe044::t_eb1e8f62dabf48 14,21-24,154-171,177,226-231,246-316,340-359
+src/function.h
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-140
+src/statement.h
+  s_1246da50fbe044::t_eb1e8f62dabf48 13,28-34,167-185
+test/promises.test.js
+  s_1246da50fbe044::t_eb1e8f62dabf48 175-186
+types/sqlite3.test-d.ts
+  s_1246da50fbe044::t_eb1e8f62dabf48 345-396
+src/function.cc
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-1143
+lib/augment.d.ts
+  s_1246da50fbe044::t_eb1e8f62dabf48 30,34,394-465,548-549
+src/statement.cc
+  s_1246da50fbe044::t_eb1e8f62dabf48 9,121-123,185-195,312-321,1214,1232-1246,1273-1277,1314-1315,1350-1351,1403,1441-1446,1548-1567,1573-1576,1589-1630,1636-1652
+bench/bench.js
+  s_1246da50fbe044::t_eb1e8f62dabf48 337-462,464-468
+src/convert.cc
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-346
+binding.gyp
+  s_1246da50fbe044::t_eb1e8f62dabf48 52,54
+test/aggregate.test.js
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-326
+test/collation.test.js
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-201
+test/support/function_exit_child.mjs
+  s_1246da50fbe044::t_eb1e8f62dabf48 1-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6abb0b6ce441c66065caef80c94228468993922f",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
