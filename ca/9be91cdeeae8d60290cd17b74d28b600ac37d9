@@ -1,0 +1,58 @@
+deps/sqlite3.gyp
+  s_e274b9ff27fe7b::t_80ee5db49769fc 82-87,107-108
+src/database.h
+  s_e274b9ff27fe7b::t_4ea5a1996484c2 7,10,33-51,139-209,226-233,236-241,255,283-284,351-435,439-447,449-450,498-504,540-577
+src/function.h
+  s_e274b9ff27fe7b::t_bfb0e2749e4a5d 82
+src/node_sqlite3.cc
+  s_e274b9ff27fe7b::t_e4cbe1ded76e3d 160-224
+src/statement.cc
+  s_e274b9ff27fe7b::t_740e9e9ab0fc19 69-77,191-206,221,224,226,272-274,1273-1277,1279-1285,1476-1479,1483,1486,1490,1492-1493,1494,1496-1511,1513,1525-1528,1530-1533,1535-1539,1542-1543,1545,1547-1553,1555,1557,1559-1561,1563,1565,1569,1572,1575-1630
+  s_1246da50fbe044::t_a305062a04b8d9 222-223,225
+  s_1246da50fbe044::t_b0f8c432f07823 1512,1514-1524,1529,1534,1540-1541,1544,1546,1554
+  s_1246da50fbe044::t_32a1c7759e4064 1480-1482,1484-1485,1487-1489,1491,1495
+  s_1246da50fbe044::t_78573d987c4d65 335-337
+  s_1246da50fbe044::t_0c68f0440124bb 1556,1558,1562,1564,1566-1568,1570-1571,1573-1574
+lib/sqlite3.js
+  s_1246da50fbe044::t_7907a15670819e 1015-1023,1035-1037
+  s_1246da50fbe044::t_08cd241987823d 1088-1091,1100
+  s_1246da50fbe044::t_1096c6aa98ffca 1007-1008
+  s_1246da50fbe044::t_886958e330be77 995
+  s_1246da50fbe044::t_d49828c59acc6d 1038
+src/statement.h
+  s_1246da50fbe044::t_e17291fa52e221 387-392
+  s_1246da50fbe044::t_c05dadbf6f6aac 277-293,301-306,308
+test/introspection.test.js
+  s_1246da50fbe044::t_5fb6ea643595d3 132-138,140-141,149,152-155,157-159
+  s_1246da50fbe044::t_a788038644f3bf 142-148,150-151,156
+lib/native.d.ts
+  s_1246da50fbe044::t_d34cf9790edc39 621-628
+test/progress.test.js
+  s_1246da50fbe044::t_77940acbaed875 245-287
+  s_1246da50fbe044::t_b67e1ab28bf057 129-134
+  s_1246da50fbe044::t_ab0f06c4250164 18-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ca9be91cdeeae8d60290cd17b74d28b600ac37d9",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    },
+    "s_e274b9ff27fe7b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8067528-3215-4987-8ddf-7379117b2c68",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
