@@ -20,17 +20,29 @@ describe('parallel', function () {
         db.run(`CREATE TABLE foo (${columns})`, done);
     });
 
-    it('should insert in parallel', function (_t, done) {
-        for (let i = 0; i < 1000; i++) {
-            const values = [];
-            for (let j = 0; j < columns.length; j++) {
-                values.push(i * j);
+    // 1000 file-backed INSERTs, each its own implicit transaction (journal
+    // file created and deleted per row). Measured at 38s on GitHub's
+    // windows-11-arm runner — about 2x over the 20s suite-wide ceiling that
+    // tools/run-tests.mjs applies, while every other runner finishes in
+    // single-digit seconds. The override lifts the ceiling for this test
+    // only; the hang detector still guards the rest of the suite.
+    it(
+        'should insert in parallel',
+        {
+            timeout: 180000,
+        },
+        function (_t, done) {
+            for (let i = 0; i < 1000; i++) {
+                const values = [];
+                for (let j = 0; j < columns.length; j++) {
+                    values.push(i * j);
+                }
+                db.run(`INSERT INTO foo VALUES (${values})`);
             }
-            db.run(`INSERT INTO foo VALUES (${values})`);
-        }
 
-        db.wait(done);
-    });
+            db.wait(done);
+        },
+    );
 
     it('should close the database', function (_t, done) {
         db.close(done);
