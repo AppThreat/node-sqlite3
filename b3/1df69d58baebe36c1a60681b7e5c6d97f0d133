@@ -1,0 +1,21 @@
+test/binding_loader.test.js
+  s_1246da50fbe044::t_6d861b937d9354 97-122
+lib/sqlite3-binding.js
+  s_1246da50fbe044::t_409fcf3a839843 23-27,30,32,42-51,54-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b31df69d58baebe36c1a60681b7e5c6d97f0d133",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
