@@ -66,7 +66,8 @@
         "test:electron:asar": "node test/electron/asar.mjs",
         "bench": "node bench/bench.js",
         "gen-types": "node tools/gen-types.js",
-        "test:types": "tsd && tsc --noEmit -p tsconfig.check.json"
+        "test:types": "tsd && tsc --noEmit -p tsconfig.check.json",
+        "test:matrix": "node tools/test-matrix.mjs"
     },
     "license": "BSD-3-Clause",
     "keywords": [
