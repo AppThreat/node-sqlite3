@@ -28,6 +28,49 @@ import { app, utilityProcess } from 'electron';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 
+// Force the process down on every path, including the ones where
+// Electron would otherwise sit forever. A main process with no window
+// is invisible: when this harness hung once (app.whenReady never
+// resolving, the deadlock described above), it left an unresponsive
+// Electron running for hours with nothing on screen to close. Anything
+// that can hang here must be on a timer.
+function hardExit(code) {
+    try {
+        app.exit(code);
+    } catch {
+        // app may not exist yet, or may already be tearing down.
+    }
+    // app.exit is a no-op before the app is ready, which is exactly the
+    // deadlock case — so always follow it with a real process exit.
+    setTimeout(() => process.exit(code), 500).unref?.();
+}
+
+// Armed at module scope, deliberately not inside whenReady().then():
+// the failure this exists for is whenReady() never resolving, so a
+// watchdog installed in that callback would never be armed at all.
+const HARNESS_TIMEOUT_MS = Number(
+    process.env.ELECTRON_HARNESS_TIMEOUT_MS ?? 120000,
+);
+const watchdog = setTimeout(() => {
+    console.error(
+        `FAIL harness watchdog — no result after ${HARNESS_TIMEOUT_MS} ms; ` +
+            'forcing exit (app.whenReady() may never have resolved)',
+    );
+    hardExit(1);
+}, HARNESS_TIMEOUT_MS);
+// unref so the watchdog never itself keeps an otherwise-finished process
+// alive; Electron's own event loop keeps us running, so it still fires.
+watchdog.unref?.();
+
+process.on('uncaughtException', (err) => {
+    console.error(`FAIL uncaught exception — ${err?.stack ?? String(err)}`);
+    hardExit(1);
+});
+process.on('unhandledRejection', (err) => {
+    console.error(`FAIL unhandled rejection — ${err?.stack ?? String(err)}`);
+    hardExit(1);
+});
+
 const failures = [];
 const passes = [];
 function check(name, ok, detail = '') {
@@ -136,8 +179,9 @@ app.whenReady().then(async () => {
     } catch (err) {
         check('harness ran without throwing', false, err?.stack ?? String(err));
     }
+    clearTimeout(watchdog);
     console.log(
         `\n${passes.length} passed, ${failures.length} failed${failures.length ? `: ${failures.join('; ')}` : ''}`,
     );
-    app.exit(failures.length === 0 ? 0 : 1);
+    hardExit(failures.length === 0 ? 0 : 1);
 });

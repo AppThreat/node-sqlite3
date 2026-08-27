@@ -100,6 +100,13 @@ process.dlopen = function (m, f, ...rest) {
     return realDlopen.call(process, m, f, ...rest);
 };
 
+// This app has no window, so a hang here would be invisible: force it
+// down rather than leaving an unresponsive Electron on the desktop.
+setTimeout(() => {
+    console.log('FIXTURE_TIMEOUT');
+    process.exit(4);
+}, 45000).unref?.();
+
 try {
     const sqlite3 = (await import('@appthreat/sqlite3')).default;
     const db = new sqlite3.Database(join(app.getPath('userData'), 'asar-probe.db'));
@@ -181,6 +188,11 @@ function runPackaged(outDir) {
         const out = execFileSync(binary, {
             encoding: 'utf8',
             timeout: 60000,
+            // SIGKILL rather than the default SIGTERM: a packaged
+            // Electron app with no window is invisible on the desktop,
+            // so one that ignores a polite signal would be left running
+            // with nothing for the user to close.
+            killSignal: 'SIGKILL',
         });
         return { code: 0, out };
     } catch (err) {
