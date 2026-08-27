@@ -702,7 +702,22 @@ pnpm run lint         # biome check --write (autofix; CI runs lint:check)
 pnpm run test         # node:test, 20s per-test timeout, files run in parallel
 pnpm run prebuild     # produce the shipping prebuilds/ artifacts
 pnpm run test:electron # the full suite + app-env harness inside Electron
+pnpm run test:matrix   # the suite across glibc/musl containers (needs Docker)
 ```
+
+`test:matrix` exists for the failures that do not reproduce on a developer
+machine — a musl-only segfault, or a race that needs an older glibc, a
+specific Node and a busy CPU before it shows up at all:
+
+```bash
+node tools/test-matrix.mjs --list          # the targets and why each exists
+node tools/test-matrix.mjs --cpus=1 --load=6   # simulate a slow CI runner
+node tools/test-matrix.mjs --repeat=20 --cmd='node --test test/foo.test.js'
+```
+
+It rebuilds the addon and regenerates fixtures inside each container,
+ignoring your local `node_modules/`, `build/`, `prebuilds/` and `test/tmp/`,
+so a result does not depend on working-tree leftovers.
 
 Always use `pnpm run rebuild`, never bare `pnpm rebuild` — the latter is a
 pnpm builtin that rebuilds *dependencies*, not this repo's `rebuild` script.
