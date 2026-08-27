@@ -4,6 +4,7 @@
 
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import sqlite3 from '../lib/sqlite3.js';
@@ -14,10 +15,16 @@ describe('backup call guard', function () {
     it('a throwing step callback does not wedge the connection', {
         timeout: 30000,
     }, async function () {
+        // Absolute path and a joined cwd, both built with node:path: the
+        // previous form stripped the trailing directory with /\/test$/,
+        // which never matches a Windows path, leaving cwd inside test/ so
+        // the relative argument resolved to test\test\support\… and the
+        // child died with MODULE_NOT_FOUND. Nothing caught it because the
+        // suite does not run on Windows in CI — only the Electron job does.
         const child = spawn(
             process.execPath,
-            ['test/support/throwing_backup_child.mjs'],
-            { cwd: import.meta.dirname.replace(/\/test$/, '') },
+            [join(import.meta.dirname, 'support', 'throwing_backup_child.mjs')],
+            { cwd: join(import.meta.dirname, '..') },
         );
         let out = '';
         child.stdout.on('data', (chunk) => {

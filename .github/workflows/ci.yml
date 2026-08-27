@@ -75,6 +75,11 @@ jobs:
         os:
           - ubuntu-22.04
           - macos-latest
+          # Added after a Windows-only path bug (a /\/test$/ strip that
+          # never matches a backslash path) survived five deliverables
+          # because the suite ran on Linux and macOS only — the Electron
+          # job was the first thing ever to run it on Windows.
+          - windows-latest
     name: test (${{ matrix.os }})
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
