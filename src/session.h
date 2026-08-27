@@ -60,6 +60,13 @@ class Session : public Napi::ObjectWrap<Session> {
 public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
 
+    // Cross-class argument validation, against this env's constructor —
+    // see Database::HasInstanceIn.
+    static inline bool HasInstance(Napi::Value val) {
+        return Database::HasInstanceIn(val,
+            &Database::AddonData::session_ctor);
+    }
+
     struct Baton {
         napi_async_work request = NULL;
         Session* session;

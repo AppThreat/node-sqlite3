@@ -225,6 +225,7 @@ void Database::Work_Open(napi_env e, void* data) {
 
 void Database::Work_AfterOpen(napi_env e, napi_status status, void* data) {
     std::unique_ptr<OpenBaton> baton(static_cast<OpenBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
 
     auto* db = baton->db;
 
@@ -370,6 +371,7 @@ void Database::Work_Close(napi_env e, void* data) {
 
 void Database::Work_AfterClose(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
 
     auto* db = baton->db;
 
@@ -1560,6 +1562,7 @@ void Database::Work_Checkpoint(napi_env e, void* data) {
 
 void Database::Work_AfterCheckpoint(napi_env e, napi_status status, void* data) {
     std::unique_ptr<CheckpointBaton> baton(static_cast<CheckpointBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* db = baton->db;
 
     auto env = db->Env();
@@ -1678,6 +1681,7 @@ void Database::Work_TableInfo(napi_env e, void* data) {
 
 void Database::Work_AfterTableInfo(napi_env e, napi_status status, void* data) {
     std::unique_ptr<TableInfoBaton> baton(static_cast<TableInfoBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* db = baton->db;
 
     auto env = db->Env();
@@ -1768,6 +1772,7 @@ void Database::Work_DbConfig(napi_env e, void* data) {
 
 void Database::Work_AfterDbConfig(napi_env e, napi_status status, void* data) {
     std::unique_ptr<DbConfigBaton> baton(static_cast<DbConfigBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* db = baton->db;
 
     auto env = db->Env();
@@ -1877,6 +1882,7 @@ void Database::Work_Exec(napi_env e, void* data) {
 
 void Database::Work_AfterExec(napi_env e, napi_status status, void* data) {
     std::unique_ptr<ExecBaton> baton(static_cast<ExecBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
 
     auto* db = baton->db;
     db->pending--;
@@ -1992,6 +1998,7 @@ void Database::Work_LoadExtension(napi_env e, void* data) {
 
 void Database::Work_AfterLoadExtension(napi_env e, napi_status status, void* data) {
     std::unique_ptr<LoadExtensionBaton> baton(static_cast<LoadExtensionBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
 
     auto* db = baton->db;
     db->pending--;

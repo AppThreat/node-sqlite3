@@ -205,4 +205,29 @@ inline bool OtherIsInt(Napi::Number source) {
 #define BACKUP_END()                                                           \
     Backup::CallGuard backup_call_guard__(backup);
 
+// Async-completion teardown guard (Deliverable 09). A terminated worker
+// has its remaining async-work completions delivered while the isolate
+// unwinds; there every JS-entering napi call — including
+// node-addon-api's checked error path — is fatal. Reference management
+// (delete/unref) still succeeds, so the baton is destroyed normally by
+// the unique_ptr this macro returns through; only the JS delivery is
+// skipped. `false` because an async completion enters with no exception
+// pending on a healthy env, so a refused probe here means the isolate is
+// terminating (see Database::EnvCannotRunJs). Placed after the baton's
+// unique_ptr so the early return still frees it.
+//
+// This is an entry check, so it does not cover a termination that lands
+// *inside* a handler — a completion already converting rows can still
+// take the process down. Measured, five runs each way: one query in
+// flight at terminate() aborts with 134 without this guard and exits 0
+// with it; several queued completions still abort, exactly as they did
+// before the guard existed. Closing that residue needs status-checked
+// napi calls throughout the handlers rather than node-addon-api's
+// checked helpers, whose failure path is itself a JS call — which is why
+// the failure escalates to FATAL instead of raising an exception.
+#define AFTER_WORK_TEARDOWN_GUARD(baton)                                       \
+    if (Database::EnvCannotRunJs(e, false)) {                                  \
+        return;                                                                \
+    }
+
 #endif

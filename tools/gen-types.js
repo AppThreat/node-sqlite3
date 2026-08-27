@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tsc = path.join(root, 'node_modules', '.bin', 'tsc');
-const generated = ['sqlite3.d.ts', 'promises.d.ts', 'trace.d.ts'];
+const generated = ['sqlite3.d.ts', 'promises.d.ts', 'trace.d.ts', 'pool.d.ts'];
 
 // Stale outputs first, so resolution during the run sees the sources.
 for (const file of generated) {
@@ -75,6 +75,14 @@ const promisesPublicTypes = [
     'TransactionOptions',
 ];
 
+// The pool's public types, authored in lib/pool.js' JSDoc.
+const poolPublicTypes = [
+    'PoolOptions',
+    'PoolQueryOptions',
+    'PoolTransaction',
+    'SqlitePool',
+];
+
 const augmentImport = "import './augment.js';";
 const block = (from, names) =>
     `export type {\n${[...names]
@@ -96,6 +104,7 @@ writeFileSync(
     entry,
     `${header}${emitted}${augmentImport}\n` +
         block('promises.js', promisesPublicTypes) +
+        block('pool.js', poolPublicTypes) +
         block('native.js', nativeTypes),
 );
 
@@ -107,7 +116,11 @@ copyFileSync(
     path.join(emitDir, 'trace.d.ts'),
     path.join(root, 'lib', 'trace.d.ts'),
 );
+copyFileSync(
+    path.join(emitDir, 'pool.d.ts'),
+    path.join(root, 'lib', 'pool.d.ts'),
+);
 
 console.log(
-    'gen-types: lib/sqlite3.d.ts, lib/promises.d.ts, lib/trace.d.ts regenerated.',
+    'gen-types: lib/sqlite3.d.ts, lib/promises.d.ts, lib/trace.d.ts, lib/pool.d.ts regenerated.',
 );

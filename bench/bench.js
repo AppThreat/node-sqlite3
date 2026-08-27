@@ -656,6 +656,50 @@ async function main() {
         await new Promise((r) => dbs.close(r));
     }
 
+    // --- Worker pool round trips (Deliverable 09) ---------------------------
+    //
+    // The cross-thread cost: one pool.read/pool.write is a postMessage
+    // down, a query on a worker connection, and a structured-clone back.
+    // Measured against the same query on a local connection.
+    {
+        const path = await import('node:path');
+        const os = await import('node:os');
+        const poolFile = path.join(os.tmpdir(), `bench-pool-${process.pid}.db`);
+        const fs = await import('node:fs');
+        for (const suffix of ['', '-wal', '-shm']) {
+            fs.rmSync(poolFile + suffix, { force: true });
+        }
+        const pool = await sqlite3.pool(poolFile, { readers: 1 });
+        await pool.exec('CREATE TABLE t (a INTEGER, b TEXT)');
+        await pool.write('INSERT INTO t VALUES (?, ?)', [1, 'seed']);
+
+        results.push(
+            await benchAsync('pool.read: 10k (round trip)', async () => {
+                for (let i = 0; i < 10000; i++) {
+                    await pool.read('SELECT a, b FROM t WHERE a = ?', [1]);
+                }
+            }),
+        );
+        results.push(
+            await benchAsync('pool.get: 10k (round trip)', async () => {
+                for (let i = 0; i < 10000; i++) {
+                    await pool.get('SELECT a, b FROM t WHERE a = ?', [1]);
+                }
+            }),
+        );
+        results.push(
+            await benchAsync('pool.write: 10k (round trip)', async () => {
+                for (let i = 0; i < 10000; i++) {
+                    await pool.write('INSERT INTO t VALUES (?, ?)', [i, 'x']);
+                }
+            }),
+        );
+        await pool.close();
+        for (const suffix of ['', '-wal', '-shm']) {
+            fs.rmSync(poolFile + suffix, { force: true });
+        }
+    }
+
     for (const r of results) {
         const value =
             'unit' in r && r.unit === 'us'

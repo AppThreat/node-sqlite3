@@ -86,25 +86,123 @@ public:
                   // terminal for scheduling purposes
     };
 
-    // Per-environment constructor references. These must live in
-    // instance data rather than in file statics: node-addon-api deletes
-    // instance data at env teardown, while a static Napi::Reference is
-    // destroyed at process exit — after the env is gone — so its
-    // napi_delete_reference lands on a dead environment (a segfault at
-    // exit, seen on musl). Instance data is also per-env, which a static
-    // is not: two environments would otherwise share one constructor.
+    // Per-environment constructor references, one slot per exported
+    // class. These must live in instance data rather than in file
+    // statics: node-addon-api deletes instance data at env teardown, while
+    // a static Napi::Reference is destroyed at process exit — after the
+    // env is gone — so its napi_delete_reference lands on a dead
+    // environment (a segfault at exit, seen on musl). Instance data is
+    // also per-env, which a static is not: every worker thread gets its
+    // own napi env, and a static would hand one environment a constructor
+    // belonging to another. Database::Init allocates the block (it runs
+    // first in RegisterModule); each class's Init fills in its own slot.
     struct AddonData {
         Napi::FunctionReference database_ctor;
+        Napi::FunctionReference statement_ctor;
+        Napi::FunctionReference backup_ctor;
+        Napi::FunctionReference session_ctor;
+        Napi::FunctionReference blob_ctor;
         Napi::FunctionReference changeset_iter_ctor;
+        // Cached verdict of EnvCannotRunJs: once an environment refuses
+        // JS mutation it is being torn down and never comes back, so the
+        // probe never needs repeating. probe_object/probe_key are the
+        // reusable probe pair (built once on a live env) so the per-
+        // completion cost is two reference reads and one set_property.
+        bool cannot_run_js = false;
+        napi_ref probe_object = NULL;
+        napi_ref probe_key = NULL;
     };
 
+    // True when this environment can no longer accept JS mutation — it
+    // is being torn down. A terminated worker has its remaining
+    // async-work completions delivered while the isolate is unwinding,
+    // where any JS construction, throw or checked property operation is
+    // fatal (node-addon-api's error path calls napi_throw, which fatals
+    // in turn); those completions must bail out instead. Probed with a
+    // real property operation on a per-env cached pair — the cheap calls
+    // (get_global, typeof, reference get/create/delete) still succeed on
+    // a dying env; property access is where it is refused.
+    //
+    // A refused probe has exactly two causes: the isolate is terminating,
+    // or an exception is already pending. `pending_means_alive` says
+    // which one the caller can be in, and the two callers genuinely
+    // differ:
+    //
+    //   * Synchronous callers (CleanQueue, reached while a throwing
+    //     JS callback unwinds) legitimately run with an exception
+    //     pending on a perfectly healthy env — pass true.
+    //   * Async-work completions enter a fresh callback scope with no
+    //     exception pending on a healthy env, so a refusal there means
+    //     the isolate is terminating — pass false. Treating it as alive
+    //     is what let a terminated worker with several queued
+    //     completions still fatal in Work_AfterAll: V8's termination
+    //     exception is pending, so the probe was refused *and* reported
+    //     alive, and the handler walked straight into the throw.
+    //
+    // The verdict is cached in AddonData (teardown never reverses), but
+    // only when it was reached without a pending exception: if the
+    // premise above is ever wrong, the cost is one dropped completion
+    // rather than a permanently dead connection.
+    static inline bool EnvCannotRunJs(napi_env e,
+            bool pending_means_alive = true) {
+        auto env = Napi::Env(e);
+        auto* data = env.GetInstanceData<AddonData>();
+        if (data != nullptr && data->cannot_run_js) return true;
+
+        napi_value obj = nullptr;
+        napi_value key = nullptr;
+        bool refused;
+        if (data != nullptr && data->probe_object != NULL) {
+            // Hot path: the reusable probe pair, two reference reads.
+            bool has = false;
+            refused = napi_get_reference_value(e, data->probe_object, &obj) != napi_ok
+                || napi_get_reference_value(e, data->probe_key, &key) != napi_ok
+                || napi_has_property(e, obj, key, &has) != napi_ok;
+        } else {
+            refused = napi_create_object(e, &obj) != napi_ok
+                || napi_create_string_utf8(e, "sqlite3_probe", 13, &key) != napi_ok
+                || napi_set_property(e, obj, key, key) != napi_ok;
+            if (!refused && data != nullptr) {
+                // Keep the pair for every later probe on this env. If
+                // the reference creation fails the pair is simply not
+                // cached; the probe above already ran.
+                napi_ref obj_ref = NULL;
+                napi_ref key_ref = NULL;
+                if (napi_create_reference(e, obj, 1, &obj_ref) == napi_ok
+                        && napi_create_reference(e, key, 1, &key_ref) == napi_ok) {
+                    data->probe_object = obj_ref;
+                    data->probe_key = key_ref;
+                }
+            }
+        }
+        if (!refused) return false;
+        bool pending = false;
+        napi_is_exception_pending(e, &pending);
+        if (pending && pending_means_alive) return false;
+        // Only a refusal with no exception pending is provably terminal;
+        // see the note above on why the pending case is not cached.
+        if (!pending && data != nullptr) data->cannot_run_js = true;
+        return true;
+    }
+
     static inline bool HasInstance(Napi::Value val) {
+        return HasInstanceIn(val, &AddonData::database_ctor);
+    }
+
+    // InstanceOf against a constructor held in this env's AddonData.
+    // Shared by every class's HasInstance (Statement, Backup, Session,
+    // Blob): one instance-data slot per env holds all of them, so
+    // cross-class argument validation does not collide the way a single
+    // SetInstanceData slot did. False, not an error, when the class is not
+    // initialized in this env.
+    static inline bool HasInstanceIn(Napi::Value val,
+            Napi::FunctionReference AddonData::*slot) {
         auto env = val.Env();
         Napi::HandleScope scope(env);
-        if (!val.IsObject()) return false;
-        auto obj = val.As<Napi::Object>();
         auto* data = env.GetInstanceData<AddonData>();
-        return obj.InstanceOf(data->database_ctor.Value());
+        if (data == nullptr || (data->*slot).IsEmpty()) return false;
+        if (!val.IsObject()) return false;
+        return val.As<Napi::Object>().InstanceOf((data->*slot).Value());
     }
 
     struct Baton {

@@ -109,6 +109,9 @@ Napi::Object Blob::Init(Napi::Env env, Napi::Object exports) {
         InstanceAccessor("closed", &Blob::ClosedGetter, nullptr),
     });
 
+    // Per-env (see Database::AddonData).
+    env.GetInstanceData<Database::AddonData>()->blob_ctor =
+        Napi::Persistent(t);
     exports.Set("Blob", t);
     return exports;
 }
@@ -164,6 +167,19 @@ void Blob::CleanQueue() {
     Napi::HandleScope scope(env);
 
     if (queue.empty()) return;
+
+    // Environment teardown (worker termination): failing the queued
+    // calls constructs JS on a dying environment, which is fatal. Drop
+    // them instead — reference cleanup still works there, so the
+    // batons are destroyed normally.
+    if (Database::EnvCannotRunJs(env)) {
+        while (!queue.empty()) {
+            auto call = std::unique_ptr<Call>(queue.front());
+            queue.pop();
+            delete call->baton;
+        }
+        return;
+    }
 
     EXCEPTION("Blob is already closed", SQLITE_MISUSE, exception);
     Napi::Value argv[] = { exception };
@@ -282,6 +298,7 @@ void Blob::Work_Open(napi_env e, void* data) {
 
 void Blob::Work_AfterOpen(napi_env e, napi_status status, void* data) {
     std::unique_ptr<OpenBaton> baton(static_cast<OpenBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* blob = baton->blob;
     auto* db = baton->db;
 
@@ -486,6 +503,7 @@ void Blob::Work_Read(napi_env e, void* data) {
 
 void Blob::Work_AfterRead(napi_env e, napi_status status, void* data) {
     std::unique_ptr<IoBaton> baton(static_cast<IoBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* blob = baton->blob;
 
     auto env = blob->Env();
@@ -584,6 +602,7 @@ void Blob::Work_Write(napi_env e, void* data) {
 
 void Blob::Work_AfterWrite(napi_env e, napi_status status, void* data) {
     std::unique_ptr<IoBaton> baton(static_cast<IoBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* blob = baton->blob;
 
     auto env = blob->Env();
@@ -637,6 +656,7 @@ void Blob::Work_Reopen(napi_env e, void* data) {
 
 void Blob::Work_AfterReopen(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* blob = baton->blob;
 
     auto env = blob->Env();
@@ -694,6 +714,7 @@ void Blob::Work_Close(napi_env e, void* data) {
 
 void Blob::Work_AfterClose(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* blob = baton->blob;
 
     auto env = blob->Env();
@@ -720,6 +741,14 @@ Napi::Value Blob::SizeGetter(const Napi::CallbackInfo& info) {
     // cannot; say which of the two states the caller is actually in,
     // because "not open" reads as "closed" when it usually means "not
     // open yet".
+    //
+    // Decision (D08 finding 5, settled in D09): keep throwing rather than
+    // join Statement's read-`undefined`-until-ready convention. The
+    // statement accessors expose derived metadata snapshots; `size` is a
+    // dimension of a live native handle, and `undefined` would flow into
+    // arithmetic (`size + offset` → NaN) and buffer sizing silently — the
+    // silent-coercion bug class this package exists to close. The error
+    // messages above are state-specific, so the loud path is precise.
     // Order matters: _handle is NULL before the open completes as well as
     // after a close, so the not-yet-open case has to be tested first.
     if (!blob->inited && !blob->closed) {

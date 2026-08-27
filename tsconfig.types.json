@@ -20,6 +20,8 @@
         "lib/promises.js",
         "lib/trace.js",
         "lib/augment.d.ts",
-        "lib/native.d.ts"
+        "lib/native.d.ts",
+        "lib/pool.js",
+        "lib/worker.js"
     ]
 }

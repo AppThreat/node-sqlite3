@@ -532,6 +532,59 @@ cannot grow through the handle: size the column first (e.g.
 through a blob handle surfaces as a `'preupdate'` delete event (the new
 values are not yet available inside `sqlite3_blob_write`).
 
+## Worker threads and the connection pool (v9)
+
+The addon is context-aware: it loads cleanly in every `worker_threads`
+worker, and each environment gets its own constructors. Two supported
+ways to use it from workers — plus the pool, which is the batteries-
+included version:
+
+**Path handoff** — the worker opens its own connection to the same file
+(WAL mode gives real read concurrency):
+
+```js
+const w = new Worker('./db-worker.js', {
+    workerData: { filename: 'app.db' },
+});
+```
+
+**Bytes handoff** — move an in-memory database across threads with one
+copy (`serializeToBytes()` → transfer → `deserializeFromBytes()`):
+
+```js
+const bytes = await db.serializeToBytes();
+const movable = bytes.slice().buffer;      // plain ArrayBuffer copy
+w.postMessage({ bytes: movable }, [movable]);
+// worker: await sqlite3.deserializeFromBytes(new Uint8Array(bytes))
+```
+
+**The pool** — one writer plus N read-only reader connections, each on
+its own worker; writes queue instead of racing to `SQLITE_BUSY`:
+
+```js
+const pool = await sqlite3.pool('app.db', { readers: 4 });
+
+const rows = await pool.read('SELECT * FROM t WHERE a = ?', [1]);
+const one  = await pool.get('SELECT b FROM t WHERE a = ?', [1]);
+await pool.write('INSERT INTO t (b) VALUES (?)', ['hi']);
+
+await pool.transaction(async (tx) => {
+    const row = await tx.get('SELECT a FROM t');   // pinned to the writer
+    await tx.write('UPDATE t SET a = ?', [row.a + 1]);
+});
+
+await pool.close();   // drains, closes every connection, no worker survives
+```
+
+Queries accept `{ signal }` (cancellation crosses the thread boundary
+through a shared-memory flag), errors keep `code`/`errno`/`primaryCode`,
+and `await using pool` works. Rows are structured-cloned across the
+boundary: blob columns come back as `Uint8Array` (not `Buffer`) and huge
+result sets pay a copy — the pool is for many small queries, not bulk
+reads. See [docs/concurrency.md](docs/concurrency.md) for the full
+picture: `serialize()`/`parallelize()` semantics, WAL, busy timeouts,
+and when to use one connection, several, or the pool.
+
 ## Source install
 
 To skip searching for pre-compiled binaries, and force a build from source, use

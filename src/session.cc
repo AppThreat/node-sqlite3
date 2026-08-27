@@ -529,6 +529,9 @@ Napi::Object Session::Init(Napi::Env env, Napi::Object exports) {
         InstanceAccessor("closed", &Session::ClosedGetter, nullptr),
     });
 
+    // Per-env (see Database::AddonData).
+    env.GetInstanceData<Database::AddonData>()->session_ctor =
+        Napi::Persistent(t);
     exports.Set("Session", t);
     return exports;
 }
@@ -584,6 +587,19 @@ void Session::CleanQueue() {
     Napi::HandleScope scope(env);
 
     if (queue.empty()) return;
+
+    // Environment teardown (worker termination): failing the queued
+    // calls constructs JS on a dying environment, which is fatal. Drop
+    // them instead — reference cleanup still works there, so the
+    // batons are destroyed normally.
+    if (Database::EnvCannotRunJs(env)) {
+        while (!queue.empty()) {
+            auto call = std::unique_ptr<Call>(queue.front());
+            queue.pop();
+            delete call->baton;
+        }
+        return;
+    }
 
     // Every queued call is failed rather than dropped: a silent skip is
     // the failure mode this codebase exists to prevent. (Calls queued
@@ -752,6 +768,7 @@ void Session::Work_Create(napi_env e, void* data) {
 
 void Session::Work_AfterCreate(napi_env e, napi_status status, void* data) {
     std::unique_ptr<CreateBaton> baton(static_cast<CreateBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* session = baton->session;
     auto* db = baton->db;
 
@@ -912,6 +929,7 @@ void Session::Work_Changeset(napi_env e, void* data) {
 
 void Session::Work_AfterChangeset(napi_env e, napi_status status, void* data) {
     std::unique_ptr<BufferBaton> baton(static_cast<BufferBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* session = baton->session;
 
     auto env = session->Env();
@@ -981,6 +999,7 @@ void Session::Work_Close(napi_env e, void* data) {
 
 void Session::Work_AfterClose(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* session = baton->session;
 
     auto env = session->Env();
@@ -1165,6 +1184,7 @@ void Database::Work_ApplyChangeset(napi_env e, void* data) {
 
 void Database::Work_AfterApplyChangeset(napi_env e, napi_status status, void* data) {
     std::unique_ptr<ApplyBaton> baton(static_cast<ApplyBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* db = baton->db;
 
     auto env = db->Env();
@@ -1251,6 +1271,7 @@ void Database::Work_SerializeToBytes(napi_env e, void* data) {
 
 void Database::Work_AfterSerializeToBytes(napi_env e, napi_status status, void* data) {
     std::unique_ptr<SerializeBaton> baton(static_cast<SerializeBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* db = baton->db;
 
     auto env = db->Env();
@@ -1390,6 +1411,7 @@ void Database::Work_Deserialize(napi_env e, void* data) {
 
 void Database::Work_AfterDeserialize(napi_env e, napi_status status, void* data) {
     std::unique_ptr<DeserializeBaton> baton(static_cast<DeserializeBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* db = baton->db;
 
     auto env = db->Env();

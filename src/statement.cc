@@ -77,6 +77,11 @@ Napi::Object Statement::Init(Napi::Env env, Napi::Object exports) {
       InstanceMethod("status", &Statement::Status, napi_default_method),
     });
 
+    // Per-env (see Database::AddonData): a worker thread is its own napi
+    // env, so a file-static constructor here would be shared across
+    // environments — and destroyed after the env at process exit.
+    env.GetInstanceData<Database::AddonData>()->statement_ctor =
+        Napi::Persistent(t);
     exports.Set("Statement", t);
     return exports;
 }
@@ -287,6 +292,7 @@ void Statement::EndCall() {
 
 void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
     std::unique_ptr<PrepareBaton> baton(static_cast<PrepareBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -601,6 +607,7 @@ void Statement::Work_Bind(napi_env e, void* data) {
 
 void Statement::Work_AfterBind(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -674,6 +681,7 @@ void Statement::Work_Get(napi_env e, void* data) {
 
 void Statement::Work_AfterGet(napi_env e, napi_status status, void* data) {
     std::unique_ptr<RowBaton> baton(static_cast<RowBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -764,6 +772,7 @@ void Statement::Work_Run(napi_env e, void* data) {
 
 void Statement::Work_AfterRun(napi_env e, napi_status status, void* data) {
     std::unique_ptr<RunBaton> baton(static_cast<RunBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -838,6 +847,7 @@ void Statement::Work_All(napi_env e, void* data) {
 
 void Statement::Work_AfterAll(napi_env e, napi_status status, void* data) {
     std::unique_ptr<RowsBaton> baton(static_cast<RowsBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -1049,6 +1059,7 @@ void Statement::AsyncEach(uv_async_t* handle) {
 
 void Statement::Work_AfterEach(napi_env e, napi_status status, void* data) {
     std::unique_ptr<EachBaton> baton(static_cast<EachBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -1088,6 +1099,7 @@ void Statement::Work_Reset(napi_env e, void* data) {
 
 void Statement::Work_AfterReset(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -1170,6 +1182,7 @@ void Statement::Work_Fetch(napi_env e, void* data) {
 
 void Statement::Work_AfterFetch(napi_env e, napi_status status, void* data) {
     std::unique_ptr<FetchBaton> baton(static_cast<FetchBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* stmt = baton->stmt;
 
     auto env = stmt->Env();
@@ -1886,6 +1899,19 @@ void Statement::FailQueue(Napi::Value error, bool emit_if_unhandled) {
 void Statement::CleanQueue() {
     auto env = this->Env();
     Napi::HandleScope scope(env);
+
+    // Environment teardown (worker termination): the error delivery
+    // below constructs JS on a dying environment, which is fatal. Drop
+    // the queued calls instead — reference cleanup still works there,
+    // so the batons are destroyed normally.
+    if (Database::EnvCannotRunJs(env)) {
+        while (!queue.empty()) {
+            auto call = std::unique_ptr<Call>(queue.front());
+            queue.pop();
+            delete call->baton;
+        }
+        return;
+    }
 
     if (prepared && !queue.empty()) {
         // This statement has already been prepared and is now finalized.

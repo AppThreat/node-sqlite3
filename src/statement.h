@@ -25,6 +25,13 @@ public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
     static Napi::Value New(const Napi::CallbackInfo& info);
 
+    // Cross-class argument validation (e.g. "is this a Statement?"),
+    // against this env's constructor — see Database::HasInstanceIn.
+    static inline bool HasInstance(Napi::Value val) {
+        return Database::HasInstanceIn(val,
+            &Database::AddonData::statement_ctor);
+    }
+
     friend class Database;
 
     // Runs the finalize work of an original finalize baton (directly, or

@@ -86,6 +86,46 @@ describe('statement cache', function () {
         });
     });
 
+    it('re-runs a cached get() with no bind parameters from its first row', function (_t, done) {
+        // db.get(sql) with no parameters used to re-step the previous
+        // call's cursor: the second call returned undefined while the
+        // first row sat unconsumed, and the unreset statement pinned the
+        // connection's WAL read snapshot. The cached path now forces a
+        // fresh execution (an empty bind array marks "bindings
+        // supplied"). Fails on release/v9: the second get yields
+        // undefined.
+        db.cacheStatements();
+        for (let i = 0; i < 3; i++) {
+            db.run('INSERT INTO t (a) VALUES (?)', i);
+        }
+        db.wait(function () {
+            db.get('SELECT COUNT(*) AS n FROM t', function (err, row) {
+                assert.ifError(err);
+                assert.strictEqual(row.n, 3, 'first call');
+                db.get('SELECT COUNT(*) AS n FROM t', function (err2, row2) {
+                    assert.ifError(err2);
+                    assert.notStrictEqual(row2, undefined, 'second call');
+                    assert.strictEqual(row2.n, 3, 'second call re-runs');
+                    // The promise-mode form of the same path.
+                    db.get('SELECT MAX(a) AS m FROM t').then(function (row3) {
+                        assert.strictEqual(row3.m, 2);
+                        done();
+                    }, done);
+                });
+            });
+        });
+    });
+
+    it('cached getSync re-runs without parameters too', function (_t, done) {
+        db.cacheStatements();
+        for (let i = 0; i < 3; i++) {
+            db.runSync('INSERT INTO t (a) VALUES (?)', i);
+        }
+        assert.strictEqual(db.getSync('SELECT COUNT(*) AS n FROM t').n, 3);
+        assert.strictEqual(db.getSync('SELECT COUNT(*) AS n FROM t').n, 3);
+        done();
+    });
+
     it('supports get/all/each/map through the cache', function (_t, done) {
         db.cacheStatements();
         const buf = Buffer.from('blob-bytes');

@@ -254,6 +254,32 @@ delivers the error to its completion handler — or, if it was called
 without one, to its row callback; it is never handed to both, and the row
 callback is never invoked with a row-shaped call it has no row for.
 
+## New surface: worker-thread safety and the connection pool
+
+The addon now loads correctly in `worker_threads` workers (per-
+environment constructors, and `worker.terminate()` with a query in
+flight no longer crashes the process, with one remaining caveat noted in
+[docs/concurrency.md](docs/concurrency.md#terminating-a-worker)), and
+`sqlite3.pool(filename, options?)` builds a
+worker pool over one file: a single writer connection plus read-only
+readers, with `pool.read`/`get`/`write`/`exec`/`transaction`/`close`,
+`{ signal }` cancellation, preserved error diagnostics, and
+`Symbol.asyncDispose`. It is opt-in and promise-only — a single
+`Database` remains the primary object. Two behavioural notes for code
+that used workers informally before:
+
+- `db.get()`/`db.getSync()` on the statement cache with **no bind
+  parameters** used to return `undefined` from the second identical call
+  onwards (the cached statement re-stepped its cursor). Both now re-run
+  from the first row. A user-held `stmt.get()` keeps its documented
+  cursor-stepping behaviour (`marshalling.test.js` pins it); only the
+  Database-level convenience changed.
+- Blob columns in **pool** results are `Uint8Array`, not `Buffer`
+  (structured clone does not preserve the subclass). Bind values are
+  affected in neither direction — a `Buffer` binds as a blob as always.
+
+See docs/concurrency.md for the concurrency model in full.
+
 ## New surfaces: sessions, snapshots and blob handles
 
 Everything here is additive; no v8 behaviour changed to make room.

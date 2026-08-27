@@ -7,7 +7,8 @@
 // that ship in lib/: the generated lib/sqlite3.d.ts (the package entry)
 // plus the declarations it resolves through — lib/native.d.ts (the
 // hand-written native shapes), lib/augment.d.ts (the JS layer's members)
-// and the generated lib/promises.d.ts and lib/trace.d.ts. All of them
+// and the generated lib/promises.d.ts, lib/trace.d.ts and lib/pool.d.ts.
+// All of them
 // are checked; every finding exits non-zero.
 //
 // Two parser rules keep the check honest without false positives:
@@ -26,6 +27,7 @@ const FILES = [
     'lib/augment.d.ts',
     'lib/promises.d.ts',
     'lib/trace.d.ts',
+    'lib/pool.d.ts',
 ];
 
 const root = new URL('..', import.meta.url);

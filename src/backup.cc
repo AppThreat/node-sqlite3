@@ -23,6 +23,9 @@ Napi::Object Backup::Init(Napi::Env env, Napi::Object exports) {
         InstanceAccessor("retryErrors", &Backup::RetryErrorGetter, &Backup::RetryErrorSetter),
     });
 
+    // Per-env (see Database::AddonData).
+    env.GetInstanceData<Database::AddonData>()->backup_ctor =
+        Napi::Persistent(t);
     exports.Set("Backup", t);
     return exports;
 }
@@ -77,6 +80,17 @@ template <class T> void Backup::Error(T* baton) {
 void Backup::CleanQueue() {
     auto env = this->Env();
     Napi::HandleScope scope(env);
+
+    // Environment teardown (worker termination): failing the queued
+    // calls constructs JS on a dying environment, which is fatal. Drop
+    // them instead — reference cleanup still works there, so the
+    // batons are destroyed normally.
+    if (Database::EnvCannotRunJs(env)) {
+        while (!queue.empty()) {
+            queue.pop();
+        }
+        return;
+    }
 
     if (inited && !queue.empty()) {
         // This backup has already been initialized and is now finished.
@@ -222,6 +236,7 @@ void Backup::EndCall() {
 
 void Backup::Work_AfterInitialize(napi_env e, napi_status status, void* data) {
     std::unique_ptr<InitializeBaton> baton(static_cast<InitializeBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* backup = baton->backup;
 
     auto env = backup->Env();
@@ -288,6 +303,7 @@ void Backup::Work_Step(napi_env e, void* data) {
 
 void Backup::Work_AfterStep(napi_env e, napi_status status, void* data) {
     std::unique_ptr<StepBaton> baton(static_cast<StepBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* backup = baton->backup;
 
     auto env = backup->Env();
@@ -338,6 +354,7 @@ void Backup::Work_Finish(napi_env e, void* data) {
 
 void Backup::Work_AfterFinish(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* backup = baton->backup;
 
     auto env = backup->Env();

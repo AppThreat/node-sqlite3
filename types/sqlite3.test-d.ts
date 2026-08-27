@@ -400,3 +400,43 @@ expectType<string>(err.code);
 expectType<string>(err.primaryCode);
 expectType<number>(err.errno);
 expectType<string>(err.message);
+
+// --- Worker pool (Deliverable 09) -------------------------------------------
+
+import type {
+    PoolOptions,
+    PoolQueryOptions,
+    SqlitePool,
+} from '../lib/sqlite3.js';
+
+// The factory resolves a fully-typed pool.
+declare const poolPromise: Promise<SqlitePool>;
+expectType<Promise<SqlitePool>>(sqlite3.pool('app.db'));
+expectType<Promise<SqlitePool>>(sqlite3.pool('app.db', { readers: 2 }));
+expectType<Promise<SqlitePool>>(poolPromise);
+
+// The option surface is closed over the declared keys.
+declare const poolOpts: PoolOptions;
+expectType<number | undefined>(poolOpts.readers);
+expectType<boolean | undefined>(poolOpts.walMode);
+expectType<number | undefined>(poolOpts.busyTimeout);
+expectType<'number' | 'bigint' | 'mixed' | undefined>(poolOpts.integerMode);
+
+// Query options carry the signal.
+declare const queryOpts: PoolQueryOptions;
+expectType<AbortSignal | undefined>(queryOpts.signal);
+
+// The query surface.
+declare const p: SqlitePool;
+expectType<Promise<Row[]>>(p.read('SELECT a'));
+expectType<Promise<Row | undefined>>(p.get('SELECT a'));
+expectType<Promise<import('../lib/promises.js').PromiseRunResult>>(
+    p.write('INSERT'),
+);
+expectType<Promise<void>>(p.exec('VACUUM'));
+expectType<Promise<number>>(p.transaction(async () => 42));
+expectType<string>(p.filename);
+expectType<number>(p.readers);
+expectType<boolean>(p.closed);
+expectType<Promise<void>>(p.close());
+expectType<Promise<void>>(p[Symbol.asyncDispose]());

@@ -32,13 +32,14 @@ export type CachedRegistry = {
  * The public `sqlite3` namespace object the package exports as its
  * default: the native binding (the five classes and every SQLite
  * constant with its literal value) plus the JS-layer `verbose`,
- * `cached`, `open` and `deserializeFromBytes`.
+ * `cached`, `open`, `deserializeFromBytes` and `pool`.
  */
 export type sqlite3 = import("./sqlite3-binding.js").NativeBinding & {
     verbose: () => sqlite3;
     cached: CachedRegistry;
     open: import("./promises.js").OpenFunction;
     deserializeFromBytes: (bytes: Uint8Array | ArrayBuffer | DataView, options?: import("./native.js").DeserializeOptions) => Promise<import("./sqlite3-binding.js").Database>;
+    pool: typeof import("./pool.js").pool;
 };
 declare const sqlite3: sqlite3;
 export { Backup, Blob, Database, Session, Statement } from "./sqlite3-binding.js";
@@ -50,6 +51,12 @@ export type {
     SignalOptions,
     TransactionOptions,
 } from './promises.js';
+export type {
+    PoolOptions,
+    PoolQueryOptions,
+    PoolTransaction,
+    SqlitePool,
+} from './pool.js';
 export type {
     AggregateDefinition,
     ApplyChangesetOptions,

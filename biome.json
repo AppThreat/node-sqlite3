@@ -123,7 +123,8 @@
             "includes": [
                 "lib/sqlite3.d.ts",
                 "lib/promises.d.ts",
-                "lib/trace.d.ts"
+                "lib/trace.d.ts",
+                "lib/pool.d.ts"
             ],
             "formatter": {
                 "enabled": false
@@ -138,7 +139,11 @@
             "linter": {
                 "rules": {
                     "complexity": {
-                        "noBannedTypes": "off"
+                        "noBannedTypes": "off",
+                        "noUselessEmptyExport": "off"
+                    },
+                    "correctness": {
+                        "noUnusedPrivateClassMembers": "off"
                     }
                 }
             }
