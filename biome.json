@@ -31,8 +31,7 @@
             "!deps/**",
             "!build/**",
             "!prebuilds/**",
-            "!test/tmp/**",
-            "!test/nw/**"
+            "!test/tmp/**"
         ],
         "rules": {
             "preset": "recommended",
@@ -101,22 +100,14 @@
             "!deps/**",
             "!build/**",
             "!prebuilds/**",
-            "!test/tmp/**",
-            "!test/nw/**"
+            "!test/tmp/**"
         ],
         "indentStyle": "space",
         "indentWidth": 4
     },
     "files": {
         "maxSize": 5242880,
-        "includes": [
-            "**",
-            "!deps",
-            "!build",
-            "!prebuilds",
-            "!test/tmp",
-            "!test/nw"
-        ]
+        "includes": ["**", "!deps", "!build", "!prebuilds", "!test/tmp"]
     },
     "overrides": [
         {

@@ -25,8 +25,13 @@ trustPolicyExclude:
 # pnpm 11 no longer reads the `pnpm` field in package.json; overrides and
 # built-dependency policy live here instead, even in a single-package repo.
 #
-# onlyBuiltDependencies is intentionally empty: no dependency in this tree
-# needs lifecycle scripts. @biomejs/biome (Deliverable 12) ships its
-# platform binaries as plain optionalDependencies with no install script,
-# so it needs no entry here. strictDepBuilds fails the install and names
+# onlyBuiltDependencies names the dependencies whose install scripts may
+# run. electron (Deliverable 10, devDependency only) downloads its
+# platform binary in a postinstall — without this entry strictDepBuilds
+# fails the install. Pinned exactly in package.json, so the download is
+# reproducible. @biomejs/biome (Deliverable 12) ships its platform
+# binaries as plain optionalDependencies with no install script, so it
+# needs no entry here. strictDepBuilds fails the install and names
 # anything blocked, so a needed entry cannot be missed silently.
+onlyBuiltDependencies:
+  - electron

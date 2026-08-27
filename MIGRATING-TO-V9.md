@@ -316,6 +316,33 @@ Everything here is additive; no v8 behaviour changed to make room.
   omitted one (matches anything); previously the empty-string target
   was unexpressible.
 
+## A throwing completion callback no longer wedges the connection
+
+`exec`, `open`, `close` and `loadExtension` fired their completion
+callback as their last JS action and drained the database queue
+afterwards. A callback that **threw** used to skip that drain — the
+early return left everything queued behind the call undispatched
+forever, so every later query on the connection never settled. The
+drain now runs on every exit path (`Database::ProcessGuard`), including
+the throwing one, and work queued behind a close that completes is
+failed with `SQLITE_MISUSE` instead of hanging. The thrown error still
+surfaces as an uncaught exception exactly as before.
+
+## Electron is now supported and verified
+
+The Node-API 10 prebuild loads in Electron **without any rebuild**
+(Node-API is ABI-stable across runtimes); the verified minimum is
+**Electron 35** (`engines.electron >= 35`, the first major whose
+bundled Node exposes Node-API 10). On older Electron (32–34, Node-API
+9) the load does not throw — it segfaults inside module registration —
+so `lib/sqlite3-binding.js` now checks `process.versions.napi` *before*
+loading and throws an error naming the floors. Binding load failures
+everywhere now name the resolved package root and, when the package
+sits inside an `app.asar` archive, the `asarUnpack` configuration that
+fixes it (the original `node-gyp-build` error is preserved as
+`err.cause`). node-webkit support and its build instructions were
+removed. See [docs/electron.md](docs/electron.md).
+
 ## Minor notes
 
 - `Date` still binds as epoch milliseconds (REAL) and reads back as a

@@ -54,8 +54,10 @@ exists and runtime resolution never needs the install script.
 
 The one case where you *do* need to allow the script is a **source build**:
 no prebuild for your platform, or `--build-from-source`, `--sqlite=`,
-SQLCipher, or a custom runtime (Electron / node-webkit). Then the install
-script must actually run `node-gyp`. Add to your `pnpm-workspace.yaml`:
+SQLCipher, or a custom `sqlite_magic`. (Electron needs none of this: the
+Node-API prebuild loads as-is on Electron >= 35 — see
+[electron.md](electron.md).) Then the install script must actually run
+`node-gyp`. Add to your `pnpm-workspace.yaml`:
 
 ```yaml
 onlyBuiltDependencies:
@@ -83,8 +85,9 @@ A source build happens when:
 - you build against an external SQLite or SQLCipher (`--sqlite=`,
   `--sqlite_libname=`);
 - you set a custom file magic (`--sqlite_magic=`); or
-- you target a non-Node runtime ABI (node-webkit; Electron with a custom
-  `--target`).
+- you build against Electron headers with a custom `--target` (only ever
+  needed together with a source build; the default prebuild loads in
+  Electron unchanged).
 
 Toolchain requirements:
 
@@ -143,10 +146,12 @@ Error: No native build was found for platform=linux arch=arm64 runtime=node ...
 3. **Stale `prebuilds/` while iterating on C++**: `node-gyp-build` prefers
    `prebuilds/` over `build/`, so your `pnpm run rebuild` output is being
    shadowed. Delete `prebuilds/` while iterating.
-4. **Wrong ABI for the embedding runtime** (Electron, node-webkit): rebuild
-   from source with `--runtime=electron --target=<version>
-   --dist-url=https://electronjs.org/headers` (or `nw-gyp` for node-webkit).
-   A binary built for Node cannot load in node-webkit and vice versa.
+4. **Runtime below the Node-API floor** (Node < 22, Electron < 35): the
+   binding loader refuses with an error naming the floors rather than
+   crashing. On Electron the default prebuild needs no rebuild at all; only
+   a source build against Electron headers uses `--runtime=electron
+   --target=<version> --dist-url=https://electronjs.org/headers` (see
+   [electron.md](electron.md)).
 
 ## Development
 

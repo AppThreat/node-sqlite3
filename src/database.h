@@ -402,6 +402,49 @@ public:
         SyncSqliteGuard& operator=(const SyncSqliteGuard&) = delete;
     };
 
+    // Drains the database queue on every exit path from a Work_After*
+    // handler, including TRY_CATCH_CALL's early return when a JS
+    // callback throws. The database-level completions (open/exec/close/
+    // loadExtension) call Process() as their last statement; a throwing
+    // completion callback used to skip it, leaving everything queued
+    // behind the exclusive call undispatched forever — every later
+    // query on the connection never settled. Same discipline as
+    // Statement::CallGuard, which runs the statement-side bookkeeping
+    // on every exit path for the same reason.
+    //
+    // When the handler exits through a throwing callback the exception
+    // is still pending, and Process() cannot deliver JS under it —
+    // napi_call_function is refused while an exception is pending, so
+    // the Closed-state branch (which fails queued batons inline) would
+    // bail out of its first callback and strand the rest. The guard
+    // lifts the pending exception for the drain and re-arms it
+    // afterwards, so the uncaught-exception delivery the runtime
+    // performs is unchanged.
+    struct ProcessGuard {
+        Database* db;
+        explicit ProcessGuard(Database* db_) : db(db_) {}
+        ~ProcessGuard() {
+            auto env = db->Env();
+            napi_value pending = nullptr;
+            bool had_pending = false;
+            napi_is_exception_pending(env, &had_pending);
+            if (had_pending) {
+                napi_get_and_clear_last_exception(env, &pending);
+            }
+            db->Process();
+            // Re-arm the lifted exception — unless the drain itself
+            // threw, in which case that newer exception wins and the
+            // lifted one is dropped (one exception still surfaces).
+            if (pending != nullptr) {
+                bool still_clean = false;
+                napi_is_exception_pending(env, &still_clean);
+                if (!still_clean) napi_throw(env, pending);
+            }
+        }
+        ProcessGuard(const ProcessGuard&) = delete;
+        ProcessGuard& operator=(const ProcessGuard&) = delete;
+    };
+
     Database(const Napi::CallbackInfo& info);
 
     ~Database() {

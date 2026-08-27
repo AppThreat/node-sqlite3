@@ -62,11 +62,22 @@ requirements and the pnpm specifics for source builds.
 
 ### Other ways to install
 
-It is also possible to make your own build of `sqlite3` from its source instead of its npm package ([See below.](#source-install)).
+It is also possible to make your own build of `sqlite3` from its source instead of its npm package ([See below.](#source-install)).
 
-The `sqlite3` module also works with [node-webkit](https://github.com/rogerwang/node-webkit) if node-webkit contains a supported version of Node.js engine. [(See below.)](#building-for-node-webkit)
+SQLite's [SQLCipher extension](https://github.com/sqlcipher/sqlcipher) is also supported. [(See below.)](#building-for-sqlcipher)
 
-SQLite's [SQLCipher extension](https://github.com/sqlcipher/sqlcipher) is also supported. [(See below.)](#building-for-sqlcipher)
+## Electron
+
+No rebuild, no `electron-rebuild`: v9 ships Node-API 10 prebuilds, and Node-API
+is ABI-stable across runtimes — the same binary Node loads is the one Electron
+loads. The minimum is **Electron 35** (the first major whose bundled Node
+exposes Node-API 10; verified by loading the prebuild in Electron 35 and 44),
+recorded in `engines.electron`. Source builds against Electron headers are only
+needed for SQLCipher or a custom `sqlite_magic` — see
+[docs/electron.md](docs/electron.md) for process placement (main vs. utility
+process vs. preload), ASAR/`asarUnpack` configuration for electron-builder and
+electron-forge, bundler externals, `userData` paths, and the SQLCipher rebuild
+path.
 
 # API
 
@@ -611,43 +622,13 @@ npm install --build-from-source --sqlite=/usr/local/opt/sqlite/
 
 ## Custom file header (magic)
 
-The default sqlite file header is "SQLite format 3". You can specify a different magic, though this will make standard tools and libraries unable to work with your files.
+The default sqlite file header is “SQLite format 3”. You can specify a different magic, though this will make standard tools and libraries unable to work with your files.
 
 ```bash
-npm install --build-from-source --sqlite_magic="MyCustomMagic15"
+npm install --build-from-source --sqlite_magic=”MyCustomMagic15”
 ```
 
 Note that the magic _must_ be exactly 15 characters long (16 bytes including null terminator).
-
-## Building for node-webkit
-
-Because of ABI differences, `sqlite3` must be built in a custom to be used with [node-webkit](https://github.com/rogerwang/node-webkit).
-
-To build `sqlite3` for node-webkit:
-
-1. Install [`nw-gyp`](https://github.com/rogerwang/nw-gyp) globally: `npm install nw-gyp -g` _(unless already installed)_
-
-2. Build the module with the custom flags of `--runtime`, `--target_arch`, and `--target`:
-
-```bash
-NODE_WEBKIT_VERSION="0.8.6" # see latest version at https://github.com/rogerwang/node-webkit#downloads
-npm install sqlite3 --build-from-source --runtime=node-webkit --target_arch=ia32 --target=$(NODE_WEBKIT_VERSION)
-```
-
-You can also run this command from within a `sqlite3` checkout:
-
-```bash
-npm install --build-from-source --runtime=node-webkit --target_arch=ia32 --target=$(NODE_WEBKIT_VERSION)
-```
-
-Remember the following:
-
-- You must provide the right `--target_arch` flag. `ia32` is needed to target 32bit node-webkit builds, while `x64` will target 64bit node-webkit builds (if available for your platform).
-
-- After the `sqlite3` package is built for node-webkit it cannot run in the vanilla Node.js (and vice versa).
-  - For example, `npm test` of the node-webkit's package would fail.
-
-Visit the “[Using Node modules](https://github.com/rogerwang/node-webkit/wiki/Using-Node-modules)” article in the node-webkit's wiki for more details.
 
 ## Building for SQLCipher
 
@@ -684,16 +665,23 @@ npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=/usr
 
 ### Custom builds and Electron
 
-Running `sqlite3` through [electron-rebuild](https://github.com/electron/electron-rebuild) does not preserve the SQLCipher extension, so some additional flags are needed to make this build Electron compatible. Your `npm install sqlite3 --build-from-source` command needs these additional flags (be sure to replace the target version with the current Electron version you are working with):
+The default build needs **no Electron-specific step at all**: v9 ships Node-API
+10 prebuilds and Node-API is ABI-stable across runtimes, so the prebuild loads
+in Electron >= 35 unchanged (see [Electron](#electron) above and
+[docs/electron.md](docs/electron.md)).
+
+Running a **source** build (SQLCipher, custom `sqlite_magic`) against Electron
+headers needs extra flags for `npm install sqlite3 --build-from-source`
+(replace the target with your Electron version):
 
 ```bash
---runtime=electron --target=18.2.1 --dist-url=https://electronjs.org/headers
+--runtime=electron --target=44.0.0 --dist-url=https://electronjs.org/headers
 ```
 
-In the case of MacOS with Homebrew, the command should look like the following:
+In the case of macOS with Homebrew, the full command looks like:
 
 ```bash
-npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=`brew --prefix` --runtime=electron --target=18.2.1 --dist-url=https://electronjs.org/headers
+npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=`brew --prefix` --runtime=electron --target=44.0.0 --dist-url=https://electronjs.org/headers
 ```
 
 # Testing
@@ -713,6 +701,7 @@ pnpm run rebuild      # recompile after changing C++ (node-gyp rebuild)
 pnpm run lint         # biome check --write (autofix; CI runs lint:check)
 pnpm run test         # node:test, 20s per-test timeout, files run in parallel
 pnpm run prebuild     # produce the shipping prebuilds/ artifacts
+pnpm run test:electron # the full suite + app-env harness inside Electron
 ```
 
 Always use `pnpm run rebuild`, never bare `pnpm rebuild` — the latter is a

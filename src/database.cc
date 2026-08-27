@@ -232,6 +232,14 @@ void Database::Work_AfterOpen(napi_env e, napi_status status, void* data) {
     auto env = db->Env();
     Napi::HandleScope scope(env);
 
+    // Drains the queue even when the completion callback below throws
+    // (TRY_CATCH_CALL's early return). After a *failed* open nothing is
+    // dispatched either way (the connection is still Opening, which
+    // Process does not dispatch from) — the guard changes only the
+    // throwing-callback path. The 'open' event still fires before the
+    // drain, as before.
+    ProcessGuard process_on_exit(db);
+
     Napi::Value argv[1];
     if (baton->status != SQLITE_OK) {
         EXCEPTION(baton->message, baton->status, exception);
@@ -255,7 +263,6 @@ void Database::Work_AfterOpen(napi_env e, napi_status status, void* data) {
     if (db->db_state == DbState::Open) {
         Napi::Value info[] = { Napi::String::New(env, "open") };
         EMIT_EVENT(db->Value(), 1, info);
-        db->Process();
     }
 }
 
@@ -382,6 +389,12 @@ void Database::Work_AfterClose(napi_env e, napi_status status, void* data) {
     // The exclusive close released the database either way.
     db->exclusiveHeld = false;
 
+    // Drains the queue even when the completion callback below throws
+    // (TRY_CATCH_CALL's early return), and on the failed-close path —
+    // work queued behind the close used to sit undispatched forever
+    // there too. The 'close' event still fires before the drain.
+    ProcessGuard process_on_exit(db);
+
     Napi::Value argv[1];
     if (baton->status != SQLITE_OK) {
         // The close failed (e.g. SQLITE_BUSY from outstanding
@@ -409,7 +422,6 @@ void Database::Work_AfterClose(napi_env e, napi_status status, void* data) {
     if (!db->IsOpen()) {
         Napi::Value info[] = { Napi::String::New(env, "close") };
         EMIT_EVENT(db->Value(), 1, info);
-        db->Process();
     }
 }
 
@@ -1892,6 +1904,10 @@ void Database::Work_AfterExec(napi_env e, napi_status status, void* data) {
     auto env = db->Env();
     Napi::HandleScope scope(env);
 
+    // Drains the queue even when the completion callback below throws
+    // (TRY_CATCH_CALL's early return).
+    ProcessGuard process_on_exit(db);
+
     Napi::Function cb = baton->callback.Value();
 
     if (baton->status != SQLITE_OK) {
@@ -1911,8 +1927,6 @@ void Database::Work_AfterExec(napi_env e, napi_status status, void* data) {
         Napi::Value argv[] = { env.Null() };
         TRY_CATCH_CALL(db->Value(), cb, 1, argv);
     }
-
-    db->Process();
 }
 
 Napi::Value Database::Wait(const Napi::CallbackInfo& info) {
@@ -2008,6 +2022,10 @@ void Database::Work_AfterLoadExtension(napi_env e, napi_status status, void* dat
     auto env = db->Env();
     Napi::HandleScope scope(env);
 
+    // Drains the queue even when the completion callback below throws
+    // (TRY_CATCH_CALL's early return).
+    ProcessGuard process_on_exit(db);
+
     Napi::Function cb = baton->callback.Value();
 
     if (baton->status != SQLITE_OK) {
@@ -2026,8 +2044,6 @@ void Database::Work_AfterLoadExtension(napi_env e, napi_status status, void* dat
         Napi::Value argv[] = { env.Null() };
         TRY_CATCH_CALL(db->Value(), cb, 1, argv);
     }
-
-    db->Process();
 }
 
 void Database::RemoveCallbacks() {

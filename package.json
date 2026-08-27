@@ -27,7 +27,9 @@
     },
     "devDependencies": {
         "@biomejs/biome": "2.5.10",
+        "@electron/packager": "20.3.0",
         "@types/node": "^24.13.3",
+        "electron": "43.4.1",
         "prebuildify": "^6.0.1",
         "semver": "^7.8.5",
         "tsd": "^0.33.0",
@@ -46,7 +48,8 @@
     },
     "engines": {
         "node": ">=24",
-        "pnpm": ">=11"
+        "pnpm": ">=11",
+        "electron": ">=35"
     },
     "packageManager": "pnpm@11.21.0",
     "scripts": {
@@ -59,6 +62,8 @@
         "lint:errors": "biome check --diagnostic-level=error",
         "lint:jsdoc": "node contrib/check-jsdoc.js",
         "test": "node test/support/createdb.js && node tools/check-no-only.js && node --test --test-reporter=spec --test-timeout=20000 'test/*.test.js'",
+        "test:electron": "node test/support/createdb.js && node tools/check-no-only.js && node test/electron/run.mjs suite && node test/electron/run.mjs main",
+        "test:electron:asar": "node test/electron/asar.mjs",
         "bench": "node bench/bench.js",
         "gen-types": "node tools/gen-types.js",
         "test:types": "tsd && tsc --noEmit -p tsconfig.check.json"
