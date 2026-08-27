@@ -15,9 +15,11 @@ export function deleteFile(name) {
 }
 
 export function ensureExists(name, _cb) {
-    if (!fs.existsSync(name)) {
-        fs.mkdirSync(name);
-    }
+    // recursive, not existsSync-then-mkdir: node --test runs each file in
+    // its own process, and two before-hooks creating test/tmp at the same
+    // moment raced the check (EEXIST cancelled a whole suite once). mkdir
+    // -p semantics are race-free and tolerate the existing directory.
+    fs.mkdirSync(name, { recursive: true });
 }
 
 export function fileDoesNotExist(name) {
