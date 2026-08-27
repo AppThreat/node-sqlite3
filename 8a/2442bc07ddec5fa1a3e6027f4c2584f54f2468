@@ -1,0 +1,26 @@
+.github/workflows/ci.yml
+  s_1246da50fbe044::t_c14fb335da070e 342-362
+  s_1246da50fbe044::t_2149cd096801f1 310-316
+package.json
+  s_1246da50fbe044::t_fbe3767ea06a4a 64
+test/electron/run.mjs
+  s_1246da50fbe044::t_e1a1816cab6b0d 48-51,54
+tools/run-tests.mjs
+  s_1246da50fbe044::t_beb98e2f0fbdb0 1-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8a2442bc07ddec5fa1a3e6027f4c2584f54f2468",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
