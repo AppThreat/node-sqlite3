@@ -1,0 +1,27 @@
+test/electron/run.mjs
+  s_1246da50fbe044::t_4a472a69aabffa 59-79,81-101,103-104,110-117
+  s_1246da50fbe044::t_ea0ff89de1aef7 80
+  s_1246da50fbe044::t_f429bc79dfd96b 118
+test/electron/asar.mjs
+  s_1246da50fbe044::t_fd7421fd72b006 103-109
+  s_1246da50fbe044::t_9f78eb887ce5f3 191-195
+test/electron/main.mjs
+  s_1246da50fbe044::t_f18611b647c87d 31-73
+  s_1246da50fbe044::t_6788e69a4a2215 182,186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5efb6ed8ec8c9d5f68a9a035d98ef4a4ecd9c131",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
