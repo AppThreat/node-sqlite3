@@ -1,0 +1,25 @@
+test/support/throwing_backup_child.mjs
+  s_1246da50fbe044::t_8ba1542049b27f 42-54
+  s_1246da50fbe044::t_307457ba40077d 15,17
+tools/test-matrix.mjs
+  s_1246da50fbe044::t_4bcbfb51c0ff74 113-120,133,187-194
+  s_1246da50fbe044::t_06d4aac6553968 1-112,121-132,134-186,195-247
+package.json
+  s_1246da50fbe044::t_4bcbfb51c0ff74 69-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "41808fc4e764dda19abd558d59d6bb28dfe29769",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
