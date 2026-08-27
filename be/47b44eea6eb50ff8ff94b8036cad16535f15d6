@@ -1,0 +1,23 @@
+.github/workflows/ci.yml
+  s_9b96992f5d95da::t_20239eb224f161 25,28,47,50,96,99,104,145,149,166,213,236,239,242,262,290,293,331,334,374,377,406,454,456
+package.json
+  s_9b96992f5d95da::t_44113d13c1b883 39,47
+pnpm-lock.yaml
+  s_9b96992f5d95da::t_bed82fa68e11fe 44-45,203-205,592-594,597-599,687-689,871-874,886-888,1080,1430,1435-1436,1440-1441,1444,1446,1539,1724,1727,1741
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "be47b44eea6eb50ff8ff94b8036cad16535f15d6",
+  "prompts": {},
+  "sessions": {
+    "s_9b96992f5d95da": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "31546de9-bab2-4f87-b32d-2b57fb384b5b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
