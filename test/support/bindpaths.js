@@ -34,6 +34,18 @@ function captureSyncThrow(fn) {
 export function bindPaths(db) {
     const select = 'SELECT ? AS v';
 
+    // The sync paths below require a fully idle connection, and the
+    // async paths above cannot promise that at the moment their await
+    // resolves: a bind-rejected value throws synchronously out of the
+    // db-level wrappers, abandoning that call's in-flight async
+    // prepare (db.pending stays elevated for another turn), and those
+    // wrappers' internal finalize is deliberately fire-and-forget.
+    // db.wait() schedules an exclusive call that runs only once
+    // pending == 0, so awaiting it puts every sync path on the idle
+    // side of the gate — the same discipline the stmt drivers apply
+    // by resolving from inside stmt.finalize's callback.
+    const whenIdle = () => new Promise((resolve) => db.wait(resolve));
+
     const paths = [
         {
             name: 'db.get',
@@ -246,84 +258,84 @@ export function bindPaths(db) {
         {
             name: 'db.getSync',
             reads: true,
-            run: (value) =>
-                new Promise((resolve) => {
-                    try {
-                        resolve({ v: db.getSync(select, [value])?.v });
-                    } catch (err) {
-                        resolve({ threw: err });
-                    }
-                }),
+            run: async (value) => {
+                await whenIdle();
+                try {
+                    return { v: db.getSync(select, [value])?.v };
+                } catch (err) {
+                    return { threw: err };
+                }
+            },
         },
         {
             name: 'db.allSync',
             reads: true,
-            run: (value) =>
-                new Promise((resolve) => {
-                    try {
-                        resolve({ v: db.allSync(select, [value])[0]?.v });
-                    } catch (err) {
-                        resolve({ threw: err });
-                    }
-                }),
+            run: async (value) => {
+                await whenIdle();
+                try {
+                    return { v: db.allSync(select, [value])[0]?.v };
+                } catch (err) {
+                    return { threw: err };
+                }
+            },
         },
         {
             name: 'db.runSync',
             reads: false,
-            run: (value) =>
-                new Promise((resolve) => {
-                    try {
-                        db.runSync(select, [value]);
-                        resolve({});
-                    } catch (err) {
-                        resolve({ threw: err });
-                    }
-                }),
+            run: async (value) => {
+                await whenIdle();
+                try {
+                    db.runSync(select, [value]);
+                    return {};
+                } catch (err) {
+                    return { threw: err };
+                }
+            },
         },
         {
             name: 'stmt.getSync',
             reads: true,
-            run: (value) =>
-                new Promise((resolve) => {
-                    try {
-                        const stmt = db.prepareSync(select);
-                        const out = { v: stmt.getSync([value])?.v };
-                        stmt.finalize();
-                        resolve(out);
-                    } catch (err) {
-                        resolve({ threw: err });
-                    }
-                }),
+            run: async (value) => {
+                await whenIdle();
+                try {
+                    const stmt = db.prepareSync(select);
+                    const out = { v: stmt.getSync([value])?.v };
+                    stmt.finalize();
+                    return out;
+                } catch (err) {
+                    return { threw: err };
+                }
+            },
         },
         {
             name: 'stmt.allSync',
             reads: true,
-            run: (value) =>
-                new Promise((resolve) => {
-                    try {
-                        const stmt = db.prepareSync(select);
-                        const out = { v: stmt.allSync([value])[0]?.v };
-                        stmt.finalize();
-                        resolve(out);
-                    } catch (err) {
-                        resolve({ threw: err });
-                    }
-                }),
+            run: async (value) => {
+                await whenIdle();
+                try {
+                    const stmt = db.prepareSync(select);
+                    const out = { v: stmt.allSync([value])[0]?.v };
+                    stmt.finalize();
+                    return out;
+                } catch (err) {
+                    return { threw: err };
+                }
+            },
         },
         {
             name: 'stmt.runSync',
             reads: false,
-            run: (value) =>
-                new Promise((resolve) => {
-                    try {
-                        const stmt = db.prepareSync(select);
-                        stmt.runSync([value]);
-                        stmt.finalize();
-                        resolve({});
-                    } catch (err) {
-                        resolve({ threw: err });
-                    }
-                }),
+            run: async (value) => {
+                await whenIdle();
+                try {
+                    const stmt = db.prepareSync(select);
+                    stmt.runSync([value]);
+                    stmt.finalize();
+                    return {};
+                } catch (err) {
+                    return { threw: err };
+                }
+            },
         },
     ];
 
