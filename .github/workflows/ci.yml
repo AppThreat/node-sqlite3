@@ -74,20 +74,31 @@ jobs:
       matrix:
         os:
           - ubuntu-22.04
+          # Arm64 Linux was previously covered only by the slower `build`
+          # matrix, which is about producing the artifact; the suite now
+          # runs here on every push too.
+          - ubuntu-22.04-arm
           - macos-latest
           # Added after a Windows-only path bug (a /\/test$/ strip that
           # never matches a backslash path) survived five deliverables
           # because the suite ran on Linux and macOS only — the Electron
           # job was the first thing ever to run it on Windows.
           - windows-latest
-    name: test (${{ matrix.os }})
+        # 24 is the engines floor and the LTS line; 26 is Current (and the
+        # local dev Node). napi means one binary serves both majors, but
+        # the C++ still compiles against each major's headers and the JS
+        # surface still meets each major's runtime changes.
+        node:
+          - 24
+          - 26
+    name: test (${{ matrix.os }}, node=${{ matrix.node }})
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           scope: '@appthreat'
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
@@ -338,6 +349,78 @@ jobs:
           ELECTRON_DISABLE_SANDBOX: '1'
         run: xvfb-run -a pnpm run test:electron:asar
 
+  # The Node-API promise, end to end: the binary built once under Node 24
+  # by the `build` matrix must run unmodified under every supported Node.
+  # This job never compiles — no rebuild step, and PREBUILDS_ONLY makes
+  # node-gyp-build refuse build/Release — so green here means the shipped
+  # artifact itself passed the suite, not a fresh build of it. (The `test`
+  # matrix compiles from source per Node major; this one consumes.)
+  prebuild-consumer:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: prebuilds-ubuntu-22.04-x64-x64-24
+          - os: macos-latest
+            artifact: prebuilds-macos-latest-arm64-arm64-24
+          - os: windows-latest
+            artifact: prebuilds-windows-latest-x64-x64-24
+    name: prebuild-consumer (${{ matrix.os }}, node=26)
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009c67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: 26
+          scope: '@appthreat'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Download the shipped prebuilds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: prebuilds/
+      - name: Run tests against the prebuilt binary
+        env:
+          PREBUILDS_ONLY: '1'
+        run: pnpm run test
+
+  # The musl half of the same promise. alpine3.20 — the variant the musl
+  # prebuild is built on — has no Node 26 image (node:26-alpine tags start
+  # at 3.22), so rather than moving the build floor this job *consumes*
+  # the alpine3.20-built artifact inside a node:26-alpine3.22 container.
+  # Same pnpm trick as tools/BinaryBuilder.Dockerfile: pnpm 11 ships
+  # static musl-safe binaries. x64 only — the arm64 musl artifact is built
+  # and suite-tested by build-qemu; this adds the Node-major dimension,
+  # not the arch one.
+  prebuild-consumer-musl:
+    needs: build-qemu
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009c67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+        # Only to resolve the exact packageManager version; the container
+        # installs its own copy.
+      - name: Download the shipped musl prebuilds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: prebuilds-qemu-alpine3.20-linux-amd64-24
+          path: prebuilds/
+      - name: Suite against the musl prebuild under Node 26
+        run: |
+          docker run --rm -v "$PWD:/ws" -w /ws -e PREBUILDS_ONLY=1 node:26-alpine3.22 sh -c "
+            npm install --global pnpm@$(pnpm --version) &&
+            pnpm install --frozen-lockfile --ignore-scripts &&
+            pnpm run test
+          "
+
   publish:
     # Everything that can prove the package works gates publishing —
     # previously only [build, build-qemu] did, so a tag could publish to
@@ -356,6 +439,8 @@ jobs:
       - build-qemu
       - electron
       - electron-asar
+      - prebuild-consumer
+      - prebuild-consumer-musl
     if: >-
       always()
       && !contains(needs.*.result, 'failure')
