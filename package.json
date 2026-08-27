@@ -36,7 +36,7 @@
         "typescript": "~5.9.3"
     },
     "peerDependencies": {
-        "node-gyp": "12.x"
+        "node-gyp": "13.x"
     },
     "peerDependenciesMeta": {
         "node-gyp": {
@@ -44,7 +44,7 @@
         }
     },
     "optionalDependencies": {
-        "node-gyp": "12.x"
+        "node-gyp": "13.x"
     },
     "engines": {
         "node": ">=24",
