@@ -45,14 +45,13 @@ const env = {
     ...(mode === 'suite' ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
 };
 
+// suite mode goes through the same runner as `pnpm run test`, so the
+// file list and the "refuse to pass on zero tests" guard are shared
+// rather than duplicated here. run-tests.mjs re-spawns process.execPath,
+// which under ELECTRON_RUN_AS_NODE is this Electron binary.
 const args =
     mode === 'suite'
-        ? [
-              '--test',
-              '--test-reporter=spec',
-              '--test-timeout=20000',
-              'test/*.test.js',
-          ]
+        ? [join(root, 'tools', 'run-tests.mjs')]
         : [join(here, 'main.mjs')];
 
 const child = spawn(electronBin, args, { cwd: root, env, stdio: 'inherit' });

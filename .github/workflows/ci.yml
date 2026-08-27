@@ -307,7 +307,13 @@ jobs:
   # post-merge on release/v9 and on demand.
   electron-asar:
     needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/'))
+    # Tags included: publish depends on this job, so it has to actually
+    # run on the event that publishes rather than being skipped past.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+          && (startsWith(github.ref, 'refs/heads/release/')
+              || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -333,7 +339,27 @@ jobs:
         run: xvfb-run -a pnpm run test:electron:asar
 
   publish:
-    needs: [build, build-qemu]
+    # Everything that can prove the package works gates publishing —
+    # previously only [build, build-qemu] did, so a tag could publish to
+    # npm with the suite, the types, the lint and every Electron job red.
+    #
+    # always() with an explicit failure/cancellation check, rather than a
+    # bare needs list, because electron-asar does not run on every event:
+    # a skipped dependency would otherwise skip publish too, including
+    # the pull-request dry run. Skipped is tolerated here; failed and
+    # cancelled are not.
+    needs:
+      - lint
+      - types
+      - test
+      - build
+      - build-qemu
+      - electron
+      - electron-asar
+    if: >-
+      always()
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-22.04
     permissions:
       contents: write
