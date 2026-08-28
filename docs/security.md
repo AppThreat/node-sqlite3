@@ -182,29 +182,67 @@ via a **source build** — no prebuild ships with SQLCipher, by design:
 the encryption runtime must come from your system's SQLCipher, and a
 prebuilt binary would link the vendored plain SQLite instead.
 
-Install SQLCipher with your package manager (`brew install sqlcipher`,
-`apt install libsqlcipher-dev`, …) or build it yourself, then:
+**A distribution package is usually not enough.** This package uses
+SQLite's session extension and preupdate hook, and most packaged
+SQLCipher builds omit both — Ubuntu's `libsqlcipher-dev` exports neither
+symbol, so the addon cannot link against it (verified:
+`nm -D libsqlcipher.so | grep -c sqlite3session_create` → `0`). The
+SQLite base version matters too: this package exports extended result
+codes introduced in SQLite 3.53, so SQLCipher must be built on 3.53 or
+newer — 4.18.0 is built on 3.53.4, the same amalgamation vendored here.
+
+So build SQLCipher yourself, with the session extension enabled:
 
 ```bash
-npm install @appthreat/sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=/usr/
+git clone --depth 1 --branch v4.18.0 https://github.com/sqlcipher/sqlcipher
+cd sqlcipher
+# Setting CFLAGS replaces SQLCipher's own defaults, so its mandatory
+# defines have to be repeated here.
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_ENABLE_COLUMN_METADATA \
+        -DSQLITE_ENABLE_PREUPDATE_HOOK \
+        -DSQLITE_EXTRA_INIT=sqlcipher_extra_init \
+        -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown \
+        -DSQLITE_TEMP_STORE=2" \
+LDFLAGS="-lcrypto" \
+  ./configure --prefix=/opt/sqlcipher --session --fts5 --rtree --dbstat
+make -j"$(nproc)" && sudo make install
 ```
 
-Custom locations need the flags:
+Then build this package against it. Note the library name: current
+SQLCipher installs as `libsqlite3.*` with headers at `<prefix>/include`
+(the `libsqlcipher.*` / `include/sqlcipher` layout is distro packaging,
+not SQLCipher's own):
 
 ```bash
-# macOS (Homebrew)
-export LDFLAGS="-L$(brew --prefix)/opt/sqlcipher/lib"
-export CPPFLAGS="-I$(brew --prefix)/opt/sqlcipher/include/sqlcipher"
-npm install @appthreat/sqlite3 --build-from-source \
-    --sqlite_libname=sqlcipher --sqlite=$(brew --prefix)
-
-# Linux (source-installed under /usr/local)
-export LDFLAGS="-L/usr/local/lib"
-export CPPFLAGS="-I/usr/local/include -I/usr/local/include/sqlcipher"
-export CXXFLAGS="$CPPFLAGS"
-npm install @appthreat/sqlite3 --build-from-source \
-    --sqlite_libname=sqlcipher --sqlite=/usr/local
+export GYP_DEFINES="sqlite=/opt/sqlcipher sqlite_libname=sqlite3"
+export CPPFLAGS="-I/opt/sqlcipher/include"
+export LDFLAGS="-lsqlite3 -L/opt/sqlcipher/lib"
+npm install @appthreat/sqlite3 --build-from-source
 ```
+
+`GYP_DEFINES` rather than `--sqlite=…` on the command line: node-gyp 13
+forwards everything after `--` to gyp as build-*file* names, so the flag
+form fails configure with `gyp: --sqlite=/usr not found`.
+
+Confirm it really is SQLCipher — a wrong key must fail:
+
+```bash
+node --input-type=module -e "
+import sqlite3 from '@appthreat/sqlite3';
+const db = await sqlite3.open('/tmp/enc.db');
+await db.exec(\"PRAGMA key='secret'; CREATE TABLE t (x); INSERT INTO t VALUES (42)\");
+await db.close();
+const wrong = await sqlite3.open('/tmp/enc.db');
+await wrong.exec(\"PRAGMA key='wrong'\");
+await wrong.get('SELECT x FROM t');  // must throw 'file is not a database'
+"
+```
+
+If your SQLCipher does use the distro layout (`libsqlcipher.*` with
+headers under `include/sqlcipher`), change the three variables to match
+— `sqlite_libname=sqlcipher`, `CPPFLAGS=-I<prefix>/include/sqlcipher`,
+`LDFLAGS=-lsqlcipher` — but check the session symbol first, or the link
+will fail with `'sqlite3_session' does not name a type`.
 
 For a SQLCipher source build against Electron headers, additionally pass
 `--runtime=electron --target=<version> --dist-url=https://electronjs.org/headers`.

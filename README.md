@@ -184,8 +184,16 @@ const rows = db.allSync("SELECT * FROM t");
 const stmt = db.prepareSync("SELECT ? AS v");                    // statement-level variants
 ```
 
-`getSync/runSync/allSync` execute on the calling thread — roughly 6x faster
-than the async equivalents for interactive lookups. They throw when the
+`getSync/runSync/allSync` execute on the calling thread. On the benchmark
+suite (`pnpm run bench`, [docs/performance.md](docs/performance.md)),
+cached single-row lookups are **7–8× faster** than the cached async
+`get`/`run` equivalents on arm64 macOS (7.3–8.4× for `getSync`, flat
+from batches of 1 to 10,000; `runSync` 6.8× at one operation rising to
+~8.7× at 10,000 as per-round overhead amortises) — and **22–31×** on
+Linux, where the async threadpool round trip costs more. The gap vanishes for
+large result sets on every platform measured: `allSync` over 20,000 rows
+is within the run's noise floor of async `all`, because one threadpool
+round trip is amortised across every row. They throw when the
 database is not fully idle: async work in flight or queued, or when called
 from inside an async completion callback (defer with `setImmediate` or use
 `db.wait`). They accept no callback argument. Like any synchronous database
@@ -652,11 +660,18 @@ headers needs extra flags for `npm install sqlite3 --build-from-source`
 --runtime=electron --target=44.0.0 --dist-url=https://electronjs.org/headers
 ```
 
-In the case of macOS with Homebrew, the full command looks like:
+The SQLite location and library name go through `GYP_DEFINES`, not
+command-line flags — node-gyp 13 treats anything after `--` as a
+build-file name. For macOS with Homebrew:
 
 ```bash
-npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=`brew --prefix` --runtime=electron --target=44.0.0 --dist-url=https://electronjs.org/headers
+export GYP_DEFINES="sqlite=$(brew --prefix) sqlite_libname=sqlcipher"
+npm install @appthreat/sqlite3 --build-from-source \
+    --runtime=electron --target=44.0.0 --dist-url=https://electronjs.org/headers
 ```
+
+SQLCipher needs the session extension enabled, which packaged builds
+usually omit — see [docs/security.md](docs/security.md#sqlcipher).
 
 # Security
 

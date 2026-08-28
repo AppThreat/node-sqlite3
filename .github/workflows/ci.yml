@@ -349,12 +349,22 @@ jobs:
           ELECTRON_DISABLE_SANDBOX: '1'
         run: xvfb-run -a pnpm run test:electron:asar
 
-  # SQLCipher source build (Deliverable 11 §2.4): the --sqlite_libname
-  # option must keep working, and the smoke test proves the link really
-  # is SQLCipher (a wrong key must fail), not the vendored plain SQLite.
-  # Build-only against the distro package; like electron-asar it runs
-  # post-merge on release/ branches, on tags and on demand, so an apt
-  # hiccup cannot gate every push.
+  # SQLCipher source build (Deliverable 11 §2.4): the external-SQLite
+  # build path must keep working, and the smoke test proves the link
+  # really is SQLCipher (a wrong key must fail), not the vendored plain
+  # SQLite. Like electron-asar it runs post-merge on release/ branches,
+  # on tags and on demand, so a build hiccup cannot gate every push.
+  #
+  # SQLCipher is built from source rather than installed from apt, and
+  # that is not incidental: this package uses the session extension and
+  # the preupdate hook (D08), and Ubuntu's libsqlcipher-dev exports
+  # neither (`nm -D libsqlcipher.so | grep sqlite3session_create` → 0),
+  # so the addon cannot link against it at all. The SQLite base version
+  # matters too — src/node_sqlite3.cc exports extended result codes that
+  # only exist from 3.53; SQLCipher 4.18 is built on 3.53.4, the same
+  # amalgamation this repo vendors, and older SQLCipher releases fail to
+  # compile. All of this was reproduced in a container before it was
+  # written down.
   sqlcipher:
     if: >-
       github.event_name == 'workflow_dispatch'
@@ -363,6 +373,14 @@ jobs:
               || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    env:
+      SQLCIPHER_TAG: v4.18.0
+      SQLITE_PREFIX: /opt/sqlcipher
+      # SQLCipher's current configure installs the library as
+      # libsqlite3.so with headers at <prefix>/include, NOT as
+      # libsqlcipher.*/include/sqlcipher — that layout belongs to the
+      # distro packaging. The libname follows the artifact, not the name.
+      SQLITE_LIBNAME: sqlite3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Setup pnpm
@@ -373,16 +391,44 @@ jobs:
           scope: '@appthreat'
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Install SQLCipher
-        run: sudo apt-get update && sudo apt-get install -y libsqlcipher-dev
-      - name: Build against the system SQLCipher
+      - name: Build SQLCipher from source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev tcl
+          git clone --depth 1 --branch "$SQLCIPHER_TAG" \
+            https://github.com/sqlcipher/sqlcipher.git /tmp/sqlcipher
+          cd /tmp/sqlcipher
+          # --session is required (see the job header). SQLCipher's own
+          # mandatory defines have to be repeated here because setting
+          # CFLAGS replaces its defaults rather than adding to them: drop
+          # them and the build stops with "SQLCipher must be compiled
+          # with -DSQLITE_EXTRA_INIT=…".
+          CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_ENABLE_COLUMN_METADATA \
+                  -DSQLITE_ENABLE_PREUPDATE_HOOK \
+                  -DSQLITE_EXTRA_INIT=sqlcipher_extra_init \
+                  -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown \
+                  -DSQLITE_TEMP_STORE=2" \
+          LDFLAGS="-lcrypto" \
+            ./configure --prefix="$SQLITE_PREFIX" --session --fts5 --rtree --dbstat
+          make -j"$(nproc)"
+          sudo make install
+          # Fail here, loudly, rather than in a confusing C++ error later.
+          nm -D "$SQLITE_PREFIX/lib/lib$SQLITE_LIBNAME.so" \
+            | grep -q sqlite3session_create
+      - name: Build against SQLCipher
         env:
+          # node-gyp 13 forwards everything after `--` to gyp as build-file
+          # names, so `rebuild -- --sqlite=…` dies with "not found while
+          # trying to load". The binding.gyp `sqlite` and `sqlite_libname`
+          # variables are gyp defines: set them through the GYP_DEFINES
+          # environment variable, which gyp reads on every run.
+          GYP_DEFINES: 'sqlite=${{ env.SQLITE_PREFIX }} sqlite_libname=${{ env.SQLITE_LIBNAME }}'
           # binding.gyp adds <(sqlite)/include; Debian keeps the SQLCipher
-          # headers under /usr/include/sqlcipher, so point the compiler at
-          # them too (the same CPPFLAGS dance as docs/security.md).
-          CPPFLAGS: '-I/usr/include/sqlcipher'
-          LDFLAGS: '-lsqlcipher'
-        run: pnpm run rebuild -- --sqlite=/usr --sqlite_libname=sqlcipher
+          # headers under $SQLITE_PREFIX/include/sqlcipher, so point the
+          # compiler at them too (the same CPPFLAGS dance as docs/security.md).
+          CPPFLAGS: '-I${{ env.SQLITE_PREFIX }}/include'
+          LDFLAGS: '-l${{ env.SQLITE_LIBNAME }} -L${{ env.SQLITE_PREFIX }}/lib'
+        run: pnpm run rebuild
       - name: 'Smoke: encrypted database round trip'
         run: |
           node --input-type=module -e "
