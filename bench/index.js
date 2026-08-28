@@ -303,16 +303,22 @@ async function main() {
     }
     if (ratios.length > 0) {
         console.log(
-            `\n── ratios (target median ÷ case median; must clear the ${(floor.relativePct).toFixed(1)}% noise floor) ──`,
+            `\n── ratios (how much faster the case is than its target; must clear the ${floor.relativePct.toFixed(1)}% noise floor to count) ──`,
         );
         for (const r of ratios) {
+            // ratio = target median ÷ case median: >1 means the case is
+            // faster than its target, <1 means slower. The wording spells
+            // out which, so an inverted-looking number cannot mislead.
+            const faster = r.ratio >= 1;
+            const magnitude = faster ? r.ratio : 1 / r.ratio;
+            const word = faster ? 'faster' : 'slower';
             if (r.withinNoise) {
                 console.log(
-                    `  ${r.a.padEnd(58)} ${fmtRatio(r.ratio).padStart(8)}  ~ within noise floor — not a result`,
+                    `  ${r.a.padEnd(58)} ${fmtRatio(magnitude).padStart(8)} ${word}  ~ within noise floor — not a result`,
                 );
             } else {
                 console.log(
-                    `  ${r.a.padEnd(58)} ${fmtRatio(r.ratio).padStart(8)}  vs ${r.b}`,
+                    `  ${r.a.padEnd(58)} ${fmtRatio(magnitude).padStart(8)} ${word} than ${r.b}`,
                 );
             }
         }
