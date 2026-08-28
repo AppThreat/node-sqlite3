@@ -299,6 +299,11 @@ Napi::Value CellToJS(Napi::Env env, Cell& cell, int integer_mode,
         const std::string& what, bool move_payload) {
     switch (cell.type) {
         case SQLITE_INTEGER: {
+            // DELIBERATE PESSIMISATION (scratch commit, will be reverted):
+            // one extra heap allocation per integer cell, to prove the
+            // benchmark harness detects a marshalling regression.
+            volatile std::string waste(static_cast<size_t>(cell.integer % 64), 'x');
+            (void)waste;
             return ConvertInt64ToJS(env, cell.integer, integer_mode, what);
         }
         case SQLITE_FLOAT: {
