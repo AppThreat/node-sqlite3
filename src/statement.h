@@ -352,6 +352,18 @@ protected:
         int last, Parameters* parameters);
     bool Bind(Parameters&& parameters, bool supplied);
 
+    // The synchronous counterpart of ParseBindArguments + Bind: applies the
+    // call's bind arguments straight onto the statement, with no
+    // Parameters vector and no heap Values::Field per parameter.
+    //
+    // Accepts the same three argument shapes, performs the same arity and
+    // named-parameter checks, produces the same error text, and leaves the
+    // statement in the same state on failure. The asynchronous paths keep
+    // the Field route: they read the arguments on the JS thread and apply
+    // them on a worker, so there the materialisation is the hand-off.
+    bool BindArgumentsDirect(const Napi::CallbackInfo& info, int start,
+        int last, bool supplied);
+
     static void GetRow(Row* row, sqlite3_stmt* stmt, Columns* columns);
     // Rebuilds the rooted JS key strings if `columns` differs from the set
     // they were built from. Call once per batch, before RowToJS.

@@ -92,7 +92,15 @@ std::unique_ptr<Values::Field> ConvertToField(const Napi::Value source,
     // nothing can silently skip a value. The constructors carry the bind
     // position (index or name) through to Bind(Parameters&&, bool).
 #define MAKE_FIELD(kind, ...)     (pos.index > 0         ? std::make_unique<Values::kind>(pos.index, __VA_ARGS__)         : std::make_unique<Values::kind>(pos.name, __VA_ARGS__))
-    if (source.IsNumber()) {
+    // One napi_typeof up front, then compare against it. Each of
+    // node-addon-api's IsNumber()/IsString()/... calls napi_typeof itself,
+    // so an if-else chain over them pays that ABI call once per arm it
+    // tries — six times over for a value that turns out to be a BigInt.
+    napi_valuetype vtype = napi_undefined;
+    if (napi_typeof(source.Env(), source, &vtype) != napi_ok) {
+        return nullptr;
+    }
+    if (vtype == napi_number) {
         double val = source.As<Napi::Number>().DoubleValue();
         // Number.isInteger within the int64 range binds as INTEGER (64-bit,
         // not the old Int32 round-trip). NaN and ±Infinity fail the
@@ -109,19 +117,19 @@ std::unique_ptr<Values::Field> ConvertToField(const Napi::Value source,
         }
         return MAKE_FIELD(Float, val);
     }
-    else if (source.IsString()) {
+    else if (vtype == napi_string) {
         std::string val = source.As<Napi::String>().Utf8Value();
         return MAKE_FIELD(Text, val.length(), val.c_str());
     }
-    else if (source.IsBoolean()) {
+    else if (vtype == napi_boolean) {
         return MAKE_FIELD(Integer, source.As<Napi::Boolean>().Value() ? 1 : 0);
     }
-    else if (source.IsNull()) {
+    else if (vtype == napi_null) {
         return pos.index > 0
             ? std::make_unique<Values::Null>(pos.index)
             : std::make_unique<Values::Null>(pos.name);
     }
-    else if (source.IsUndefined()) {
+    else if (vtype == napi_undefined) {
         // Binds as NULL, matching null: object shorthand
         // { $x: obj.maybeMissing } is a common call shape. Typo'd property
         // names are caught by the named-parameter and arity checks in
@@ -132,7 +140,7 @@ std::unique_ptr<Values::Field> ConvertToField(const Napi::Value source,
         field->from_undefined = true;
         return field;
     }
-    else if (source.IsBigInt()) {
+    else if (vtype == napi_bigint) {
         bool lossless = false;
         int64_t val = source.As<Napi::BigInt>().Int64Value(&lossless);
         if (!lossless) {
@@ -144,6 +152,11 @@ std::unique_ptr<Values::Field> ConvertToField(const Napi::Value source,
             return nullptr;
         }
         return MAKE_FIELD(Integer, val);
+    }
+    else if (vtype != napi_object) {
+        // Symbols, functions, external values.
+        ThrowUnsupportedBindType(source, subject);
+        return nullptr;
     }
     else if (source.IsDataView()) {
         // Must be tested before IsBuffer(): napi_is_buffer() also answers
@@ -226,6 +239,181 @@ std::unique_ptr<Values::Field> ConvertToField(const Napi::Value source,
     ThrowUnsupportedBindType(source, subject);
     return nullptr;
 #undef MAKE_FIELD
+}
+
+std::string BindSubject::Describe() const {
+    if (name != nullptr) return std::string("parameter ") + name;
+    return "parameter " + std::to_string(index);
+}
+
+bool BindValueDirect(sqlite3_stmt* stmt, int pos, const Napi::Value source,
+        const BindSubject& subject, int* rc, bool* from_undefined) {
+    auto env = source.Env();
+
+    // One napi_typeof, then a switch. node-addon-api's IsNumber()/
+    // IsString()/... each call napi_typeof, so an if-else chain over them
+    // pays that ABI call once per arm it tries.
+    napi_valuetype type = napi_undefined;
+    if (napi_typeof(env, source, &type) != napi_ok) return false;
+
+    switch (type) {
+        case napi_number: {
+            const double val = source.As<Napi::Number>().DoubleValue();
+            // Number.isInteger within the int64 range binds as INTEGER;
+            // NaN and +/-Infinity fail the finiteness test and bind REAL.
+            if (std::isfinite(val) && val == std::trunc(val)
+                    && val >= kInt64MinAsDouble && val < kInt64MaxAsDouble) {
+                *rc = sqlite3_bind_int64(stmt, pos, static_cast<int64_t>(val));
+                return true;
+            }
+            if (val == kInt64MaxAsDouble) {
+                // 2^63 as a double is the rounded form of 2^63-1: clamp so
+                // the top of the range stays reachable from a JS number.
+                *rc = sqlite3_bind_int64(stmt, pos, INT64_MAX);
+                return true;
+            }
+            *rc = sqlite3_bind_double(stmt, pos, val);
+            return true;
+        }
+        case napi_string: {
+            // Two napi calls (length, then write) is the documented way to
+            // read a string of unknown length; the payload is malloc'd
+            // once and handed to SQLite rather than copied into a
+            // std::string and then copied again.
+            size_t length = 0;
+            if (napi_get_value_string_utf8(env, source, NULL, 0, &length)
+                    != napi_ok) {
+                return false;
+            }
+            char* buffer = static_cast<char*>(malloc(length + 1));
+            if (buffer == NULL) {
+                Napi::Error::New(env, "Cannot bind " + subject.Describe() +
+                    ": out of memory").ThrowAsJavaScriptException();
+                return false;
+            }
+            size_t written = 0;
+            if (napi_get_value_string_utf8(env, source, buffer, length + 1,
+                    &written) != napi_ok) {
+                free(buffer);
+                return false;
+            }
+            *rc = sqlite3_bind_text64(stmt, pos, buffer,
+                static_cast<sqlite3_uint64>(written), free, SQLITE_UTF8);
+            return true;
+        }
+        case napi_boolean: {
+            *rc = sqlite3_bind_int64(stmt, pos,
+                source.As<Napi::Boolean>().Value() ? 1 : 0);
+            return true;
+        }
+        case napi_null: {
+            *rc = sqlite3_bind_null(stmt, pos);
+            return true;
+        }
+        case napi_undefined: {
+            // Binds as NULL, like the Field path; the caller uses
+            // `from_undefined` for the zero-parameter call shape.
+            if (from_undefined != NULL) *from_undefined = true;
+            *rc = sqlite3_bind_null(stmt, pos);
+            return true;
+        }
+        case napi_bigint: {
+            bool lossless = false;
+            const int64_t val =
+                source.As<Napi::BigInt>().Int64Value(&lossless);
+            if (!lossless) {
+                const std::string digits = source.ToString().Utf8Value();
+                Napi::RangeError::New(env,
+                    "Cannot bind " + subject.Describe() + ": BigInt " +
+                    digits + " is outside the signed 64-bit integer range"
+                ).ThrowAsJavaScriptException();
+                return false;
+            }
+            *rc = sqlite3_bind_int64(stmt, pos, val);
+            return true;
+        }
+        case napi_object:
+            break;      // handled below
+        default:
+            // Symbols, functions, external values.
+            ThrowUnsupportedBindType(source, subject.Describe());
+            return false;
+    }
+
+    // Binary views. SQLITE_TRANSIENT: SQLite copies before returning, so
+    // the JS-owned bytes need not outlive this call.
+    const void* data = NULL;
+    size_t bytes = 0;
+    const char* kind = NULL;
+    if (source.IsDataView()) {
+        // Before IsBuffer(): napi_is_buffer() also answers true for a
+        // DataView, and routing one through Napi::Buffer fails.
+        napi_get_dataview_info(env, source, &bytes,
+            const_cast<void**>(&data), NULL, NULL);
+        kind = "DataView";
+    }
+    else if (source.IsBuffer()) {
+        // Node Buffers and plain Uint8Arrays: Data() and Length() honour
+        // byteOffset for both.
+        Napi::Buffer<char> buffer = source.As<Napi::Buffer<char>>();
+        data = buffer.Data();
+        bytes = buffer.Length();
+        kind = "Buffer";
+    }
+    else if (source.IsTypedArray()) {
+        napi_typedarray_type ta_type;
+        size_t elements = 0;
+        napi_get_typedarray_info(env, source, &ta_type, &elements,
+            const_cast<void**>(&data), NULL, NULL);
+        bytes = elements * TypedArrayElementSize(ta_type);
+        kind = "typed array";
+    }
+    else if (source.IsArrayBuffer()) {
+        Napi::ArrayBuffer buffer = source.As<Napi::ArrayBuffer>();
+        data = buffer.Data();
+        bytes = buffer.ByteLength();
+        kind = "ArrayBuffer";
+    }
+
+    if (kind != NULL) {
+        if (bytes > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            // Views can exceed 2 GB on 64-bit Node; the wording matches
+            // the Field path per shape.
+            const std::string what = std::strcmp(kind, "ArrayBuffer") == 0
+                ? "ArrayBuffer exceeds the bind size limit"
+                : std::string(kind) + " of " + std::to_string(bytes) +
+                    " bytes exceeds the bind size limit";
+            Napi::RangeError::New(env,
+                "Cannot bind " + subject.Describe() + ": " + what
+            ).ThrowAsJavaScriptException();
+            return false;
+        }
+        // A zero-length view can carry a NULL data pointer, and
+        // sqlite3_bind_blob64(NULL, 0) binds SQL NULL rather than an empty
+        // blob. The Field path always had a real allocation behind it, so
+        // an empty Buffer round-tripped as an empty blob; keep that by
+        // handing SQLite a non-NULL pointer it will read zero bytes from.
+        *rc = sqlite3_bind_blob64(stmt, pos, data != NULL ? data : "",
+            static_cast<sqlite3_uint64>(bytes), SQLITE_TRANSIENT);
+        return true;
+    }
+
+    if (source.IsDate()) {
+        // Documented v8/v9 behaviour: epoch milliseconds as REAL.
+        *rc = sqlite3_bind_double(stmt, pos,
+            source.As<Napi::Date>().ValueOf());
+        return true;
+    }
+    if (OtherInstanceOf(source.As<Napi::Object>(), "RegExp")) {
+        const std::string val = source.ToString().Utf8Value();
+        *rc = sqlite3_bind_text64(stmt, pos, val.c_str(),
+            static_cast<sqlite3_uint64>(val.length()),
+            SQLITE_TRANSIENT, SQLITE_UTF8);
+        return true;
+    }
+    // Plain objects, arrays, Maps, class instances: refused.
+    ThrowUnsupportedBindType(source, subject.Describe());
+    return false;
 }
 
 void ValueToCell(Cell* cell, sqlite3_value* value) {

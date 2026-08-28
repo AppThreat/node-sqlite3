@@ -388,10 +388,9 @@ describe('sync fast path after a throwing callback', function () {
     });
 });
 
-// Without cacheStatements() the sync methods prepare a transient statement
-// per call. It must be finalized, or every call leaks a prepared statement
-// and close() fails with SQLITE_BUSY.
-describe('sync fast path without the statement cache', function () {
+// The sync methods cache their prepared statements, so those outlive the
+// call. close() must drain that cache, or it fails with SQLITE_BUSY.
+describe('sync fast path statement lifetime', function () {
     it('does not leak prepared statements', function (_t, done) {
         const db = new sqlite3.Database(':memory:');
         db.run('CREATE TABLE t (i)', function () {
@@ -409,7 +408,7 @@ describe('sync fast path without the statement cache', function () {
                         i + 1,
                     );
                 }
-                // Fails with SQLITE_BUSY if any transient statement leaked.
+                // Fails with SQLITE_BUSY if the cache was not drained.
                 db.close(function (err) {
                     assert.ifError(err);
                     done();
@@ -1014,5 +1013,241 @@ describe('row factory: realms that forbid code generation', function () {
         assert.deepStrictEqual(rowsOf(blocked.stdout), rowsOf(allowed.stdout));
         assert.match(blocked.stdout, /PROTO=true/);
         assert.match(blocked.stdout, /BUFFER=true/);
+    });
+});
+
+// The synchronous paths bind straight onto the statement instead of
+// building a Values::Field per parameter (src/convert.cc BindValueDirect).
+// That is a second implementation of the bind semantics, so these tests
+// hold it against the first one: for every value shape and every failure,
+// the sync paths must agree with the asynchronous Field path exactly.
+describe('sync bind agrees with the async bind path', function () {
+    /** @type {import('../lib/sqlite3.js').Database} */
+    let db;
+
+    beforeEach(async function () {
+        db = await sqlite3.open(':memory:');
+        await db.exec('CREATE TABLE t (v)');
+    });
+
+    afterEach(async function () {
+        await db.close();
+    });
+
+    /**
+     * Round-trips one value through both bind implementations.
+     * @param {unknown} value the value to bind.
+     * @returns {Promise<{sync: unknown, async: unknown}>} both readings.
+     */
+    async function bothPaths(value) {
+        await db.run('DELETE FROM t');
+        db.runSync('INSERT INTO t VALUES (?)', value);
+        const sync = db.getSync('SELECT v FROM t').v;
+        await db.run('DELETE FROM t');
+        await db.run('INSERT INTO t VALUES (?)', value);
+        const asyncRead = (await db.get('SELECT v FROM t')).v;
+        return { sync, async: asyncRead };
+    }
+
+    const cases = [
+        ['integer', 42],
+        ['negative integer', -7],
+        ['zero', 0],
+        ['large safe integer', 9007199254740991],
+        ['float', 1.5],
+        ['NaN', Number.NaN],
+        ['Infinity', Number.POSITIVE_INFINITY],
+        ['string', 'hello'],
+        ['empty string', ''],
+        ['unicode string', 'héllo—✓'],
+        ['string with NUL', 'a\u0000b'],
+        ['true', true],
+        ['false', false],
+        ['null', null],
+        ['bigint', 123n],
+        ['negative bigint', -123n],
+    ];
+
+    for (const [label, value] of cases) {
+        it(`binds ${label} identically`, async function () {
+            const { sync, async: asyncValue } = await bothPaths(value);
+            assert.deepStrictEqual(sync, asyncValue);
+        });
+    }
+
+    it('binds an empty Buffer as an empty blob, not NULL', async function () {
+        const { sync, async: asyncValue } = await bothPaths(Buffer.alloc(0));
+        assert.ok(Buffer.isBuffer(sync), 'sync bound NULL, not a blob');
+        assert.strictEqual(/** @type {Buffer} */ (sync).length, 0);
+        assert.deepStrictEqual(sync, asyncValue);
+    });
+
+    it('binds Buffers, typed arrays, DataViews and ArrayBuffers alike', async function () {
+        const bytes = [1, 2, 3, 4];
+        const views = [
+            Buffer.from(bytes),
+            new Uint8Array(bytes),
+            new DataView(new Uint8Array(bytes).buffer),
+            new Uint8Array(bytes).buffer,
+        ];
+        for (const view of views) {
+            const { sync, async: asyncValue } = await bothPaths(view);
+            assert.deepStrictEqual([.../** @type {Buffer} */ (sync)], bytes);
+            assert.deepStrictEqual(sync, asyncValue);
+        }
+    });
+
+    it('binds a Date as epoch milliseconds', async function () {
+        const date = new Date(1700000000000);
+        const { sync, async: asyncValue } = await bothPaths(date);
+        assert.strictEqual(sync, 1700000000000);
+        assert.strictEqual(sync, asyncValue);
+    });
+
+    it('binds a byteOffset view without the whole backing buffer', async function () {
+        const backing = new Uint8Array([9, 9, 1, 2, 3, 9]);
+        const view = backing.subarray(2, 5);
+        const { sync } = await bothPaths(view);
+        assert.deepStrictEqual([.../** @type {Buffer} */ (sync)], [1, 2, 3]);
+    });
+
+    /**
+     * Captures the error message from each path for the same call.
+     * @param {unknown[]} params the bind parameters.
+     * @param {string} [sql] the statement to bind against.
+     * @returns {Promise<{sync: string, async: string}>} both messages.
+     */
+    async function bothErrors(params, sql = 'INSERT INTO t VALUES (?)') {
+        let syncMessage = '(no error)';
+        try {
+            db.runSync(sql, ...params);
+        } catch (err) {
+            syncMessage = /** @type {Error} */ (err).message;
+        }
+        let asyncMessage = '(no error)';
+        try {
+            await db.run(sql, ...params);
+        } catch (err) {
+            asyncMessage = /** @type {Error} */ (err).message;
+        }
+        return { sync: syncMessage, async: asyncMessage };
+    }
+
+    it('reports too few parameters identically', async function () {
+        const { sync, async: asyncMessage } = await bothErrors(
+            [1],
+            'INSERT INTO t SELECT ? UNION ALL SELECT ?',
+        );
+        assert.match(
+            sync,
+            /supplied 1 parameter\(s\) but the statement takes 2/,
+        );
+        assert.strictEqual(sync, asyncMessage);
+    });
+
+    it('reports too many parameters identically', async function () {
+        const { sync, async: asyncMessage } = await bothErrors([1, 2, 3]);
+        assert.match(
+            sync,
+            /supplied 3 parameter\(s\) but the statement takes 1/,
+        );
+        assert.strictEqual(sync, asyncMessage);
+    });
+
+    it('reports an unknown named parameter identically', async function () {
+        const { sync, async: asyncMessage } = await bothErrors(
+            [{ $nope: 1 }],
+            'INSERT INTO t VALUES ($v)',
+        );
+        assert.match(sync, /unknown named parameter "\$nope"/);
+        assert.strictEqual(sync, asyncMessage);
+    });
+
+    it('reports an unsupported type identically', async function () {
+        // A bare object is the named-parameters shape, not a value; nest
+        // it in the array form so it is bound as one.
+        const { sync, async: asyncMessage } = await bothErrors([[{ a: 1 }]]);
+        assert.match(sync, /Cannot bind parameter 1: unsupported type Object/);
+        assert.strictEqual(sync, asyncMessage);
+    });
+
+    it('reports an out-of-range BigInt identically', async function () {
+        const huge = 2n ** 64n;
+        const { sync, async: asyncMessage } = await bothErrors([huge]);
+        assert.match(sync, /BigInt .* outside the signed 64-bit integer range/);
+        assert.strictEqual(sync, asyncMessage);
+    });
+
+    it('names the offending parameter by position', async function () {
+        const { sync } = await bothErrors(
+            [1, Symbol('x')],
+            'INSERT INTO t VALUES (?), (?)',
+        );
+        assert.match(sync, /Cannot bind parameter 2:/);
+    });
+
+    it('names a failing named parameter by name', async function () {
+        const { sync } = await bothErrors(
+            [{ $v: Symbol('x') }],
+            'INSERT INTO t VALUES ($v)',
+        );
+        assert.match(sync, /Cannot bind parameter \$v:/);
+    });
+
+    it('accepts array, positional and named shapes alike', function () {
+        db.runSync('DELETE FROM t');
+        db.runSync('INSERT INTO t VALUES (?)', 1);
+        db.runSync('INSERT INTO t VALUES (?)', [2]);
+        db.runSync('INSERT INTO t VALUES ($v)', { $v: 3 });
+        assert.deepStrictEqual(
+            db.allSync('SELECT v FROM t ORDER BY v').map((r) => r.v),
+            [1, 2, 3],
+        );
+    });
+
+    it('leaves no partial binding behind after a failed bind', function () {
+        db.runSync('DELETE FROM t');
+        assert.throws(() =>
+            db.runSync('INSERT INTO t VALUES (?), (?)', 1, Symbol('x')),
+        );
+        // The statement must be re-runnable with a valid call afterwards.
+        db.runSync('INSERT INTO t VALUES (?), (?)', 4, 5);
+        assert.deepStrictEqual(
+            db.allSync('SELECT v FROM t ORDER BY v').map((r) => r.v),
+            [4, 5],
+        );
+    });
+
+    it('re-steps a parameterless statement without rebinding', async function () {
+        const statement = db.prepare('INSERT INTO t VALUES (7)');
+        await db.wait();
+        statement.runSync();
+        statement.runSync();
+        assert.strictEqual(db.getSync('SELECT count(*) AS n FROM t').n, 2);
+        statement.finalize();
+    });
+
+    it('keeps a previous binding when re-run with no arguments', async function () {
+        const statement = db.prepare('INSERT INTO t VALUES (?)');
+        await db.wait();
+        statement.runSync(11);
+        statement.runSync();
+        assert.deepStrictEqual(
+            db.allSync('SELECT v FROM t').map((r) => r.v),
+            [11, 11],
+        );
+        statement.finalize();
+    });
+
+    it('ignores an all-undefined call against a parameterless statement', function () {
+        // Historical call shape: generic wrappers forwarding an absent
+        // value must not trip the arity check.
+        db.runSync('INSERT INTO t VALUES (7)', undefined);
+        assert.strictEqual(db.getSync('SELECT count(*) AS n FROM t').n, 1);
+    });
+
+    it('binds undefined as NULL when the statement takes a parameter', function () {
+        db.runSync('INSERT INTO t VALUES (?)', undefined);
+        assert.strictEqual(db.getSync('SELECT v FROM t').v, null);
     });
 });

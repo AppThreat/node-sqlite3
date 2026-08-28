@@ -197,11 +197,11 @@ keys carry a sigil — so the option is unambiguous.)
 
 `getSync/runSync/allSync` execute on the calling thread. On the benchmark
 suite (`pnpm run bench`, [docs/performance.md](docs/performance.md)),
-cached single-row lookups are **7–10× faster** than the cached async
+cached single-row lookups are **8–12× faster** than the cached async
 `get`/`run`
-equivalents on arm64 macOS (9.6–10.4× for `getSync`, flat
-from batches of 1 to 10,000; `runSync` 6.7× at one operation rising to
-~8.7× at 10,000 as per-round overhead amortises) — and **22–31×** on
+equivalents on arm64 macOS (10.4–11.8× for `getSync`, flat
+from batches of 1 to 10,000; `runSync` 8.2× at one operation rising to
+~11.5× at 10,000 as per-round overhead amortises) — and **22–31×** on
 Linux, where the async threadpool round trip costs more. For large
 result sets sync and async are level (20,000 rows × 4 cols measured
 within the noise floor): the marshalling is the same work either way,

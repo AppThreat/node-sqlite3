@@ -634,6 +634,142 @@ bool Statement::Bind(Parameters&& parameters, bool supplied) {
     return true;
 }
 
+bool Statement::BindArgumentsDirect(const Napi::CallbackInfo& info,
+        int start, int last, bool supplied) {
+    auto env = info.Env();
+
+    if (!supplied) {
+        // A call with no bind argument re-steps the statement with its
+        // previous bindings, so nothing here may touch them — including
+        // bound_payloads, whose SQLITE_STATIC pointers are still live.
+        return true;
+    }
+
+    // Resolve the argument shape and the values it carries, without
+    // converting anything yet: the arity check has to run before the first
+    // bind so a mismatched call cannot half-bind the statement.
+    enum Shape { POSITIONAL, ARRAY, NAMED } shape = POSITIONAL;
+    Napi::Array array;
+    Napi::Object object;
+    Napi::Array keys;
+    int count = 0;
+
+    if (start < last && info[start].IsArray()) {
+        shape = ARRAY;
+        array = info[start].As<Napi::Array>();
+        count = static_cast<int>(array.Length());
+    }
+    // Cheap checks first; IsDate matches across realms, and the RegExp
+    // global lookup only runs once the value is known to be an object.
+    // Binary views go positional like the other non-map bind shapes.
+    else if (start < last && info[start].IsObject()
+            && !info[start].IsBuffer() && !info[start].IsTypedArray()
+            && !info[start].IsDataView() && !info[start].IsArrayBuffer()
+            && !info[start].IsDate()
+            && !OtherInstanceOf(info[start].As<Object>(), "RegExp")) {
+        shape = NAMED;
+        object = info[start].As<Napi::Object>();
+        keys = object.GetPropertyNames();
+        if (env.IsExceptionPending()) return false;
+        count = static_cast<int>(keys.Length());
+    }
+    else {
+        count = last - start;
+    }
+
+    // Order matches the Field path: the statement is reset and its
+    // bindings cleared before the checks, so a rejected call leaves no
+    // stale binding behind either way.
+    sqlite3_reset(_handle);
+    sqlite3_clear_bindings(_handle);
+    bound_payloads.clear();
+
+    const int expected = sqlite3_bind_parameter_count(_handle);
+
+    // Historical "accidental undefined" call shape: a parameter list made
+    // up entirely of `undefined` against a statement with no parameters is
+    // ignored, so generic wrappers forwarding an absent value keep
+    // working. Only reachable when the statement takes no parameters, so
+    // the extra pass costs nothing on the hot path.
+    if (expected == 0 && count > 0) {
+        bool all_undefined = true;
+        for (int i = 0; i < count && all_undefined; i++) {
+            Napi::Value value = shape == ARRAY ? array.Get(i)
+                : shape == NAMED ? object.Get(keys.Get(i))
+                : info[start + i];
+            if (env.IsExceptionPending()) return false;
+            if (!value.IsUndefined()) all_undefined = false;
+        }
+        if (all_undefined) return true;
+    }
+
+    if (count != expected) {
+        status = SQLITE_RANGE;
+        message = "supplied " + std::to_string(count) +
+            " parameter(s) but the statement takes " +
+            std::to_string(expected);
+        return false;
+    }
+
+    for (int i = 0; i < count; i++) {
+        Napi::Value value;
+        int pos = i + 1;
+        // Only set for a genuinely named parameter; the subject is a
+        // borrowed view either way and formats nothing unless it throws.
+        std::string param_name;
+        bool named = false;
+
+        if (shape == NAMED) {
+            Napi::Value name = keys.Get(i);
+            if (env.IsExceptionPending()) return false;
+            Napi::Number num = name.ToNumber();
+            if (num.Int32Value() == num.DoubleValue()) {
+                pos = num.Int32Value();
+            }
+            else {
+                param_name = name.As<Napi::String>().Utf8Value();
+                named = true;
+                pos = sqlite3_bind_parameter_index(_handle,
+                    param_name.c_str());
+                if (pos == 0) {
+                    // Almost always a typo'd key. Clear the partial
+                    // bindings, like the bind-failure path below.
+                    sqlite3_clear_bindings(_handle);
+                    status = SQLITE_RANGE;
+                    message = "unknown named parameter \"" + param_name
+                        + "\"";
+                    return false;
+                }
+            }
+            value = object.Get(name);
+        }
+        else {
+            value = shape == ARRAY ? array.Get(i) : info[start + i];
+        }
+        if (env.IsExceptionPending()) return false;
+
+        int rc = SQLITE_OK;
+        const BindSubject subject = named
+            ? BindSubject(param_name.c_str()) : BindSubject(pos);
+        if (!BindValueDirect(_handle, pos, value, subject, &rc, NULL)) {
+            // BindValueDirect threw for an unsupported value.
+            sqlite3_clear_bindings(_handle);
+            return false;
+        }
+        if (rc != SQLITE_OK) {
+            // Clear every binding so no partially bound statement is left
+            // reachable.
+            sqlite3_clear_bindings(_handle);
+            status = rc;
+            message = std::string(sqlite3_errmsg(db->_handle));
+            return false;
+        }
+    }
+
+    status = SQLITE_OK;
+    return true;
+}
+
 Napi::Value Statement::Bind(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
@@ -1399,16 +1535,7 @@ Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
         return env.Null();
     }
 
-    Parameters parameters;
     const bool bind_supplied = (end > 0);
-    if (end > 0
-            && !ParseBindArguments(info, 0, end, &parameters)) {
-        if (!env.IsExceptionPending()) {
-            Napi::TypeError::New(env, "Data type is not supported")
-                .ThrowAsJavaScriptException();
-        }
-        return env.Null();
-    }
 
     // While this thread is inside sqlite, a user-defined function invoked
     // by the statement must refuse to make its round trip (it would wait
@@ -1417,8 +1544,9 @@ Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
 
     // Mirrors Work_Get: step unless the cursor is already exhausted and
     // no new parameters were supplied.
-    if (stmt->status != SQLITE_DONE || parameters.size() || bind_supplied) {
-        if (!stmt->Bind(std::move(parameters), bind_supplied)) {
+    if (stmt->status != SQLITE_DONE || bind_supplied) {
+        if (!stmt->BindArgumentsDirect(info, 0, end, bind_supplied)) {
+            if (env.IsExceptionPending()) return env.Null();
             stmt->ThrowStatementError(env);
             return env.Null();
         }
@@ -1462,26 +1590,18 @@ Napi::Value Statement::RunSync(const Napi::CallbackInfo& info) {
         return env.Null();
     }
 
-    Parameters parameters;
     const bool bind_supplied = (end > 0);
-    if (end > 0
-            && !ParseBindArguments(info, 0, end, &parameters)) {
-        if (!env.IsExceptionPending()) {
-            Napi::TypeError::New(env, "Data type is not supported")
-                .ThrowAsJavaScriptException();
-        }
-        return env.Null();
-    }
 
     Database::SyncSqliteGuard sync_guard(stmt->db);
 
     // Mirrors Work_Run, including the explicit reset for parameterless
     // re-execution.
-    if (parameters.empty() && !bind_supplied) {
+    if (!bind_supplied) {
         sqlite3_reset(stmt->_handle);
     }
 
-    if (!stmt->Bind(std::move(parameters), bind_supplied)) {
+    if (!stmt->BindArgumentsDirect(info, 0, end, bind_supplied)) {
+        if (env.IsExceptionPending()) return env.Null();
         stmt->ThrowStatementError(env);
         return env.Null();
     }
@@ -1516,24 +1636,16 @@ Napi::Value Statement::AllSync(const Napi::CallbackInfo& info) {
         return env.Null();
     }
 
-    Parameters parameters;
     const bool bind_supplied = (end > 0);
-    if (end > 0
-            && !ParseBindArguments(info, 0, end, &parameters)) {
-        if (!env.IsExceptionPending()) {
-            Napi::TypeError::New(env, "Data type is not supported")
-                .ThrowAsJavaScriptException();
-        }
-        return env.Null();
-    }
 
     Database::SyncSqliteGuard sync_guard(stmt->db);
 
-    if (parameters.empty() && !bind_supplied) {
+    if (!bind_supplied) {
         sqlite3_reset(stmt->_handle);
     }
 
-    if (!stmt->Bind(std::move(parameters), bind_supplied)) {
+    if (!stmt->BindArgumentsDirect(info, 0, end, bind_supplied)) {
+        if (env.IsExceptionPending()) return env.Null();
         stmt->ThrowStatementError(env);
         return env.Null();
     }

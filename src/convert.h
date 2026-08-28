@@ -236,6 +236,45 @@ Napi::Value CellToJS(Napi::Env env, Cell& cell, int integer_mode,
 Napi::Value ColumnToJS(Napi::Env env, sqlite3_stmt* stmt, int column,
     int integer_mode, const ValueOrigin& origin, bool* raised = nullptr);
 
+// Binds one JS value straight onto a prepared statement, with no
+// intermediate Values::Field.
+//
+// The Field exists for the *asynchronous* paths, where the bind arguments
+// are read on the JS thread and applied later on a worker thread — there
+// the copy is what makes the hand-off possible. The synchronous paths have
+// no hand-off, so a Field per parameter was a heap allocation (two, for
+// text: the Field and its std::string) on a path whose whole point is
+// minimal overhead.
+//
+// Type dispatch, coercions and error text match ConvertToField exactly;
+// the two live side by side so they cannot drift apart unnoticed.
+//
+// Text payloads are malloc'd and handed to SQLite with `free` as the
+// destructor, so ownership transfers instead of the value being copied a
+// second time. SQLite runs that destructor even when the bind call fails,
+// so there is no leak on the error path. Blobs are bound
+// SQLITE_TRANSIENT: SQLite copies them immediately, which is what makes
+// it safe not to keep the JS value alive.
+//
+// `rc` receives the sqlite3_bind_* result. `from_undefined` reports an
+// explicit `undefined` argument, for the zero-parameter escape hatch in
+// Statement::BindArgumentsDirect. Returns false with a pending JS
+// exception for a value that cannot be bound at all.
+// Names a bind position in an error message ("parameter 3",
+// "parameter $name"), formatted only when an error is actually raised.
+// Building it eagerly cost a heap allocation per parameter on every
+// successful bind, which is the whole call for a small insert.
+struct BindSubject {
+    int index = 0;
+    const char* name = nullptr;
+    explicit BindSubject(int i) : index(i) {}
+    explicit BindSubject(const char* n) : name(n) {}
+    std::string Describe() const;
+};
+
+bool BindValueDirect(sqlite3_stmt* stmt, int pos, const Napi::Value source,
+    const BindSubject& subject, int* rc, bool* from_undefined);
+
 }
 
 #endif

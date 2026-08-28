@@ -714,11 +714,8 @@ declare module './native.js' {
          * the caller's choice via `cacheStatements()`. @internal
          */
         _syncStmtCache?: Map<string, Statement>;
-        /** Sync-path statement resolver. @internal */
-        _statementForSync(sql: string): {
-            statement: Statement;
-            transient: boolean;
-        };
+        /** Sync-path statement resolver; always cached. @internal */
+        _statementForSync(sql: string): Statement;
         /** Finalizes every cached statement, emptying the cache. @internal */
         _drainStatementCache(): void;
 
