@@ -69,19 +69,148 @@ void ThrowUnsupportedBindType(const Napi::Value& source,
 const double kInt64MinAsDouble = -9223372036854775808.0;   // -(2^63)
 const double kInt64MaxAsDouble = 9223372036854775808.0;    //   2^63
 
+} // namespace
+
+// Resolves one global constructor, caching it per environment.
+//
+// The uncached form read `env.Global().Get("RegExp")` on every call: a
+// napi_get_global, a JS string built from the C literal, and a property
+// get — to answer a question whose answer is fixed for the lifetime of
+// the environment. The bind paths ask it for every named-parameter call,
+// where it was one of the largest single costs.
+//
+// The reference holds the current environment's constructor, which is
+// precisely what the uncached lookup returned; caching changes nothing
+// about which objects match.
+static Napi::Function GlobalCtor(Napi::Env env, napi_ref* slot,
+        const char* name) {
+    if (*slot != NULL) {
+        napi_value cached = NULL;
+        if (napi_get_reference_value(env, *slot, &cached) == napi_ok
+                && cached != NULL) {
+            return Napi::Function(env, cached);
+        }
+    }
+    Napi::Value ctor = env.Global().Get(name);
+    if (!ctor.IsFunction()) return Napi::Function();
+    // A weak reference would let the constructor be collected out from
+    // under us; these live as long as the environment does.
+    napi_create_reference(env, ctor, 1, slot);
+    return ctor.As<Napi::Function>();
+}
+
+bool IsNamedParameterMap(Napi::Value source) {
+    if (!source.IsObject() || source.IsArray()) return false;
+
+    auto env = source.Env();
+    auto* addon = env.GetInstanceData<Database::AddonData>();
+
+    // Fast path: a plain object literal — which is what a named-parameter
+    // map almost always is. Its prototype is Object.prototype, and none
+    // of the shapes rejected below share that prototype, so one
+    // comparison settles all six of them.
+    napi_value proto = NULL;
+    if (napi_get_prototype(env, source, &proto) == napi_ok && proto != NULL) {
+        napi_value object_proto = NULL;
+        if (addon->object_prototype == NULL) {
+            Napi::Value base = env.Global().Get("Object");
+            if (base.IsFunction()) {
+                Napi::Value p = base.As<Napi::Object>().Get("prototype");
+                if (p.IsObject()) {
+                    napi_create_reference(env, p, 1,
+                        &addon->object_prototype);
+                }
+            }
+        }
+        if (addon->object_prototype != NULL
+                && napi_get_reference_value(env, addon->object_prototype,
+                    &object_proto) == napi_ok) {
+            bool same = false;
+            if (napi_strict_equals(env, proto, object_proto, &same) == napi_ok
+                    && same) {
+                return true;
+            }
+        }
+    }
+
+    // Anything else: the explicit checks. Cheap predicates first; IsDate
+    // matches across realms, and the RegExp lookup only runs once the
+    // value is known to be an object. Binary views bind positionally,
+    // like the other non-map shapes.
+    return !source.IsBuffer() && !source.IsTypedArray()
+        && !source.IsDataView() && !source.IsArrayBuffer()
+        && !source.IsDate()
+        && !OtherInstanceOf(source.As<Napi::Object>(), "RegExp");
+}
+
+bool ResolveNamedKey(Napi::Env env, Napi::Value key, NamedKey* out,
+        std::string* storage) {
+    // Long enough that no realistic parameter name reaches the fallback,
+    // so the whole classification is a single napi call.
+    char stack[128];
+    size_t written = 0;
+    const size_t capacity = sizeof(stack);
+    bool have_text = false;
+
+    if (key.IsString()
+            && napi_get_value_string_utf8(env, key, stack, capacity, &written)
+                == napi_ok
+            && written + 1 < capacity) {
+        storage->assign(stack, written);
+        have_text = true;
+    }
+
+    if (have_text) {
+        const char c = storage->empty() ? '\0' : (*storage)[0];
+        const bool could_be_numeric = c == '\0'
+            || (c >= '0' && c <= '9')
+            || c == '-' || c == '+' || c == '.'
+            || c == ' ' || c == '\t' || c == '\n' || c == '\r'
+            || c == '\f' || c == '\v';
+        if (!could_be_numeric) {
+            out->positional = false;
+            out->name = storage->c_str();
+            return true;
+        }
+    }
+
+    // Either an unusual key, or one that really might be a number: fall
+    // back to the coercion, which is the definitive test.
+    Napi::Number num = key.ToNumber();
+    if (env.IsExceptionPending()) return false;
+    // Bind positions are 1-based, so a key reading as zero or a negative
+    // number selects nothing. Such a key is treated as a name, which is
+    // what it literally is, and reported as an unknown one — the async
+    // path cannot represent a zero position either, so this is also what
+    // keeps the two implementations wording it the same way.
+    if (num.Int32Value() == num.DoubleValue() && num.Int32Value() > 0) {
+        out->positional = true;
+        out->index = num.Int32Value();
+        return true;
+    }
+    if (!have_text) {
+        *storage = key.As<Napi::String>().Utf8Value();
+        if (env.IsExceptionPending()) return false;
+    }
+    out->positional = false;
+    out->name = storage->c_str();
+    return true;
+}
+
 // True for a plain-object instance of the named global constructor
 // ("Date", "RegExp"), matching JS instanceof across realms.
 bool OtherInstanceOf(Napi::Object source, const char* object_type) {
+    auto env = source.Env();
+    auto* addon = env.GetInstanceData<Database::AddonData>();
+    Napi::Function ctor;
     if (strncmp(object_type, "Date", 4) == 0) {
-        return source.InstanceOf(source.Env().Global().Get("Date").As<Napi::Function>());
+        ctor = GlobalCtor(env, &addon->date_ctor, "Date");
     } else if (strncmp(object_type, "RegExp", 6) == 0) {
-        return source.InstanceOf(source.Env().Global().Get("RegExp").As<Napi::Function>());
+        ctor = GlobalCtor(env, &addon->regexp_ctor, "RegExp");
     }
-
-    return false;
+    if (ctor.IsEmpty()) return false;
+    return source.InstanceOf(ctor);
 }
-
-} // namespace
 
 std::unique_ptr<Values::Field> ConvertToField(const Napi::Value source,
         const std::string& subject, const FieldPos& pos) {

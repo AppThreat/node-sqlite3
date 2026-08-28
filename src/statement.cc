@@ -12,9 +12,6 @@
 
 using namespace node_sqlite3;
 
-// Defined below Init(): cross-realm Date/RegExp instanceof for objects.
-bool OtherInstanceOf(Napi::Object source, const char* object_type);
-
 namespace {
 
 // "parameter 3" / "parameter $name" for bind error messages.
@@ -133,16 +130,6 @@ Napi::Object Statement::Init(Napi::Env env, Napi::Object exports) {
 }
 
 // A Napi InstanceOf for Javascript Objects "Date" and "RegExp"
-bool OtherInstanceOf(Napi::Object source, const char* object_type) {
-    if (strncmp(object_type, "Date", 4) == 0) {
-        return source.InstanceOf(source.Env().Global().Get("Date").As<Function>());
-    } else if (strncmp(object_type, "RegExp", 6) == 0) {
-        return source.InstanceOf(source.Env().Global().Get("RegExp").As<Function>());
-    }
-
-    return false;
-}
-
 void Statement::Process() {
     if (finalized && !queue.empty()) {
         return CleanQueue();
@@ -465,15 +452,7 @@ bool Statement::ParseBindArguments(const Napi::CallbackInfo& info, int start,
             parameters->push_back(std::move(field));
         }
     }
-    // Cheap checks first; IsDate matches across realms, and the RegExp
-    // global lookup only runs once the value is known to be an object.
-    // Binary views (Buffer, typed arrays, DataViews, ArrayBuffers) go
-    // positional like the other non-map bind shapes.
-    else if (!info[start].IsObject() || info[start].IsBuffer()
-            || info[start].IsTypedArray() || info[start].IsDataView()
-            || info[start].IsArrayBuffer()
-            || info[start].IsDate()
-            || OtherInstanceOf(info[start].As<Object>(), "RegExp")) {
+    else if (!IsNamedParameterMap(info[start])) {
         // Parameters directly in array.
         // Note: bind parameters start with 1.
         parameters->reserve(last - start);
@@ -491,25 +470,20 @@ bool Statement::ParseBindArguments(const Napi::CallbackInfo& info, int start,
         if (env.IsExceptionPending()) return false;
         int length = array.Length();
         parameters->reserve(length);
+        // Reused across keys; see BindArgumentsDirect.
+        std::string param_name;
         for (int i = 0; i < length; i++) {
             Napi::Value name = (array).Get(i);
-            Napi::Number num = name.ToNumber();
+            NamedKey key;
+            if (!ResolveNamedKey(env, name, &key, &param_name)) return false;
 
-            if (num.Int32Value() == num.DoubleValue()) {
-                auto field = BindParameter((object).Get(name), num.Int32Value());
-                if (field == nullptr) {
-                    return false;
-                }
-                parameters->push_back(std::move(field));
+            auto field = key.positional
+                ? BindParameter((object).Get(name), key.index)
+                : BindParameter((object).Get(name), key.name);
+            if (field == nullptr) {
+                return false;
             }
-            else {
-                std::string param_name = name.As<Napi::String>().Utf8Value();
-                auto field = BindParameter((object).Get(name), param_name.c_str());
-                if (field == nullptr) {
-                    return false;
-                }
-                parameters->push_back(std::move(field));
-            }
+            parameters->push_back(std::move(field));
         }
     }
     else {
@@ -659,14 +633,7 @@ bool Statement::BindArgumentsDirect(const Napi::CallbackInfo& info,
         array = info[start].As<Napi::Array>();
         count = static_cast<int>(array.Length());
     }
-    // Cheap checks first; IsDate matches across realms, and the RegExp
-    // global lookup only runs once the value is known to be an object.
-    // Binary views go positional like the other non-map bind shapes.
-    else if (start < last && info[start].IsObject()
-            && !info[start].IsBuffer() && !info[start].IsTypedArray()
-            && !info[start].IsDataView() && !info[start].IsArrayBuffer()
-            && !info[start].IsDate()
-            && !OtherInstanceOf(info[start].As<Object>(), "RegExp")) {
+    else if (start < last && IsNamedParameterMap(info[start])) {
         shape = NAMED;
         object = info[start].As<Napi::Object>();
         keys = object.GetPropertyNames();
@@ -711,26 +678,28 @@ bool Statement::BindArgumentsDirect(const Napi::CallbackInfo& info,
         return false;
     }
 
+    // Reused across the keys of this call: a short parameter name fits in
+    // the string's own storage, so the loop allocates nothing.
+    std::string param_name;
+
     for (int i = 0; i < count; i++) {
         Napi::Value value;
         int pos = i + 1;
         // Only set for a genuinely named parameter; the subject is a
         // borrowed view either way and formats nothing unless it throws.
-        std::string param_name;
         bool named = false;
 
         if (shape == NAMED) {
             Napi::Value name = keys.Get(i);
             if (env.IsExceptionPending()) return false;
-            Napi::Number num = name.ToNumber();
-            if (num.Int32Value() == num.DoubleValue()) {
-                pos = num.Int32Value();
+            NamedKey key;
+            if (!ResolveNamedKey(env, name, &key, &param_name)) return false;
+            if (key.positional) {
+                pos = key.index;
             }
             else {
-                param_name = name.As<Napi::String>().Utf8Value();
                 named = true;
-                pos = sqlite3_bind_parameter_index(_handle,
-                    param_name.c_str());
+                pos = sqlite3_bind_parameter_index(_handle, key.name);
                 if (pos == 0) {
                     // Almost always a typo'd key. Clear the partial
                     // bindings, like the bind-failure path below.

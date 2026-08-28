@@ -1218,6 +1218,150 @@ describe('sync bind agrees with the async bind path', function () {
         );
     });
 
+    // Named binding classifies each key as a position or a name, and
+    // decides whether the argument is a parameter map at all. Both bind
+    // implementations share that code, and its fast paths are only valid
+    // where they agree with the general one — so the odd spellings are
+    // pinned here rather than left to the common case.
+
+    /**
+     * Binds a named-parameter map through both implementations.
+     * @param {object} params the named parameters.
+     * @param {string} sql the statement to bind against.
+     * @returns {Promise<{sync: unknown, async: unknown}>} both readings.
+     */
+    async function bothNamed(params, sql) {
+        await db.run('DELETE FROM t');
+        db.runSync(sql, params);
+        const sync = db.getSync('SELECT v FROM t').v;
+        await db.run('DELETE FROM t');
+        await db.run(sql, params);
+        const asyncRead = (await db.get('SELECT v FROM t')).v;
+        return { sync, async: asyncRead };
+    }
+
+    it('binds a named parameter identically on both paths', async function () {
+        const { sync, async: asyncValue } = await bothNamed(
+            { $v: 'x' },
+            'INSERT INTO t VALUES ($v)',
+        );
+        assert.strictEqual(sync, 'x');
+        assert.strictEqual(sync, asyncValue);
+    });
+
+    it('binds the :name and @name sigils too', async function () {
+        for (const sigil of [':', '@']) {
+            const { sync, async: asyncValue } = await bothNamed(
+                { [`${sigil}v`]: 5 },
+                `INSERT INTO t VALUES (${sigil}v)`,
+            );
+            assert.strictEqual(sync, 5);
+            assert.strictEqual(sync, asyncValue);
+        }
+    });
+
+    it('reads an integer key as a bind position', async function () {
+        const { sync, async: asyncValue } = await bothNamed(
+            { 1: 'by index' },
+            'INSERT INTO t VALUES (?)',
+        );
+        assert.strictEqual(sync, 'by index');
+        assert.strictEqual(sync, asyncValue);
+    });
+
+    // Keys that could read as a number must not take the "obviously a
+    // name" shortcut: each of these coerces to an integer, so it selects
+    // a position exactly as it always has.
+    for (const key of [' 1', '1.0', '+1']) {
+        it(`treats the key ${JSON.stringify(key)} as position 1`, async function () {
+            const { sync, async: asyncValue } = await bothNamed(
+                { [key]: 'numeric-ish' },
+                'INSERT INTO t VALUES (?)',
+            );
+            assert.strictEqual(sync, 'numeric-ish');
+            assert.strictEqual(sync, asyncValue);
+        });
+    }
+
+    // Likewise for the ones that coerce to an out-of-range position:
+    // they must still fail, and fail the same way on both paths.
+    for (const key of ['0x10', '', '1e2']) {
+        it(`fails alike for the out-of-range key ${JSON.stringify(key)}`, async function () {
+            const { sync, async: asyncMessage } = await bothErrors([
+                { [key]: 'v' },
+            ]);
+            assert.notStrictEqual(sync, '(no error)');
+            assert.strictEqual(sync, asyncMessage);
+        });
+    }
+
+    // The key is read into a fixed stack buffer, with a fallback for
+    // anything longer. Straddle that boundary so the fallback is real.
+    for (const length of [120, 126, 127, 128, 200]) {
+        it(`binds a ${length}-byte parameter name`, async function () {
+            const name = `$${'a'.repeat(length - 1)}`;
+            const { sync, async: asyncValue } = await bothNamed(
+                { [name]: length },
+                `INSERT INTO t VALUES (${name})`,
+            );
+            assert.strictEqual(sync, length);
+            assert.strictEqual(sync, asyncValue);
+        });
+    }
+
+    it('reports an unknown named parameter identically', async function () {
+        const { sync, async: asyncMessage } = await bothErrors(
+            [{ $nope: 1 }],
+            'INSERT INTO t VALUES ($v)',
+        );
+        assert.match(sync, /unknown named parameter "\$nope"/);
+        assert.strictEqual(sync, asyncMessage);
+    });
+
+    it('accepts a null-prototype object as a parameter map', async function () {
+        const params = Object.create(null);
+        params.$v = 'no proto';
+        const { sync, async: asyncValue } = await bothNamed(
+            params,
+            'INSERT INTO t VALUES ($v)',
+        );
+        assert.strictEqual(sync, 'no proto');
+        assert.strictEqual(sync, asyncValue);
+    });
+
+    it('accepts a class instance as a parameter map', async function () {
+        class Params {
+            constructor() {
+                this.$v = 'from a class';
+            }
+        }
+        const { sync, async: asyncValue } = await bothNamed(
+            new Params(),
+            'INSERT INTO t VALUES ($v)',
+        );
+        assert.strictEqual(sync, 'from a class');
+        assert.strictEqual(sync, asyncValue);
+    });
+
+    it('still binds a lone Date, RegExp or Buffer positionally', async function () {
+        // These are objects, but they are values rather than parameter
+        // maps — the distinction the map check exists to draw.
+        const date = new Date(1700000000000);
+        assert.strictEqual((await bothPaths(date)).sync, 1700000000000);
+
+        // A RegExp binds as a value (its text), not as an empty map —
+        // which is what it would look like if read as named parameters.
+        const re = await bothPaths(/x/);
+        assert.strictEqual(typeof re.sync, 'string');
+        assert.strictEqual(re.sync, re.async);
+
+        const buf = Buffer.from([1, 2, 3]);
+        assert.deepStrictEqual(
+            [.../** @type {Buffer} */ ((await bothPaths(buf)).sync)],
+            [1, 2, 3],
+        );
+    });
+
     it('re-steps a parameterless statement without rebinding', async function () {
         const statement = db.prepare('INSERT INTO t VALUES (7)');
         await db.wait();

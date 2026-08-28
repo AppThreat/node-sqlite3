@@ -275,6 +275,58 @@ struct BindSubject {
 bool BindValueDirect(sqlite3_stmt* stmt, int pos, const Napi::Value source,
     const BindSubject& subject, int* rc, bool* from_undefined);
 
+// True for a plain-object instance of the named global constructor
+// ("Date", "RegExp"), matching JS instanceof.
+//
+// Declared here rather than re-declared per translation unit: the bind
+// paths and the converter must agree on what counts as a Date or a
+// RegExp, and a second declaration at another scope links against
+// nothing under the addon's -undefined dynamic_lookup.
+bool OtherInstanceOf(Napi::Object source, const char* object_type);
+
+// True when a bind argument should be read as a map of named parameters
+// rather than as a single positional value.
+//
+// Both bind paths have to answer this identically, so they share one
+// implementation instead of two hand-inverted copies of the same
+// predicate chain.
+bool IsNamedParameterMap(Napi::Value source);
+
+// One key of a named-parameter object, classified.
+//
+// A key that reads as an integer selects a bind position directly
+// ({ 1: 'a' }); anything else is a parameter name ({ $a: 'x' }).
+struct NamedKey {
+    bool positional = false;
+    int index = 0;
+    // NUL-terminated, owned by the `storage` passed to ResolveNamedKey.
+    const char* name = nullptr;
+};
+
+// Classifies one key from a named-parameter object, for both the sync and
+// the async bind paths — they must agree on every key, so they share this.
+//
+// The obvious implementation coerces the key with ToNumber and compares
+// Int32Value() against DoubleValue(). That is a real JS number coercion
+// per parameter per call, and it was among the largest costs of a named
+// bind — spent almost entirely on keys like "$a" that cannot possibly be
+// numeric.
+//
+// So the string is read once into a stack buffer, and a key whose first
+// byte cannot begin a numeric literal skips the coercion: for those,
+// ToNumber is necessarily NaN, NaN != NaN, and the slow path would have
+// reached the same "this is a name" verdict. Every key that *could* read
+// as a number — digits, signs, a dot, leading whitespace, the empty
+// string — still goes through ToNumber, so behaviour is unchanged
+// including for the odd spellings ("0x10", " 1", "1.0").
+//
+// `storage` is reused across the keys of one call, so a short name
+// (every real one) costs no allocation at all.
+//
+// Returns false with a pending exception if the key cannot be read.
+bool ResolveNamedKey(Napi::Env env, Napi::Value key, NamedKey* out,
+    std::string* storage);
+
 }
 
 #endif

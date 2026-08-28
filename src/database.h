@@ -122,6 +122,19 @@ public:
         // Set once the generator has refused (a CSP/no-codegen realm), so
         // the refusal is not retried per statement.
         bool row_factory_unavailable = false;
+        // The global Date and RegExp constructors, looked up once per
+        // environment. The bind paths ask "is this argument a named
+        // parameter map, or a lone Date/RegExp value?" on every call, and
+        // reading them off the global each time cost a napi_get_global
+        // plus a property get keyed by a freshly built JS string —
+        // per call, to answer a question whose answer cannot change.
+        // These hold the *current* environment's constructors, which is
+        // exactly what the uncached lookup returned.
+        napi_ref date_ctor = NULL;
+        napi_ref regexp_ctor = NULL;
+        // Object.prototype, for recognising a plain object literal in one
+        // step. See IsNamedParameterMap.
+        napi_ref object_prototype = NULL;
     };
 
     // True when this environment can no longer accept JS mutation — it

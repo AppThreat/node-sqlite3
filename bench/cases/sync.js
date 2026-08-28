@@ -165,5 +165,38 @@ export function syncCases(dbSync, dbAsync) {
         },
     });
 
+    // The three bind shapes against one statement, so the cost of the
+    // ergonomic call form is visible next to the terse one.
+    //
+    // Named binding is the shape most code actually reaches for, and it
+    // is the only one whose cost is not obvious from the call site: it
+    // enumerates the object's keys, classifies each as a name or a
+    // position, and resolves each name to a bind index. Left unmeasured,
+    // that work is free to grow. The array and positional cases are here
+    // as its reference points, not for their own sake.
+    for (const [label, bind] of [
+        ['positional', (stmt, i) => stmt.runSync(i, 'x', 1.5, 'yz')],
+        ['array', (stmt, i) => stmt.runSync([i, 'x', 1.5, 'yz'])],
+        [
+            'named',
+            (stmt, i) => stmt.runSync({ $a: i, $b: 'x', $c: 1.5, $d: 'yz' }),
+        ],
+    ]) {
+        cases.push({
+            name: `sync-vs-async/runSync bind shape: ${label} (4 params)`,
+            group: 'sync-vs-async',
+            iter: (_env, n) => {
+                const sql =
+                    label === 'named'
+                        ? 'INSERT INTO wt VALUES ($a, $b, $c, $d)'
+                        : 'INSERT INTO wt VALUES (?, ?, ?, ?)';
+                dbSync.runSync('DELETE FROM wt');
+                const stmt = dbSync.prepareSync(sql);
+                for (let i = 0; i < n; i++) bind(stmt, i);
+                stmt.finalize();
+            },
+        });
+    }
+
     return cases;
 }

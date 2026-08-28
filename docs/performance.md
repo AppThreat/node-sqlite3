@@ -107,6 +107,16 @@ The async per-op cost (~10 µs) is dominated by the threadpool round
 trip, which is what the sync path avoids; it does not grow with batch
 size, which is why the ratio is flat.
 
+This is a scheduling floor, not overhead that could be tuned away. A CPU
+profile of a serialized `await stmt.get(...)` loop is **97.5% idle** —
+the main thread waiting for the worker — with JS and native self-time
+together under 2%. Every asynchronous entry point sits on the same
+floor, which is why an incremental `blob.read` of 64 bytes and one of
+4 KiB both cost ~6.7 µs: the transfer is free next to the hand-off. The
+way to go faster asynchronously is to stop waiting one operation at a
+time — see the pool and `parallelize()` numbers under Concurrency — or
+to use the synchronous calls.
+
 ### Reads (per row)
 
 | Case | median | RME |
@@ -440,6 +450,44 @@ and a prepared-statement insert that is faster than theirs outright.
 `test/sync.test.js` holds this second implementation against the first:
 every value shape and every failure must produce the same value and the
 same error text through both.
+
+#### The three bind shapes
+
+The same statement, four parameters, `runSync`:
+
+| shape | per call |
+| --- | --- |
+| positional — `stmt.runSync(a, b, c, d)` | 696 ns |
+| array — `stmt.runSync([a, b, c, d])` | 837 ns |
+| named — `stmt.runSync({ $a: a, … })` | 1.31 µs |
+
+Named binding costs about 1.9× positional, and the difference is mostly
+fixed per call rather than per parameter. It is not waste: the object's
+keys have to be enumerated, each key classified as a name or a bind
+position, and each name resolved to an index. That enumeration is also
+what reports a typo'd key as `unknown named parameter "$nmae"` instead
+of silently binding NULL, which is worth more than the nanoseconds in
+most code.
+
+Use named parameters wherever clarity matters, which is nearly
+everywhere. Reach for positional in a tight insert loop, where the
+statement is short enough to read anyway.
+
+Three things that were pure overhead are gone. A key is read once into a
+stack buffer, and one whose first byte cannot begin a number skips the
+`ToNumber` coercion entirely — for `$a` the coercion could only ever
+return `NaN`. The `Date` and `RegExp` constructors used to decide whether
+an argument is a parameter map at all are looked up once per environment
+rather than off the global on every call. And a plain object literal is
+recognised by a single prototype comparison, since nothing with
+`Object.prototype` as its prototype can be a Buffer, typed array, `Date`
+or `RegExp`.
+
+Both bind paths share that code, so the synchronous and asynchronous
+calls cannot drift apart on which keys mean what — and `test/sync.test.js`
+pins the odd spellings (`{ 1: v }`, `{ ' 1': v }`, `{ '1e2': v }`,
+names longer than the stack buffer, null-prototype and class instances)
+against both.
 
 ### Statement preparation
 
