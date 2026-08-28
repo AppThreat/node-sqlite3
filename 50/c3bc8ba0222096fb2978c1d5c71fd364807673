@@ -1,0 +1,19 @@
+test/sync.test.js
+  s_1246da50fbe044::t_a427d1cb175923 971-975
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "50c3bc8ba0222096fb2978c1d5c71fd364807673",
+  "prompts": {},
+  "sessions": {
+    "s_1246da50fbe044": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd1711ba-4707-4f06-9ddb-30649cd0126e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
