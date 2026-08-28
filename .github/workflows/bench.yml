@@ -1,0 +1,63 @@
+# Benchmarks (Deliverable 13). A dedicated workflow rather than a job in
+# ci.yml, because the nightly `schedule` trigger would wake every job in
+# that file; here it wakes exactly this one.
+#
+# Posture: INFORMATIONAL. `continue-on-error: true` means this job cannot
+# fail a build, and that is deliberate — the D11 precedent (sqlcipher is
+# post-merge-only so an apt hiccup cannot gate every push) applies more
+# strongly here: timing on shared GitHub runners is noisier than apt, and
+# a flaky gate is worse than an ungated check. The gate itself still
+# exists and still reports: bench:compare exits 2 on a >10% median
+# regression, the per-case verdicts are in the log, and the JSON is
+# uploaded as an artifact so a regression can be promoted into
+# bench/baseline.json deliberately (`--baseline-from`). Local runs on a
+# quiet machine are the enforceable gate.
+#
+# Runner: ubuntu-22.04 is a pinned label (ubuntu-latest floats across a
+# mixed pool — results from a mixed pool are noise). Node is pinned to 24
+# to match the environment the committed baselines were captured on.
+name: bench
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly at 03:07 UTC — off the top of the hour, when runner
+    # contention from everyone else's cron spikes.
+    - cron: '7 3 * * *'
+  push:
+    branches:
+      - 'release/*'
+
+jobs:
+  bench:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    # Informational: see the workflow header. A red bench job annotates
+    # and uploads; it cannot block a merge or a publish.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe50e0  # v7.0.0
+        with:
+          node-version: 24
+          scope: '@appthreat'
+      - name: Set up Python
+        uses: actions/setup-python@5fda5b95a4ea91299a34e894585c3862154e6b97  # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Rebuild native module (required after --ignore-scripts)
+        run: pnpm run rebuild
+      # RME gate + baseline comparison. On a shared runner expect some
+      # REJECTED cases; that is the harness refusing to report noise, not
+      # a failure. The verdict lines and the exit code land in the log.
+      - name: Run benchmarks and compare against baseline
+        run: pnpm run bench:compare -- --json bench-results.json
+      - name: Upload bench results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bench-results-${{ github.sha }}
+          path: bench-results.json

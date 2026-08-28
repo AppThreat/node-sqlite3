@@ -64,7 +64,9 @@
         "test": "node test/support/createdb.js && node tools/check-no-only.js && node tools/run-tests.mjs",
         "test:electron": "node test/support/createdb.js && node tools/check-no-only.js && node test/electron/run.mjs suite && node test/electron/run.mjs main",
         "test:electron:asar": "node test/electron/asar.mjs",
-        "bench": "node bench/bench.js",
+        "bench": "node --expose-gc bench/index.js",
+        "bench:compare": "node --expose-gc bench/index.js --compare --baseline bench/baseline.json",
+        "bench:update": "node --expose-gc bench/index.js --write-baseline",
         "gen-types": "node tools/gen-types.js",
         "test:types": "tsd && tsc --noEmit -p tsconfig.check.json",
         "test:matrix": "node tools/test-matrix.mjs"
