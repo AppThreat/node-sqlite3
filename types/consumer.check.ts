@@ -40,6 +40,39 @@ async function consumer(): Promise<void> {
     const check: number = count;
     void check;
 
+    // --- Deliverable 11: open options, extension policy, attach paths ---
+
+    // open() accepts flags or a v9 options object.
+    const untrusted = await sqlite3.open('downloaded.db', {
+        mode: sqlite3.OPEN_READONLY,
+        untrusted: true,
+    });
+    await untrusted.close();
+    const flagged = await sqlite3.open('file.db', sqlite3.OPEN_READWRITE);
+    await flagged.close();
+
+    // The constructor takes the same options object (namespace or named
+    // export — both are the wrapper).
+    const constructed = new sqlite3.Database(':memory:', {
+        untrusted: true,
+    });
+    // @ts-expect-error untrusted is boolean
+    const constructed2 = new sqlite3.Database(':memory:', {
+        untrusted: 'yes',
+    });
+    void constructed;
+    void constructed2;
+
+    // The security configure options typecheck with their shapes.
+    db.configure('extensionPolicy', { allow: ['/abs/ext.so'] });
+    db.configure('extensionPolicy', { deny: true });
+    db.configure('attachPaths', ['/abs/aux.db']);
+    db.configure('attachPaths', null);
+    // @ts-expect-error unknown policy key
+    db.configure('extensionPolicy', { maybe: true });
+    // @ts-expect-error attachPaths wants paths or null
+    db.configure('attachPaths', 'nope');
+
     // --- Negatives: these must NOT compile -------------------------------
 
     // Symbol is not a BindValue (strict binding, Deliverable 02).

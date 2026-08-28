@@ -109,9 +109,11 @@ export type FetchCallback = (err: import("./native.js").SqliteError | null, rows
 /**
  * Opens a database and resolves once the connection is ready. The
  * `Database` constructor cannot return a promise; this is the
- * promise-native form. `new Database(...)` is unchanged.
+ * promise-native form. `new Database(...)` is unchanged. The second
+ * argument is either open flags or a v9 options object (`mode`,
+ * `untrusted`).
  */
-export type OpenFunction = (filename: string, mode?: number) => Promise<import("./native.js").Database>;
+export type OpenFunction = (filename: string, modeOrOptions?: number | import("./sqlite3.js").OpenOptions) => Promise<import("./native.js").Database>;
 export type Installed = {
     sqlite3: import("./sqlite3.js").sqlite3;
     Database: typeof import("./sqlite3-binding.js").Database;
@@ -122,8 +124,8 @@ export type Installed = {
  * Records which database owns a statement, so AbortSignal handling can
  * reach `db.interrupt()` from a statement method.
  *
- * @param {import('./sqlite3.js').Database} db the owning connection.
+ * @param {import('./sqlite3-binding.js').Database} db the owning connection.
  * @param {import('./sqlite3.js').Statement} statement the prepared statement.
  * @returns {import('./sqlite3.js').Statement} the statement, for inline use.
  */
-export function associateStatement(db: import("./sqlite3.js").Database, statement: import("./sqlite3.js").Statement): import("./sqlite3.js").Statement;
+export function associateStatement(db: import("./sqlite3-binding.js").Database, statement: import("./sqlite3.js").Statement): import("./sqlite3.js").Statement;

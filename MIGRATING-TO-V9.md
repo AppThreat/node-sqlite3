@@ -358,6 +358,43 @@ removed. See [docs/electron.md](docs/electron.md).
   before the first run, and `JSON.stringify` of a statement no longer
   includes them.
 
+## Node permission model, extension policy, untrusted files
+
+Under Node's `--permission` flag (with `--allow-addons`, which this
+package requires to load at all), every open path now checks the target
+against the process's fs allowances and refuses with an
+`ERR_ACCESS_DENIED`-shaped error that names the path and the flag that
+permits it. A writable open needs `fs.write` for the file **and its
+directory** (SQLite writes `-journal`/`-wal`/`-shm` beside it — grant
+`--allow-fs-write="<dir>/*"`). `ATTACH` and `VACUUM INTO` are denied
+unless their target is allowlisted with
+`db.configure('attachPaths', [...])`, `db.backup()` destinations are
+checked like opens, and `loadExtension` is refused unless allowlisted
+with `db.configure('extensionPolicy', { allow: [...] })`. With the
+permission model off — the overwhelmingly common case — behaviour is
+unchanged and the checks cost one property read. Full details and the
+explicit list of what remains open:
+[docs/security.md](docs/security.md).
+
+New in the same delivery:
+
+- `sqlite3.open(filename, { mode, untrusted })` (and the same options
+  object in the `Database` constructor): `untrusted: true` applies the
+  hostile-file hardening recipe (defensive mode, untrusted schema,
+  `writable_schema` off, extension loading permanently disabled,
+  conservative run-time limits, deny-all ATTACH gate).
+- `db.configure('extensionPolicy', { allow } | { deny: true })` —
+  restrict or permanently disable `loadExtension` on one connection.
+- `db.configure('attachPaths', [...] | null)` — the ATTACH-gate
+  allowlist (works without the permission model too, as defence in
+  depth).
+- Behaviour change at the margins: work queued behind a **failed open**
+  used to sit stranded forever (the connection stayed in the Opening
+  state); it now settles with the open's own error, and the connection
+  behaves as closed (a later `close()` reports the usual `SQLITE_MISUSE`).
+- `new Database(filename, <non-number, non-function, non-options>)` now
+  throws a `TypeError` instead of silently ignoring the argument.
+
 ## TypeScript consumers
 
 The type declarations are now generated (`pnpm run gen-types`) from the

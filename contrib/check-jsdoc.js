@@ -139,6 +139,11 @@ for (const file of FILES) {
         const name = m[1];
         const where = `${file} ${name} (line ${i + 1})`;
         if (name === 'constructor' || seen.has(name)) return;
+        // tsc's declaration emit synthesizes `<Name>_base` aliases for
+        // heritage clauses in the generated entry (e.g. DatabaseClass_base
+        // for `class DatabaseClass extends NativeDatabase`); there is no
+        // source-level doc comment they could carry.
+        if (name.endsWith('_base') && file === 'lib/sqlite3.d.ts') return;
         seen.add(name);
 
         const doc = docFor(lines, i);

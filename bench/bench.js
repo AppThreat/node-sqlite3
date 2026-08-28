@@ -352,6 +352,22 @@ async function main() {
         }),
     );
 
+    // --- Open/close path (Deliverable 11): every connection now goes
+    // through the Database wrapper in lib/sqlite3.js, whose
+    // permission-model gate costs one property read with the model off.
+    results.push(
+        await benchAsync('open+close: 1k :memory: connections', async () => {
+            for (let i = 0; i < 1000; i++) {
+                const conn = new sqlite3.Database(':memory:');
+                await new Promise((resolve, reject) => {
+                    conn.once('open', resolve);
+                    conn.once('error', reject);
+                });
+                await new Promise((resolve) => conn.close(resolve));
+            }
+        }),
+    );
+
     // --- Promise-mode variants: the wrapper sits on the hot path of every
     // call, so its overhead is measured against the callback rows above.
 

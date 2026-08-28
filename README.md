@@ -630,38 +630,12 @@ npm install --build-from-source --sqlite_magic=”MyCustomMagic15”
 
 Note that the magic _must_ be exactly 15 characters long (16 bytes including null terminator).
 
-## Building for SQLCipher
+## SQLCipher (encrypted databases)
 
-For instructions on building SQLCipher, see [Building SQLCipher for Node.js](https://coolaj86.com/articles/building-sqlcipher-for-node-js-on-raspberry-pi-2/). Alternatively, you can install it with your local package manager.
-
-To run against SQLCipher, you need to compile `sqlite3` from source by passing build options like:
-
-```bash
-npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=/usr/
-```
-
-If your SQLCipher is installed in a custom location (if you compiled and installed it yourself), you'll need to set some environment variables:
-
-### On OS X with Homebrew
-
-Set the location where `brew` installed it:
-
-```bash
-export LDFLAGS="-L`brew --prefix`/opt/sqlcipher/lib"
-export CPPFLAGS="-I`brew --prefix`/opt/sqlcipher/include/sqlcipher"
-npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=`brew --prefix`
-```
-
-### On most Linuxes (including Raspberry Pi)
-
-Set the location where `make` installed it:
-
-```bash
-export LDFLAGS="-L/usr/local/lib"
-export CPPFLAGS="-I/usr/local/include -I/usr/local/include/sqlcipher"
-export CXXFLAGS="$CPPFLAGS"
-npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=/usr/local --verbose
-```
+SQLCipher is supported via a **source build** — no prebuild ships with
+SQLCipher, because the encryption runtime must come from your system's
+SQLCipher. Build flags, Homebrew/Linux paths and the Electron variant are
+in [docs/security.md#sqlcipher](docs/security.md#sqlcipher).
 
 ### Custom builds and Electron
 
@@ -683,6 +657,15 @@ In the case of macOS with Homebrew, the full command looks like:
 ```bash
 npm install sqlite3 --build-from-source --sqlite_libname=sqlcipher --sqlite=`brew --prefix` --runtime=electron --target=44.0.0 --dist-url=https://electronjs.org/headers
 ```
+
+# Security
+
+The security posture — what this package does and does not protect
+against, the Node `--permission` interaction (and how the checks refuse
+out-of-scope file access), the `untrusted: true` recipe for hostile
+database files, extension-loading policy, and the vendored-SQLite CVE
+policy — is documented in [docs/security.md](docs/security.md).
+Vulnerability reporting is in [SECURITY.md](SECURITY.md).
 
 # Testing
 

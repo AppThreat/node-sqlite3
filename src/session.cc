@@ -1281,6 +1281,19 @@ void Database::Work_AfterSerializeToBytes(napi_env e, napi_status status, void* 
     // The exclusive serialize released the database.
     db->exclusiveHeld = false;
 
+    // Never call Value() on a default-constructed (empty)
+    // FunctionReference: undefined behaviour that fatals in practice on
+    // the raw no-callback form (see Work_AfterCheckpoint in
+    // src/database.cc). IsEmpty() is a plain member check.
+    if (baton->callback.IsEmpty()) {
+        if (baton->status != SQLITE_OK) {
+            EXCEPTION(baton->message, baton->status, exception);
+            Napi::Value info[] = { Napi::String::New(env, "error"), exception };
+            EMIT_EVENT(db->Value(), 2, info);
+        }
+        db->Process();
+        return;
+    }
     Napi::Function cb = baton->callback.Value();
     if (!IS_FUNCTION(cb)) {
         if (baton->status != SQLITE_OK) {

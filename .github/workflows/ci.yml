@@ -349,6 +349,66 @@ jobs:
           ELECTRON_DISABLE_SANDBOX: '1'
         run: xvfb-run -a pnpm run test:electron:asar
 
+  # SQLCipher source build (Deliverable 11 §2.4): the --sqlite_libname
+  # option must keep working, and the smoke test proves the link really
+  # is SQLCipher (a wrong key must fail), not the vendored plain SQLite.
+  # Build-only against the distro package; like electron-asar it runs
+  # post-merge on release/ branches, on tags and on demand, so an apt
+  # hiccup cannot gate every push.
+  sqlcipher:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push'
+          && (startsWith(github.ref, 'refs/heads/release/')
+              || startsWith(github.ref, 'refs/tags/')))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86  # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 24
+          scope: '@appthreat'
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install SQLCipher
+        run: sudo apt-get update && sudo apt-get install -y libsqlcipher-dev
+      - name: Build against the system SQLCipher
+        env:
+          # binding.gyp adds <(sqlite)/include; Debian keeps the SQLCipher
+          # headers under /usr/include/sqlcipher, so point the compiler at
+          # them too (the same CPPFLAGS dance as docs/security.md).
+          CPPFLAGS: '-I/usr/include/sqlcipher'
+          LDFLAGS: '-lsqlcipher'
+        run: pnpm run rebuild -- --sqlite=/usr --sqlite_libname=sqlcipher
+      - name: 'Smoke: encrypted database round trip'
+        run: |
+          node --input-type=module -e "
+          import sqlite3 from './lib/sqlite3.js';
+          const file = '/tmp/sqlcipher-smoke.db';
+          const good = 'correct horse battery staple';
+          const db = await sqlite3.open(file);
+          await db.exec(\`PRAGMA key = '\${good}'; CREATE TABLE t (x); INSERT INTO t VALUES (42)\`);
+          await db.close();
+          const reopen = await sqlite3.open(file);
+          await reopen.exec(\`PRAGMA key = '\${good}'\`);
+          const row = await reopen.get('SELECT x FROM t');
+          if (row?.x !== 42) throw new Error('encrypted round trip lost the row');
+          await reopen.close();
+          const wrong = await sqlite3.open(file);
+          await wrong.exec(\`PRAGMA key = 'wrong key'\`);
+          try {
+            await wrong.get('SELECT x FROM t');
+            throw new Error('wrong key read the table: this is NOT a SQLCipher build');
+          } catch (err) {
+            if (!/not a database|file is not a database/.test(err.message)) throw err;
+          }
+          await wrong.close();
+          console.log('SQLCIPHER_OK');
+          "
+
   # The Node-API promise, end to end: the binary built once under Node 24
   # by the `build` matrix must run unmodified under every supported Node.
   # This job never compiles — no rebuild step, and PREBUILDS_ONLY makes

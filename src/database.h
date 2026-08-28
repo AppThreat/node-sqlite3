@@ -319,6 +319,15 @@ public:
         virtual ~AuthBaton() override { delete policy; }
     };
 
+    // ATTACH-gate registration (Deliverable 11). Carries the enabled flag
+    // and the allowlist until the exclusive handler installs them.
+    struct AttachGateBaton : Baton {
+        bool enable = false;
+        std::vector<std::string> allow;
+        AttachGateBaton(Database* db_, Napi::Function cb_) : Baton(db_, cb_) {}
+        virtual ~AttachGateBaton() override = default;
+    };
+
     // Cancellation-token registration. Owns the Int32Array reference (and
     // the captured flag pointer) until the exclusive handler installs it.
     struct ProgressFlagBaton : Baton {
@@ -563,6 +572,26 @@ protected:
         const char* arg2, const char* database, const char* trigger);
     void RemoveAuthorizer();
 
+    // --- ATTACH gate (Deliverable 11). SQLite exposes exactly one
+    // authorizer slot per connection, and the declarative authorizer above
+    // occupies it whenever a policy is installed — so the gate is not a
+    // second authorizer but a pre-filter evaluated inside
+    // AuthorizerCallback: while attach_gate is set, every SQLITE_ATTACH
+    // action (which is also what VACUUM INTO fires for its output file)
+    // is denied unless the target filename matches the allowlist. The
+    // allowlist is populated by the JS layer, which permission-checks each
+    // entry against Node's permission model at declare time — the C side
+    // cannot query it, and a JS callback here would put JavaScript on the
+    // prepare path. Matching is lexical (exact string, separator-
+    // normalised, or joined with the process cwd); symlinks are not
+    // resolved, so a mismatched spelling is denied — fail-closed.
+    // attach_gate/attach_allow follow auth_policy's lifetime discipline:
+    // written only by the exclusive handler at pending == 0 (no prepare
+    // can be reading them), cleared in Work_BeginClose and ~Database.
+    Napi::Value SetAttachGate(const Napi::CallbackInfo& info);
+    static void Work_SetAttachGate(Baton* baton);
+    static bool AttachTargetAllowed(const Database* db, const char* arg1);
+
     // --- Preupdate event (Deliverable 08). One preupdate hook slot
     // exists per connection and is shared with the session extension:
     // sqlite3session_create installs its own hook, displacing ours.
@@ -745,6 +774,22 @@ protected:
     sqlite3* _handle = NULL;
 
     DbState db_state = DbState::Opening;
+
+    // The sqlite3_open_v2 flags this connection was opened with, recorded
+    // in Work_Open. The ATTACH gate reads SQLITE_OPEN_URI from it: without
+    // that flag a 'file:…' target is an ordinary filename, not a URI.
+    int open_mode = 0;
+
+    // Set when Work_Open failed: the connection then lands in DbState::Closed
+    // (it will never become usable), and Process()'s closed-state drain
+    // fails work queued behind the failed open with THIS error rather than
+    // the generic "Database handle is closed" — the caller queued against a
+    // database that never existed, and the open failure is the error that
+    // explains it. Before Deliverable 11 that work sat stranded in the
+    // queue forever: Process() never dispatched from the Opening state.
+    bool open_failed = false;
+    std::string open_error_message;
+    int open_error_status = SQLITE_OK;
     // True only while an exclusive call (exec/close/wait/loadExtension)
     // holds the database: set when it is dispatched, cleared when it
     // completes. The old sticky `locked` flag stayed true after an
@@ -834,6 +879,12 @@ protected:
     //    exclusive removal paths, and its round trips ride the shared
     //    js_channel (see src/function.cc).
     AuthPolicy* auth_policy = NULL;
+    // The ATTACH gate pre-filter state (see SetAttachGate above). Same
+    // access discipline as auth_policy: JS-thread writes inside the
+    // exclusive handler at pending == 0, reads from whatever thread is
+    // preparing.
+    bool attach_gate = false;
+    std::vector<std::string> attach_allow;
     ProgressMode progress_mode = ProgressMode::None;
     int progress_period = 0;
     std::atomic<int32_t>* progress_flag = NULL;

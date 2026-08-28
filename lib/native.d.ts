@@ -114,6 +114,21 @@ export type Row = Record<string, unknown>;
 export type IntegerMode = 'number' | 'bigint' | 'mixed';
 
 /**
+ * Options for `configure('extensionPolicy', …)`.
+ *
+ * @since 9.0.0
+ */
+export type ExtensionPolicyOptions = {
+    /**
+     * The only paths `loadExtension` may load. Under the permission model
+     * each entry must also be fs.read-permitted.
+     */
+    allow?: string[];
+    /** Permanently disable `loadExtension` on this connection. */
+    deny?: boolean;
+};
+
+/**
  * The error delivered to callbacks, emitted on `'error'`, or thrown by
  * sync methods. Since 9.0.0 `code` is the extended result-code name
  * (`SQLITE_CONSTRAINT_PRIMARYKEY`), `primaryCode` the primary one
@@ -224,6 +239,29 @@ export declare class Database extends EventEmitter {
      * @since 9.0.0
      */
     configure(option: 'integerMode', value: IntegerMode): this;
+    /**
+     * Configures the connection's extension-loading policy (a JS-layer
+     * option, enforced by the Database wrapper in lib/sqlite3.js).
+     * `{ allow: [...] }` restricts `loadExtension` to the listed paths;
+     * `{ deny: true }` disables it permanently for the connection.
+     *
+     * @param option `'extensionPolicy'` to set the extension policy.
+     * @param value the policy.
+     * @since 9.0.0
+     */
+    configure(option: 'extensionPolicy', value: ExtensionPolicyOptions): this;
+    /**
+     * Configures the ATTACH-gate allowlist (a JS-layer option, enforced
+     * by the native authorizer pre-filter). Every connection opened under
+     * the permission model starts with an empty (deny-all) gate; listing
+     * paths here allows `ATTACH`/`VACUUM INTO` for exactly those targets.
+     * `null` disarms a manually-armed gate.
+     *
+     * @param option `'attachPaths'` to set the allowed ATTACH targets.
+     * @param value the allowed absolute paths, or null to disarm.
+     * @since 9.0.0
+     */
+    configure(option: 'attachPaths', value: string[] | null): this;
 
     /**
      * Interrupts every in-flight and queued database operation from
@@ -407,6 +445,20 @@ export declare class Database extends EventEmitter {
      * @returns this database, for chaining.
      */
     _setAuthorizer(defaultDecision?: number, rules?: unknown[][]): this;
+    /**
+     * Arms or disarms the permission-model ATTACH gate: while armed,
+     * SQLITE_ATTACH actions (including VACUUM INTO's internal ATTACH) are
+     * denied unless the target filename matches the allowlist. In-memory
+     * targets always pass. Wrapped by lib/sqlite3.js, which
+     * permission-checks each allowlist entry first.
+     *
+     * @internal
+     * @param enabled whether the gate is armed.
+     * @param allowedPaths the allowlisted target paths (may be empty).
+     * @returns this database, for chaining.
+     * @since 9.0.0
+     */
+    _setAttachGate(enabled: boolean, allowedPaths: string[]): this;
     /**
      * Installs the cancellation-token progress handler (an Int32Array over
      * a SharedArrayBuffer polled every `period` VM instructions), or

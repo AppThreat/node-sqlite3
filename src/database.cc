@@ -1,5 +1,12 @@
+#include <cctype>
 #include <cstring>
 #include <napi.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "macros.h"
 #include "database.h"
@@ -36,6 +43,9 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         // Hooks, authorizer and progress (Deliverable 07): internal entry
         // points wrapped by lib/sqlite3.js, which parses options.
         InstanceMethod("_setAuthorizer", &Database::SetAuthorizer, napi_default_method),
+        // Permission-model ATTACH gate (Deliverable 11): wrapped by
+        // lib/sqlite3.js, which permission-checks allowlist entries.
+        InstanceMethod("_setAttachGate", &Database::SetAttachGate, napi_default_method),
         InstanceMethod("_progressFlag", &Database::SetProgressFlag, napi_default_method),
         InstanceMethod("_progressCallback", &Database::SetProgressCallback, napi_default_method),
         InstanceMethod("_checkpoint", &Database::Checkpoint, napi_default_method),
@@ -80,15 +90,26 @@ void Database::Process() {
     Napi::HandleScope scope(env);
 
     if (db_state == DbState::Closed && !queue.empty()) {
-        EXCEPTION("Database handle is closed", SQLITE_MISUSE, exception);
+        // Work queued behind a *failed open* fails with the open's own
+        // error (CANTOPEN etc.), not the generic closed message — it never
+        // had a chance to run and the open failure is what explains that.
+        EXCEPTION(
+            open_failed ? open_error_message.c_str() : "Database handle is closed",
+            open_failed ? open_error_status : SQLITE_MISUSE,
+            exception);
         Napi::Value argv[] = { exception };
         bool called = false;
 
-        // Call all callbacks with the error object.
+        // Call all callbacks with the error object. The IsEmpty() guard
+        // first: Value() on a default-constructed (empty) reference is
+        // undefined behaviour, and this drain now also fires for
+        // callback-less internal batons (the permission-model ATTACH gate
+        // install queued in the constructor) behind a failed open.
         while (!queue.empty()) {
             auto call = std::unique_ptr<Call>(queue.front());
             queue.pop();
             auto baton = std::unique_ptr<Baton>(call->baton);
+            if (baton->callback.IsEmpty()) continue;
             Napi::Function cb = baton->callback.Value();
             if (IS_FUNCTION(cb)) {
                 TRY_CATCH_CALL(this->Value(), cb, 1, argv);
@@ -97,8 +118,10 @@ void Database::Process() {
         }
 
         // When we couldn't call a callback function, emit an error on the
-        // Database object.
-        if (!called) {
+        // Database object — except after a failed open, whose error the
+        // open path has already delivered through its callback or the
+        // 'error' event; a second emit here would be an unhandled duplicate.
+        if (!called && !open_failed) {
             Napi::Value info[] = { Napi::String::New(env, "error"), exception };
             EMIT_EVENT(Value(), 2, info);
         }
@@ -200,6 +223,10 @@ void Database::Work_Open(napi_env e, void* data) {
     auto* baton = static_cast<OpenBaton*>(data);
     auto* db = baton->db;
 
+    // Kept for the ATTACH gate: whether URI filenames mean anything on
+    // this connection is decided here, by this flag, and nowhere else.
+    db->open_mode = baton->mode;
+
     baton->status = sqlite3_open_v2(
         baton->filename.c_str(),
         &db->_handle,
@@ -220,6 +247,19 @@ void Database::Work_Open(napi_env e, void* data) {
         // JS error gains err.code (extended name), err.errno (extended
         // int) and err.primaryCode (primary name).
         sqlite3_extended_result_codes(db->_handle, 1);
+        // Belt-and-braces: the C-API extension gate is explicitly off from
+        // the start. Observed on the vendored 3.53.4 (probed, not cited):
+        // SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION reads false on a fresh
+        // open and maps to the C-API flag only — the SQL load_extension()
+        // function is gated by a second flag (SQLITE_LoadExtFunc) that
+        // only sqlite3_enable_load_extension() sets, so the SQL function
+        // is unreachable here even after setting this DBCONFIG to 1.
+        // Setting 0 anyway makes the C-API state deterministic for source
+        // builds that compile with SQLITE_ENABLE_LOAD_EXTENSION, which
+        // turns the C-API flag on by default. loadExtension() re-enables
+        // the C API for the duration of its call and disables it after.
+        sqlite3_db_config(db->_handle, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,
+            0, NULL);
     }
 }
 
@@ -233,17 +273,25 @@ void Database::Work_AfterOpen(napi_env e, napi_status status, void* data) {
     Napi::HandleScope scope(env);
 
     // Drains the queue even when the completion callback below throws
-    // (TRY_CATCH_CALL's early return). After a *failed* open nothing is
-    // dispatched either way (the connection is still Opening, which
-    // Process does not dispatch from) — the guard changes only the
-    // throwing-callback path. The 'open' event still fires before the
-    // drain, as before.
+    // (TRY_CATCH_CALL's early return). After a *failed* open the
+    // connection is Closed by the failure branch below, so this same
+    // drain fails everything queued behind the open with the open's own
+    // error. The 'open' event still fires before the drain, as before.
     ProcessGuard process_on_exit(db);
 
     Napi::Value argv[1];
     if (baton->status != SQLITE_OK) {
         EXCEPTION(baton->message, baton->status, exception);
         argv[0] = exception;
+        // A failed open is terminal: the connection will never become
+        // usable, so it lands in Closed — and work already queued behind
+        // the open (scheduled while it was still Opening) is failed by the
+        // ProcessGuard drain below with this same error instead of
+        // stranding in a queue Process() never dispatches from.
+        db->open_failed = true;
+        db->open_error_message = baton->message;
+        db->open_error_status = baton->status;
+        db->db_state = DbState::Closed;
     }
     else {
         db->db_state = DbState::Open;
@@ -1270,7 +1318,12 @@ void Database::Work_SetAuthorizer(Baton* b) {
     AuthPolicy* old = db->auth_policy;
     if (baton->remove) {
         db->auth_policy = NULL;
-        sqlite3_set_authorizer(db->_handle, NULL, NULL);
+        // The ATTACH gate shares this single sqlite authorizer slot: the
+        // callback stays installed while the gate is armed, so removing a
+        // declarative policy does not silently re-open ATTACH.
+        if (!db->attach_gate) {
+            sqlite3_set_authorizer(db->_handle, NULL, NULL);
+        }
     }
     else {
         db->auth_policy = baton->policy;
@@ -1290,6 +1343,16 @@ int Database::AuthorizerCallback(void* ctx, int action, const char* arg1,
     // the policy is evaluated here precisely because a JS callback could
     // not return a value synchronously from this context.
     auto* db = static_cast<Database*>(ctx);
+
+    // ATTACH gate pre-filter: SQLITE_ATTACH is also what VACUUM INTO
+    // fires for its output file, so this one check closes both SQL-level
+    // paths to the filesystem. Falls through to the declarative policy
+    // when the target is allowed (a user policy may still deny it).
+    if (db->attach_gate && action == SQLITE_ATTACH
+            && !AttachTargetAllowed(db, arg1)) {
+        return SQLITE_DENY;
+    }
+
     const AuthPolicy* policy = db->auth_policy;
     if (policy == NULL) return SQLITE_OK;
 
@@ -1308,11 +1371,200 @@ int Database::AuthorizerCallback(void* ctx, int action, const char* arg1,
 
 void Database::RemoveAuthorizer() {
     // Main-thread, nothing in flight (Work_BeginClose / ~Database).
-    if (_handle != NULL && auth_policy != NULL) {
+    if (_handle != NULL && (auth_policy != NULL || attach_gate)) {
         sqlite3_set_authorizer(_handle, NULL, NULL);
     }
     delete auth_policy;
     auth_policy = NULL;
+    attach_gate = false;
+    attach_allow.clear();
+}
+
+// --- ATTACH gate -------------------------------------------------------------
+
+namespace {
+
+// Lexical path comparison helpers for the gate: no syscalls, no symlink
+// resolution — a differently-spelled target does not match (fail-closed).
+bool PathEquals(const std::string& allowed, const char* arg1) {
+    if (allowed == arg1) return true;
+#ifndef _WIN32
+    // POSIX only: '\' is an ordinary filename character, so normalising it
+    // would *widen* the allowlist — an entry for "dir/x.db" would admit an
+    // ATTACH of the distinct, never-permission-checked file "dir\x.db"
+    // (verified: the backslash-spelled file was created and attached).
+    // Exact match is the whole rule here.
+    return false;
+#else
+    // Windows: a target may arrive with either separator while the
+    // allowlist entry (a JS string) uses the other.
+    if (allowed.find('\\') == std::string::npos
+            && strchr(arg1, '\\') == NULL) {
+        return false;
+    }
+    size_t n = allowed.size();
+    if (strlen(arg1) != n) return false;
+    for (size_t i = 0; i < n; i++) {
+        char a = allowed[i];
+        char b = arg1[i];
+        if (a == '\\') a = '/';
+        if (b == '\\') b = '/';
+        if (a != b) return false;
+    }
+    return true;
+#endif
+}
+
+// The process cwd, for making a relative ATTACH target comparable against
+// absolute allowlist entries. Empty when unavailable, in which case
+// relative targets simply do not match (fail-closed).
+std::string CurrentWorkingDir() {
+    char buf[4096];
+#ifdef _WIN32
+    const char* got = _getcwd(buf, sizeof(buf));
+#else
+    const char* got = getcwd(buf, sizeof(buf));
+#endif
+    return got != NULL ? std::string(got) : std::string();
+}
+
+} // namespace
+
+// _setAttachGate(enabled, allowPaths) arms/disarms the gate. The JS layer
+// has already permission-checked every allowlist entry against Node's
+// permission model; here the entries are only matched. Exclusive, with the
+// same MayBlockOnWorkerRoundTrip deferral as the authorizer: it takes the
+// connection mutex to install/remove the sqlite authorizer.
+Napi::Value Database::SetAttachGate(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    auto* db = this;
+
+    auto* baton = new AttachGateBaton(db, Napi::Function());
+    if (info.Length() >= 1 && (info[0].IsBoolean() || info[0].IsNumber())) {
+        bool enable = info[0].IsBoolean()
+            ? info[0].As<Napi::Boolean>().Value()
+            : info[0].As<Napi::Number>().Int32Value() != 0;
+        baton->enable = enable;
+        if (enable) {
+            if (info.Length() < 2 || !info[1].IsArray()) {
+                delete baton;
+                Napi::TypeError::New(env,
+                    "attach gate requires an array of allowed paths"
+                ).ThrowAsJavaScriptException();
+                return env.Null();
+            }
+            Napi::Array allow = info[1].As<Napi::Array>();
+            uint32_t count = allow.Length();
+            baton->allow.reserve(count);
+            for (uint32_t i = 0; i < count; i++) {
+                Napi::Value entry = allow.Get(i);
+                if (!entry.IsString()) {
+                    delete baton;
+                    Napi::TypeError::New(env,
+                        "allowed attach path " + std::to_string(i) +
+                        " must be a string"
+                    ).ThrowAsJavaScriptException();
+                    return env.Null();
+                }
+                baton->allow.push_back(entry.As<Napi::String>().Utf8Value());
+            }
+        }
+    }
+    else {
+        delete baton;
+        Napi::TypeError::New(env,
+            "attach gate expects (enabled, allowedPaths)"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    db->Schedule(Work_SetAttachGate, baton, true);
+    db->Process();
+
+    return info.This();
+}
+
+void Database::Work_SetAttachGate(Baton* b) {
+    auto baton = std::unique_ptr<AttachGateBaton>(
+        static_cast<AttachGateBaton*>(b));
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(Work_SetAttachGate, baton.release(), true);
+        return;
+    }
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    // Nothing in flight: the deferral above guarantees it, and the sqlite
+    // call below would otherwise race a worker for the connection mutex.
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+    auto* db = baton->db;
+
+    db->attach_gate = baton->enable;
+    db->attach_allow = std::move(baton->allow);
+
+    // One sqlite authorizer slot: install the shared callback when the
+    // gate arms (unless a declarative policy already installed it), and
+    // remove it when the gate disarms and no policy remains.
+    if (db->attach_gate && db->auth_policy == NULL) {
+        sqlite3_set_authorizer(db->_handle, AuthorizerCallback, db);
+    }
+    else if (!db->attach_gate && db->auth_policy == NULL) {
+        sqlite3_set_authorizer(db->_handle, NULL, NULL);
+    }
+
+    db->exclusiveHeld = false;
+    db->Process();
+}
+
+// Matches an ATTACH target (SQLITE_ATTACH arg1, the filename as written in
+// the SQL or bound to it) against the allowlist: exact string, separator-
+// normalised, or lexically joined with the process cwd for relative
+// targets. No filesystem access, no realpath: matching is lexical on
+// purpose, so the caller must ATTACH using a spelling the allowlist
+// recognises.
+bool Database::AttachTargetAllowed(const Database* db, const char* arg1) {
+    if (arg1 == NULL) return false;
+    // ':memory:' is the only spelling that touches no filesystem and so
+    // cannot be an fs-permission bypass. ('' is NOT one: SQLite creates a
+    // private temporary database backed by real files under the temp
+    // directory, so it stays denied — fail-closed.)
+    //
+    if (strcmp(arg1, ":memory:") == 0) {
+        return true;
+    }
+    // The URI memory forms are in-memory only on a connection opened with
+    // SQLITE_OPEN_URI, which is opt-in per open (sqlite3.OPEN_URI) and is
+    // not the default. Without it SQLite treats 'file:…' as an ordinary
+    // filename, so accepting these unconditionally opened a hole instead
+    // of closing one: verified — ATTACH 'file::memory:' on a default
+    // connection created a real file of that literal name in the process
+    // cwd, outside the allowlist, while the gate reported it as
+    // in-memory. On a non-URI connection such a target falls through to
+    // the allowlist match below, like any other filename.
+    if ((db->open_mode & SQLITE_OPEN_URI) != 0
+            && (sqlite3_strnicmp(arg1, "file::memory:", 13) == 0
+                || (sqlite3_strnicmp(arg1, "file:", 5) == 0
+                    && strstr(arg1, "mode=memory") != NULL))) {
+        return true;
+    }
+    if (db->attach_allow.empty()) return false;
+    for (const auto& allowed : db->attach_allow) {
+        if (PathEquals(allowed, arg1)) return true;
+    }
+    // A relative target is compared against the cwd-joined spelling of
+    // each absolute allowlist entry.
+    if (arg1[0] == '/' || arg1[0] == '\\'
+            || (isalpha(static_cast<unsigned char>(arg1[0])) && arg1[1] == ':')) {
+        return false;
+    }
+    std::string cwd = CurrentWorkingDir();
+    if (cwd.empty()) return false;
+    std::string joined = cwd;
+    if (joined.back() != '/' && joined.back() != '\\') joined += '/';
+    joined += arg1;
+    for (const auto& allowed : db->attach_allow) {
+        if (PathEquals(allowed, joined.c_str())) return true;
+    }
+    return false;
 }
 
 // --- Progress handler / cancellation token ----------------------------------
@@ -1583,6 +1835,13 @@ void Database::Work_AfterCheckpoint(napi_env e, napi_status status, void* data) 
     db->pending--;
     db->Process();
 
+    // Calling Value() on a default-constructed (empty) FunctionReference
+    // is undefined behaviour and fatals in practice. The dual-mode JS
+    // wrappers always append a callback, so the raw no-callback form of
+    // these internal entry points was never exercised until the untrusted
+    // open path queued _dbConfig without one. IsEmpty() is a plain member
+    // check — the same guard shape Statement::CleanQueue uses.
+    if (baton->callback.IsEmpty()) return;
     Napi::Function cb = baton->callback.Value();
     if (!IS_FUNCTION(cb)) return;
 
@@ -1702,6 +1961,8 @@ void Database::Work_AfterTableInfo(napi_env e, napi_status status, void* data) {
     db->pending--;
     db->Process();
 
+    // See Work_AfterCheckpoint: never call Value() on an empty reference.
+    if (baton->callback.IsEmpty()) return;
     Napi::Function cb = baton->callback.Value();
     if (!IS_FUNCTION(cb)) return;
 
@@ -1793,6 +2054,8 @@ void Database::Work_AfterDbConfig(napi_env e, napi_status status, void* data) {
     db->pending--;
     db->Process();
 
+    // See Work_AfterCheckpoint: never call Value() on an empty reference.
+    if (baton->callback.IsEmpty()) return;
     Napi::Function cb = baton->callback.Value();
     if (!IS_FUNCTION(cb)) return;
 
