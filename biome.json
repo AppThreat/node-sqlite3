@@ -138,6 +138,12 @@
                     }
                 }
             }
+        },
+        {
+            "includes": ["bench/baseline.json"],
+            "formatter": {
+                "enabled": false
+            }
         }
     ]
 }
