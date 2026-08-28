@@ -15,6 +15,30 @@ using namespace node_sqlite3;
 
 namespace {
 
+// setRowFactoryGenerator(fn): installs the JS half of the row builder.
+//
+// The generator takes (columnNames, arrayShape) and returns a function that
+// builds one row from its arguments — see makeRowFactory in lib/sqlite3.js.
+// It lives in JS so the generated source is escaped by JSON.stringify rather
+// than by a hand-rolled C++ escaper, and so a realm that forbids code
+// generation from strings fails in one catchable place.
+Napi::Value SetRowFactoryGenerator(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (info.Length() < 1 || !info[0].IsFunction()) {
+        Napi::TypeError::New(env, "setRowFactoryGenerator requires a function")
+            .ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+    auto* addon = env.GetInstanceData<Database::AddonData>();
+    if (addon == NULL) return env.Undefined();
+    if (addon->row_factory_generator != NULL) {
+        napi_delete_reference(env, addon->row_factory_generator);
+        addon->row_factory_generator = NULL;
+    }
+    napi_create_reference(env, info[0], 1, &addon->row_factory_generator);
+    return env.Undefined();
+}
+
 Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
     Napi::HandleScope scope(env);
 
@@ -25,6 +49,8 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
     ChangesetIter::Init(env, exports);
     Blob::Init(env, exports);
 
+    exports.Set("setRowFactoryGenerator",
+        Napi::Function::New(env, SetRowFactoryGenerator));
     exports.Set("invertChangeset",
         Napi::Function::New(env, InvertChangeset));
     exports.Set("concatChangeset",

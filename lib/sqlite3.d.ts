@@ -173,5 +173,6 @@ export type {
     SessionOptions,
     SqliteError,
     StatementRunSyncResult,
+    SyncRowModeOptions,
     TableColumnInfo,
 } from './native.js';

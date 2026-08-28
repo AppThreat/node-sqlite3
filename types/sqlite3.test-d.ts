@@ -153,6 +153,12 @@ expectType<StatementRunSyncResult>(db.runSync('SELECT 1'));
 expectType<Row[]>(db.allSync('SELECT 1'));
 expectType<{ a: number }[]>(db.allSync<{ a: number }>('SELECT a'));
 expectType<Statement>(db.prepareSync('SELECT 1'));
+// rowMode: 'array' opts into the bulk-reader row shape (arrays).
+expectType<unknown[] | undefined>(db.getSync('SELECT 1', { rowMode: 'array' }));
+expectType<unknown[][]>(db.allSync('SELECT 1', { rowMode: 'array' }));
+expectType<unknown[][]>(
+    db.allSync('SELECT a FROM t WHERE b = ?', 5, { rowMode: 'array' }),
+);
 
 // --- Database: statement cache, backup, transactions, iteration ----------
 
@@ -310,6 +316,8 @@ expectType<AsyncIterableIterator<Row>>(stmt.iterate(1));
 expectType<AsyncIterableIterator<Row>>(stmt.iterate(1, { signal }));
 expectType<Row | undefined>(stmt.getSync(1));
 expectType<Row[]>(stmt.allSync(1));
+expectType<unknown[] | undefined>(stmt.getSync(1, { rowMode: 'array' }));
+expectType<unknown[][]>(stmt.allSync({ rowMode: 'array' }));
 expectType<Statement>(stmt.runSync(1));
 expectType<string>(stmt.sql);
 expectType<number | bigint | undefined>(stmt.lastID);

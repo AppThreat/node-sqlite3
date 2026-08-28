@@ -150,21 +150,91 @@ std::unique_ptr<Values::Field> ConvertToField(const Napi::Value source,
 // where user-function arguments arrive.
 void ValueToCell(Cell* cell, sqlite3_value* value);
 
+// Names the value a conversion error is about, *without* building the
+// name unless the error actually happens.
+//
+// The phrase is used by exactly one message: the 'number'-mode RangeError
+// for an out-of-range integer. Building it eagerly cost a heap allocation
+// and a concatenation for every cell of every row — on a 20,000 x 4 read,
+// 80,000 allocations to describe an error that is not occurring. Callers
+// that already hold a finished phrase (function arguments, changeset
+// fields) pass a string and are converted implicitly; the row path passes
+// the statement's cached column names plus an index, and pays nothing
+// until Describe() is called.
+struct ValueOrigin {
+    // A ready-made phrase, e.g. "argument 0". Borrowed, not owned; one of
+    // the two spellings callers already use.
+    const std::string* literal = nullptr;
+    const char* literal_cstr = nullptr;
+    // Or: a position in a statement's cached column names. Borrowed.
+    const std::vector<std::string>* column_names = nullptr;
+    size_t index = 0;
+
+    // Both conversions are implicit by design, so every existing call site
+    // keeps compiling — including the ones passing a string literal, which
+    // cannot reach a std::string parameter through a second user-defined
+    // conversion. Safe against temporaries: every use is inside the call
+    // expression that creates it.
+    ValueOrigin(const std::string& phrase)   // NOLINT(runtime/explicit)
+        : literal(&phrase) {}
+    ValueOrigin(const char* phrase)          // NOLINT(runtime/explicit)
+        : literal_cstr(phrase) {}
+    ValueOrigin(const std::vector<std::string>* names, size_t i)
+        : column_names(names), index(i) {}
+
+    // "column 'x'" when the name is known, "result column N" otherwise.
+    std::string Describe() const;
+};
+
 // Converts an int64 according to the database's integer mode (see
 // Database::IntegerMode). Throws a RangeError in 'number' mode for unsafe
 // values; callers must check env.IsExceptionPending() afterwards.
 Napi::Value ConvertInt64ToJS(Napi::Env env, sqlite3_int64 value,
-    int integer_mode, const std::string& what);
+    int integer_mode, const ValueOrigin& origin);
 
 // Converts a Cell into a JS value: number/BigInt by integer mode, string,
-// Buffer for blobs. `what` names the value in the 'number'-mode RangeError.
+// Buffer for blobs. `origin` names the value in the 'number'-mode
+// RangeError, and is only formatted if that error is raised.
 // `move_payload` enables the zero-copy external Buffer for blobs >= 4096
 // bytes, moving the payload out of the cell (the row-conversion path, whose
 // Cells are discarded afterwards); function arguments must pass false —
 // their Cells outlive the conversion, so those blobs are copied.
 // Throws (leaves a pending exception) only on the RangeError path.
+// `raised` is the same per-cell failure channel as ColumnToJS's: it lets a
+// row loop read a plain bool instead of calling napi_is_exception_pending
+// per cell. Pass nullptr when the caller checks the env afterwards anyway.
 Napi::Value CellToJS(Napi::Env env, Cell& cell, int integer_mode,
-    const std::string& what, bool move_payload = false);
+    const ValueOrigin& origin, bool move_payload = false,
+    bool* raised = nullptr);
+
+// Converts one live result column straight into a JS value, skipping the
+// intermediate Cell entirely.
+//
+// The Cell exists for the *async* paths, where rows are read on a worker
+// thread and converted later on the JS thread — there the copy is what
+// makes the hand-off possible. The synchronous paths have no hand-off:
+// they were paying for a full materialisation of the result set (a Row
+// per row, a std::string per text/blob cell) and then converting it, so
+// every string was copied twice and every row allocated twice.
+//
+// Semantics match CellToJS exactly, including an empty string/Buffer for a
+// zero-length or NULL-pointer payload. Blobs are copied rather than
+// adopted: the bytes belong to SQLite only until the next step, so there
+// is nothing to move — which still leaves one copy, where the Cell route
+// took two for blobs under 4096 bytes.
+//
+// The returned value borrows nothing from the statement; it is safe to
+// step again immediately afterwards.
+//
+// `raised` is the per-cell failure channel: the row loop reads a plain
+// bool instead of calling napi_is_exception_pending per cell (measured:
+// inside run-to-run noise on its own, but it keeps the hot loop free of
+// an avoidable ABI call). The only failure this conversion can produce
+// is the 'number'-mode RangeError on an unsafe integer, so the flag is
+// set exactly there; pass nullptr when the caller checks the env
+// afterwards anyway.
+Napi::Value ColumnToJS(Napi::Env env, sqlite3_stmt* stmt, int column,
+    int integer_mode, const ValueOrigin& origin, bool* raised = nullptr);
 
 }
 

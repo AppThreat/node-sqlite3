@@ -595,6 +595,16 @@ declare module './native.js' {
          */
         cacheStatements(maxEntries?: number): this;
 
+        /**
+         * Synchronous get returning the first row as an array of values
+         * in result-column order (`rowMode: 'array'`). Duplicate columns
+         * keep every value. The bulk-reader shape.
+         * @since 9.0.0
+         */
+        getSync(
+            sql: string,
+            ...params: [...BindValue[], { rowMode: 'array' }]
+        ): unknown[] | undefined;
         /** Synchronous get on the main thread. */
         getSync<T = Row>(sql: string, ...params: BindValue[]): T | undefined;
         /** Synchronous get with one array/named bind object. */
@@ -608,6 +618,16 @@ declare module './native.js' {
         runSync(sql: string, ...params: BindValue[]): StatementRunSyncResult;
         /** Synchronous run with one array/named bind object. */
         runSync(sql: string, params: BindParams): StatementRunSyncResult;
+        /**
+         * Synchronous all returning one array of values per row in
+         * result-column order (`rowMode: 'array'`). Duplicate columns
+         * keep every value. The bulk-reader shape.
+         * @since 9.0.0
+         */
+        allSync(
+            sql: string,
+            ...params: [...BindValue[], { rowMode: 'array' }]
+        ): unknown[][];
         /** Synchronous all on the main thread. */
         allSync<T = Row>(sql: string, ...params: BindValue[]): T[];
         /** Synchronous all with one array/named bind object. */
@@ -686,6 +706,14 @@ declare module './native.js' {
         _stmtCache?: Map<string, Statement>;
         /** Statement cache capacity. @internal */
         _stmtCacheMax?: number;
+        /**
+         * Statement cache the synchronous paths keep on their own, so that
+         * `getSync`/`allSync`/`runSync` do not prepare and finalize a
+         * statement per call. Separate from `_stmtCache` because enabling
+         * that one also changes how the asynchronous calls behave, which is
+         * the caller's choice via `cacheStatements()`. @internal
+         */
+        _syncStmtCache?: Map<string, Statement>;
         /** Sync-path statement resolver. @internal */
         _statementForSync(sql: string): {
             statement: Statement;

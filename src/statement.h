@@ -22,6 +22,17 @@ namespace node_sqlite3 {
 
 class Statement : public Napi::ObjectWrap<Statement> {
 public:
+    // Row shape requested from the synchronous read paths. SYNC_ROW_OBJECT
+    // is the historical default (plain objects, result-column order,
+    // last-duplicate-wins); SYNC_ROW_ARRAY is the bulk-reader opt-in
+    // (`{ rowMode: 'array' }`), which skips the per-cell property stores
+    // entirely — napi_set_element on a pre-sized array has no shape to
+    // transition, which is what makes it the fastest row we can build.
+    enum SyncRowMode {
+        SYNC_ROW_OBJECT = 0,
+        SYNC_ROW_ARRAY = 1,
+    };
+
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
     static Napi::Value New(const Napi::CallbackInfo& info);
 
@@ -332,6 +343,13 @@ protected:
 
     template <class T> inline std::unique_ptr<Values::Field> BindParameter(const Napi::Value source, T pos);
     template <class T> T* Bind(const Napi::CallbackInfo& info, int start = 0, int end = -1);
+    // The bind-argument shapes (one array / N positional / one named
+    // object), shared by Bind<T> (into a Baton, for the queued async
+    // paths) and called directly by the synchronous fast paths, which
+    // have no Baton to fill. Returns false with a pending exception on
+    // unsupported values or a malformed shape.
+    bool ParseBindArguments(const Napi::CallbackInfo& info, int start,
+        int last, Parameters* parameters);
     bool Bind(Parameters&& parameters, bool supplied);
 
     static void GetRow(Row* row, sqlite3_stmt* stmt, Columns* columns);
@@ -339,6 +357,72 @@ protected:
     // they were built from. Call once per batch, before RowToJS.
     void SyncColumnKeys(Napi::Env env, const Columns& columns);
     Napi::Value RowToJS(Napi::Env env, Row* row);
+
+    // The scopeless core of RowToJS, and the asynchronous counterpart of
+    // ConvertCurrentRow: converts one already-materialised Row into the
+    // caller's HandleScope. Returns false when the 'number'-mode RangeError
+    // left a pending exception. Callers must store `*out` into a rooted JS
+    // object before their scope closes.
+    bool ConvertCellRow(Napi::Env env, Row* row,
+        const std::vector<napi_value>& keys, napi_value* out);
+
+    // Converts a whole materialised result set into a JS array, resolving
+    // the column keys once and opening one HandleScope per batch of rows
+    // rather than one per row.
+    //
+    // This is the shared tail of every asynchronous read completion
+    // (all/fetch, and their promise forms). Those paths must materialise
+    // Cells — the rows are read on a worker thread and converted later on
+    // the JS thread — but the *conversion* is a plain synchronous pass and
+    // has no reason to cost more per row than the synchronous paths do.
+    //
+    // Returns false when a row raised the RangeError, leaving it pending
+    // for the caller to deliver to the callback.
+    bool CellRowsToJS(Napi::Env env, Rows& rows, const Columns& columns,
+        Napi::Array* out);
+    // The synchronous counterpart of RowToJS: builds the row object from
+    // the live statement, with no intermediate Row. Requires the column
+    // keys to have been synced for the current result shape. `row_mode`
+    // picks the row shape (object or array); the array shape never reads
+    // `keys`.
+    Napi::Value CurrentRowToJS(Napi::Env env,
+        const std::vector<napi_value>& keys, int row_mode = SYNC_ROW_OBJECT);
+
+    // The scopeless core of CurrentRowToJS: converts the current row into
+    // the caller's HandleScope and reports via the return value whether it
+    // completed (false = the 'number'-mode RangeError left a pending
+    // exception). Callers must store `*out` into a rooted JS object before
+    // their scope closes — which the synchronous paths do immediately,
+    // into the result array they are building.
+    bool ConvertCurrentRow(Napi::Env env, const std::vector<napi_value>& keys,
+        int row_mode, int cols, napi_value* out);
+    // Resolves the cached column-key references into raw napi_values once
+    // per call, so a multi-row read does not re-dereference them per cell.
+    void ResolveColumnKeys(std::vector<napi_value>* out);
+
+    // Returns the compiled row factory for the current result shape, or
+    // NULL when this build/realm/shape cannot use one (see
+    // AddonData::row_factory_generator, and kMaxFactoryColumns). Compiled
+    // on first use per shape and dropped whenever the column keys are
+    // rebuilt, so a mid-stream re-prepare cannot reuse a stale shape.
+    napi_value RowFactoryForShape(Napi::Env env, int row_mode);
+    // Drops the compiled factories. Called from the two places that
+    // invalidate the column keys.
+    void ResetRowFactories(Napi::Env env);
+
+    // Builds one row by calling the shape's factory with the cells as
+    // arguments — one napi_call_function instead of one V8 store per
+    // column. `cells` must already hold `cols` converted values.
+    bool CallRowFactory(Napi::Env env, napi_value factory,
+        const std::vector<napi_value>& cells, int cols, napi_value* out);
+
+    // Above this column count the generated function is not worth it (and
+    // approaches V8's parameter limit): those shapes keep the store loop.
+    static const int kMaxFactoryColumns = 256;
+
+    // Compiled factories for this statement's current result shape,
+    // indexed by SyncRowMode. NULL until first used for that mode.
+    napi_ref row_factory_[2] = { NULL, NULL };
     // Converts an int64 cell/rowid according to the database's integer
     // mode. Throws a RangeError in 'number' mode for unsafe values;
     // callers must check env.IsExceptionPending() afterwards.
@@ -355,11 +439,13 @@ protected:
     // so sqlite can be driven from the main thread without racing the
     // worker pool or breaking FIFO ordering.
     bool IdleForInline();
+    // The synchronous methods' shared safety gate: not finalized, fully
+    // idle, no JavaScript collation or progress handler that would have to
+    // run on the thread blocked inside SQLite. Throws; false means the
+    // caller must return env.Null().
+    bool SyncGate(Napi::Env env);
     // Throws the pending status/message as a JS error with errno/code.
     void ThrowStatementError(Napi::Env env);
-    // Shared gate + argument extraction for the sync methods. Returns a
-    // prepared baton or NULL after throwing.
-    template <class T> T* BindSync(const Napi::CallbackInfo& info);
 
     void FailQueue(Napi::Value error, bool emit_if_unhandled = true);
 
@@ -390,6 +476,17 @@ protected:
     // they were built from so a schema change can invalidate them.
     std::vector<std::string> column_keys_source;
     std::vector<Napi::Reference<Napi::String>> column_keys;
+
+    // Shape tracking for the synchronous read paths' key cache: a sync
+    // call re-reads the live column names only when the statement's shape
+    // has moved (transparent re-prepare counter or column count changed).
+    // One sqlite3_stmt_status call per call replaces the fresh heap
+    // vector<string> of names the old per-call Columns captured.
+    void SyncColumnKeysLive(Napi::Env env);
+    Columns sync_columns;
+    bool sync_keys_valid = false;
+    int sync_keys_reprepares = -1;
+    int sync_keys_cols = -1;
 
     // Introspection snapshot. pending_meta is written by the preparing
     // thread; meta and meta_valid are touched only by the JS thread, and

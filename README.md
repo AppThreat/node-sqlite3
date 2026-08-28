@@ -182,26 +182,40 @@ const row = db.getSync("SELECT * FROM t WHERE rowid = ?", 42);   // row | undefi
 const info = db.runSync("INSERT INTO t (a) VALUES (?)", 42);     // { lastID, changes }
 const rows = db.allSync("SELECT * FROM t");
 const stmt = db.prepareSync("SELECT ? AS v");                    // statement-level variants
+// Bulk-reader row shape: one array per row, values in result-column order.
+const flat = db.allSync("SELECT * FROM t", { rowMode: "array" });
 ```
+
+`getSync`/`allSync` (not the async paths) accept a trailing
+`{ rowMode: 'array' }` option: rows come back as arrays instead of
+objects — duplicate column names keep every value instead of collapsing,
+and the per-cell property stores disappear entirely, making it the
+fastest row shape the sync paths can build. CSV export, ETL and bulk
+feeds are the intended users; the default object shape is unchanged.
+(A named bind parameter could never have the bare key `rowMode` — bind
+keys carry a sigil — so the option is unambiguous.)
 
 `getSync/runSync/allSync` execute on the calling thread. On the benchmark
 suite (`pnpm run bench`, [docs/performance.md](docs/performance.md)),
-cached single-row lookups are **7–8× faster** than the cached async
-`get`/`run` equivalents on arm64 macOS (7.3–8.4× for `getSync`, flat
-from batches of 1 to 10,000; `runSync` 6.8× at one operation rising to
+cached single-row lookups are **7–10× faster** than the cached async
+`get`/`run`
+equivalents on arm64 macOS (9.6–10.4× for `getSync`, flat
+from batches of 1 to 10,000; `runSync` 6.7× at one operation rising to
 ~8.7× at 10,000 as per-round overhead amortises) — and **22–31×** on
-Linux, where the async threadpool round trip costs more. The gap vanishes for
-large result sets on every platform measured: `allSync` over 20,000 rows
-is within the run's noise floor of async `all`, because one threadpool
-round trip is amortised across every row. They throw when the
+Linux, where the async threadpool round trip costs more. For large
+result sets sync and async are level (20,000 rows × 4 cols measured
+within the noise floor): the marshalling is the same work either way,
+and it dominates the threadpool round trip. They throw when the
 database is not fully idle: async work in flight or queued, or when called
 from inside an async completion callback (defer with `setImmediate` or use
 `db.wait`). They accept no callback argument. Like any synchronous database
 API, a busy database file can block the event loop for up to the configured
 `busyTimeout`.
 
-Without `cacheStatements()` these methods prepare and finalize a statement
-per call; enabling the cache is what makes them fast.
+These `Database`-level forms keep their own statement cache, so they do
+not prepare and finalize a statement per call; that is automatic and
+does not need `cacheStatements()`, which is opt-in and governs the
+asynchronous calls.
 
 ### Scheduling change
 

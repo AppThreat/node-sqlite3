@@ -116,6 +116,8 @@ export async function buildSuite(sqlite3, opts) {
     const ratioNames = {
         getSyncCase: 'sync-vs-async/getSync: batch of 1',
         allSyncCase: 'sync-vs-async/allSync: 20,000 rows × 4 cols',
+        allSyncArrayCase:
+            'sync-vs-async/allSync (arrays): 20,000 rows × 4 cols',
         insertCase: 'sync-vs-async/runSync: batch of 1',
         execCase: 'write/exec: 100-statement script',
     };

@@ -128,5 +128,42 @@ export function syncCases(dbSync, dbAsync) {
         },
     });
 
+    // The `{ rowMode: 'array' }` bulk-reader shape: no per-row property
+    // stores. Ratio'd against node:sqlite's returnArrays mirror (D16):
+    // with the property stores gone, what remains is the per-value
+    // Node-API transfer tax, which this case isolates from the row shape.
+    cases.push({
+        name: 'sync-vs-async/allSync (arrays): 20,000 rows × 4 cols',
+        group: 'sync-vs-async',
+        ops: 20000,
+        ratioTo:
+            'baseline/node:sqlite/all (returnArrays): 20,000 rows × 4 cols',
+        iter: (_env, n) => {
+            for (let i = 0; i < n; i++) {
+                const rows = dbSync.allSync('SELECT * FROM t', {
+                    rowMode: 'array',
+                });
+                if (rows.length !== 20000) throw new Error('bad row count');
+            }
+        },
+    });
+
+    // getSync on a prepared statement, no JS wrapper and no statement
+    // cache lookup: the statement-to-statement comparison with
+    // node:sqlite that localises the sync call's fixed cost (the JS
+    // wrapper adds the rest; see D16's decomposition).
+    cases.push({
+        name: 'sync-vs-async/getSync (native path): single row',
+        group: 'sync-vs-async',
+        ratioTo: 'baseline/node:sqlite/get: single row (prepared)',
+        iter: (_env, n) => {
+            const stmt = dbSync.prepareSync(GET_SQL);
+            for (let i = 0; i < n; i++) {
+                stmt.getSync((i % 20000) + 1);
+            }
+            stmt.finalize();
+        },
+    });
+
     return cases;
 }

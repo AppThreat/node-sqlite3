@@ -16,7 +16,7 @@ import { intRows } from './shared.js';
  *
  * @param {any} db the baseline connection (prepared-statement API: prepare/get/all/run/exec).
  * @param {string} prefix case-name prefix, e.g. 'baseline/node:sqlite'.
- * @param {{ getSyncCase: string, allSyncCase: string, insertCase: string, execCase: string }} ratios case names to ratio against.
+ * @param {{ getSyncCase: string, allSyncCase: string, allSyncArrayCase: string, insertCase: string, execCase: string }} ratios case names to ratio against.
  * @returns {CaseSpec[]} the mirror cases.
  */
 export function baselineCases(db, prefix, ratios) {
@@ -46,6 +46,28 @@ export function baselineCases(db, prefix, ratios) {
             ratioTo: ratios.allSyncCase,
             iter: (_env, n) => {
                 const stmt = db.prepare('SELECT * FROM t');
+                for (let i = 0; i < n; i++) {
+                    const rows = stmt.all();
+                    if (rows.length !== 20000) throw new Error('bad count');
+                }
+            },
+        },
+        {
+            // The baseline's own array row shape: node:sqlite's
+            // setReturnArrays(true), better-sqlite3's raw(true). This is
+            // the mirror the package's `{ rowMode: 'array' }` case is
+            // ratio'd against (D16).
+            name: `${prefix}/all (returnArrays): 20,000 rows × 4 cols`,
+            group: 'baseline',
+            ops: 20000,
+            ratioTo: ratios.allSyncArrayCase,
+            iter: (_env, n) => {
+                const stmt = db.prepare('SELECT * FROM t');
+                if (typeof stmt.setReturnArrays === 'function') {
+                    stmt.setReturnArrays(true);
+                } else if (typeof stmt.raw === 'function') {
+                    stmt.raw(true);
+                }
                 for (let i = 0; i < n; i++) {
                     const rows = stmt.all();
                     if (rows.length !== 20000) throw new Error('bad count');
@@ -92,7 +114,7 @@ export function baselineCases(db, prefix, ratios) {
  * Builds the node:sqlite mirror cases when the built-in module is
  * importable (Node >= 22.5; unflagged since 23.4).
  *
- * @param {{ getSyncCase: string, allSyncCase: string, insertCase: string, execCase: string }} ratios case names to ratio against.
+ * @param {{ getSyncCase: string, allSyncCase: string, allSyncArrayCase: string, insertCase: string, execCase: string }} ratios case names to ratio against.
  * @returns {Promise<{ cases: CaseSpec[], dispose: () => void } | { skipped: string }>} the mirror cases, or a skip reason.
  */
 export async function nodeSqliteCases(ratios) {
@@ -115,7 +137,7 @@ export async function nodeSqliteCases(ratios) {
  * Builds the better-sqlite3 mirror cases when the package is installed
  * and --compare was passed. Never a devDependency of this repo.
  *
- * @param {{ getSyncCase: string, allSyncCase: string, insertCase: string, execCase: string }} ratios case names to ratio against.
+ * @param {{ getSyncCase: string, allSyncCase: string, allSyncArrayCase: string, insertCase: string, execCase: string }} ratios case names to ratio against.
  * @returns {Promise<{ cases: CaseSpec[], dispose: () => void } | { skipped: string }>} the mirror cases, or a skip reason.
  */
 export async function betterSqliteCases(ratios) {

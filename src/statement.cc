@@ -12,6 +12,9 @@
 
 using namespace node_sqlite3;
 
+// Defined below Init(): cross-realm Date/RegExp instanceof for objects.
+bool OtherInstanceOf(Napi::Object source, const char* object_type);
+
 namespace {
 
 // "parameter 3" / "parameter $name" for bind error messages.
@@ -34,6 +37,49 @@ Napi::Value TakePendingError(Napi::Env env) {
         return Napi::Error::New(env, "integer value out of range").Value();
     }
     return Napi::Value(env, pending);
+}
+
+// Recognises the trailing `{ rowMode: 'array' }` options bag accepted by
+// the synchronous read paths (GetSync/AllSync). Only the exact key
+// `rowMode` is treated as an option, and the guard must mirror the bind
+// path's named-object guard (arrays and binary views bind positionally,
+// Date/RegExp are values): a plain object that owns `rowMode` could never
+// have been a legal bind argument — named bind keys carry a sigil
+// (`:name`/`@name`/`$name`) or are positional numbers — so recognising it
+// costs nothing for any call that was legal before this option existed.
+//
+// Returns true when the value is the options bag (the caller must then
+// exclude it from the bind arguments). Throws a TypeError for a rowMode
+// value that is not 'object' or 'array'. A property read can throw (a
+// Proxy trap); that surfaces as a pending exception and false.
+bool ParseSyncReadOptions(const Napi::Value& value, int* row_mode) {
+    if (!value.IsObject() || value.IsArray() || value.IsBuffer()
+            || value.IsTypedArray() || value.IsDataView()
+            || value.IsArrayBuffer() || value.IsDate()
+            || OtherInstanceOf(value.As<Napi::Object>(), "RegExp")) {
+        return false;
+    }
+    auto env = value.Env();
+    Napi::Value mode = value.As<Napi::Object>().Get("rowMode");
+    if (env.IsExceptionPending()) return false;
+    if (mode.IsUndefined()) return false;
+    if (!mode.IsString()) {
+        Napi::TypeError::New(env,
+            "rowMode must be 'object' or 'array'")
+            .ThrowAsJavaScriptException();
+        return true;
+    }
+    std::string requested = mode.As<Napi::String>().Utf8Value();
+    if (requested == "array") {
+        *row_mode = Statement::SYNC_ROW_ARRAY;
+    } else if (requested == "object") {
+        *row_mode = Statement::SYNC_ROW_OBJECT;
+    } else {
+        Napi::TypeError::New(env,
+            "rowMode must be 'object' or 'array'")
+            .ThrowAsJavaScriptException();
+    }
+    return true;
 }
 
 } // namespace
@@ -380,81 +426,97 @@ template <class T> T* Statement::Bind(const Napi::CallbackInfo& info, int start,
     baton->bind_supplied = (start < last);
 
     if (start < last) {
-        if (info[start].IsArray()) {
-            auto array = info[start].As<Napi::Array>();
-            int length = array.Length();
-            baton->parameters.reserve(length);
-            // Note: bind parameters start with 1.
-            for (int i = 0, pos = 1; i < length; i++, pos++) {
-                auto field = BindParameter((array).Get(i), i + 1);
-                if (field == nullptr) {
-                    // BindParameter threw a TypeError/RangeError.
-                    delete baton;
-                    return NULL;
-                }
-                baton->parameters.push_back(std::move(field));
-            }
-        }
-        // Cheap checks first; IsDate matches across realms, and the RegExp
-        // global lookup only runs once the value is known to be an object.
-        // Binary views (Buffer, typed arrays, DataViews, ArrayBuffers) go
-        // positional like the other non-map bind shapes.
-        else if (!info[start].IsObject() || info[start].IsBuffer()
-                || info[start].IsTypedArray() || info[start].IsDataView()
-                || info[start].IsArrayBuffer()
-                || info[start].IsDate()
-                || OtherInstanceOf(info[start].As<Object>(), "RegExp")) {
-            // Parameters directly in array.
-            // Note: bind parameters start with 1.
-            baton->parameters.reserve(last - start);
-            for (int i = start, pos = 1; i < last; i++, pos++) {
-                auto field = BindParameter(info[i], pos);
-                if (field == nullptr) {
-                    delete baton;
-                    return NULL;
-                }
-                baton->parameters.push_back(std::move(field));
-            }
-        }
-        else if (info[start].IsObject()) {
-            auto object = info[start].As<Napi::Object>();
-            auto array = object.GetPropertyNames();
-            if (env.IsExceptionPending()) {
-                delete baton;
-                return NULL;
-            }
-            int length = array.Length();
-            baton->parameters.reserve(length);
-            for (int i = 0; i < length; i++) {
-                Napi::Value name = (array).Get(i);
-                Napi::Number num = name.ToNumber();
-
-                if (num.Int32Value() == num.DoubleValue()) {
-                    auto field = BindParameter((object).Get(name), num.Int32Value());
-                    if (field == nullptr) {
-                        delete baton;
-                        return NULL;
-                    }
-                    baton->parameters.push_back(std::move(field));
-                }
-                else {
-                    std::string param_name = name.As<Napi::String>().Utf8Value();
-                    auto field = BindParameter((object).Get(name), param_name.c_str());
-                    if (field == nullptr) {
-                        delete baton;
-                        return NULL;
-                    }
-                    baton->parameters.push_back(std::move(field));
-                }
-            }
-        }
-        else {
+        if (!ParseBindArguments(info, start, last, &baton->parameters)) {
+            // BindParameter threw a TypeError/RangeError, or the shape was
+            // malformed.
             delete baton;
             return NULL;
         }
     }
 
     return baton;
+}
+
+// The bind-argument shapes shared by every entry point: one array, N
+// positional values, or one named-parameter object. Appends converted
+// fields to `parameters` in bind order. Returns false with a pending
+// TypeError/RangeError for an unsupported value or malformed shape —
+// nothing is ever silently skipped or coerced.
+//
+// A member (not a free function) so it shares Statement::BindParameter and
+// therefore the one JS->SQLite converter in src/convert.cc. The
+// synchronous fast paths call this directly: they have no Baton to fill —
+// a Baton exists for the async paths' queueing and cross-thread lifetimes,
+// none of which a synchronous call has.
+bool Statement::ParseBindArguments(const Napi::CallbackInfo& info, int start,
+        int last, Parameters* parameters) {
+    auto env = info.Env();
+
+    if (info[start].IsArray()) {
+        auto array = info[start].As<Napi::Array>();
+        int length = array.Length();
+        parameters->reserve(length);
+        // Note: bind parameters start with 1.
+        for (int i = 0, pos = 1; i < length; i++, pos++) {
+            auto field = BindParameter((array).Get(i), i + 1);
+            if (field == nullptr) {
+                return false;
+            }
+            parameters->push_back(std::move(field));
+        }
+    }
+    // Cheap checks first; IsDate matches across realms, and the RegExp
+    // global lookup only runs once the value is known to be an object.
+    // Binary views (Buffer, typed arrays, DataViews, ArrayBuffers) go
+    // positional like the other non-map bind shapes.
+    else if (!info[start].IsObject() || info[start].IsBuffer()
+            || info[start].IsTypedArray() || info[start].IsDataView()
+            || info[start].IsArrayBuffer()
+            || info[start].IsDate()
+            || OtherInstanceOf(info[start].As<Object>(), "RegExp")) {
+        // Parameters directly in array.
+        // Note: bind parameters start with 1.
+        parameters->reserve(last - start);
+        for (int i = start, pos = 1; i < last; i++, pos++) {
+            auto field = BindParameter(info[i], pos);
+            if (field == nullptr) {
+                return false;
+            }
+            parameters->push_back(std::move(field));
+        }
+    }
+    else if (info[start].IsObject()) {
+        auto object = info[start].As<Napi::Object>();
+        auto array = object.GetPropertyNames();
+        if (env.IsExceptionPending()) return false;
+        int length = array.Length();
+        parameters->reserve(length);
+        for (int i = 0; i < length; i++) {
+            Napi::Value name = (array).Get(i);
+            Napi::Number num = name.ToNumber();
+
+            if (num.Int32Value() == num.DoubleValue()) {
+                auto field = BindParameter((object).Get(name), num.Int32Value());
+                if (field == nullptr) {
+                    return false;
+                }
+                parameters->push_back(std::move(field));
+            }
+            else {
+                std::string param_name = name.As<Napi::String>().Utf8Value();
+                auto field = BindParameter((object).Get(name), param_name.c_str());
+                if (field == nullptr) {
+                    return false;
+                }
+                parameters->push_back(std::move(field));
+            }
+        }
+    }
+    else {
+        return false;
+    }
+
+    return true;
 }
 
 bool Statement::Bind(Parameters&& parameters, bool supplied) {
@@ -873,18 +935,9 @@ void Statement::Work_AfterAll(napi_env e, napi_status status, void* data) {
     if (IS_FUNCTION(cb)) {
         if (baton->rows.size()) {
             // Create the result array from the data we acquired.
-            stmt->SyncColumnKeys(env, baton->columns);
-            Napi::Array result(Napi::Array::New(env, baton->rows.size()));
-            bool failed = false;
-            for (size_t i = 0; i < baton->rows.size(); i++) {
-                (result).Set(i, stmt->RowToJS(env, &baton->rows[i]));
-                if (env.IsExceptionPending()) {
-                    // 'number' integer mode and an unsafe int64: deliver
-                    // the RangeError to the callback.
-                    failed = true;
-                    break;
-                }
-            }
+            Napi::Array result;
+            const bool failed = !stmt->CellRowsToJS(env, baton->rows,
+                baton->columns, &result);
 
             if (failed) {
                 Napi::Value argv[] = { TakePendingError(env) };
@@ -1027,9 +1080,19 @@ void Statement::AsyncEach(uv_async_t* handle) {
             argv[0] = env.Null();
 
             async->stmt->SyncColumnKeys(env, columns);
+            std::vector<napi_value> keys;
             for (auto& row : rows) {
-                argv[1] = async->stmt->RowToJS(env, &row);
-                if (env.IsExceptionPending()) {
+                // A scope per row, not per batch: each row is handed to the
+                // callback and then unreachable, so the handles must not
+                // accumulate for the length of the result set. The keys are
+                // resolved inside it for the same reason CellRowsToJS
+                // re-resolves per batch — handles die with their scope.
+                Napi::HandleScope row_scope(env);
+                async->stmt->ResolveColumnKeys(&keys);
+
+                napi_value converted = NULL;
+                if (!async->stmt->ConvertCellRow(env, &row, keys,
+                        &converted)) {
                     // 'number' integer mode and an unsafe int64: hand the
                     // RangeError to the item callback in place of the row.
                     argv[0] = TakePendingError(env);
@@ -1037,6 +1100,7 @@ void Statement::AsyncEach(uv_async_t* handle) {
                     argv[0] = env.Null();
                     continue;
                 }
+                argv[1] = Napi::Value(env, converted);
                 async->retrieved++;
                 TRY_CATCH_CALL(async->stmt->Value(), cb, 2, argv);
             }
@@ -1204,18 +1268,9 @@ void Statement::Work_AfterFetch(napi_env e, napi_status status, void* data) {
 
     if (IS_FUNCTION(cb)) {
         if (baton->rows.size()) {
-            stmt->SyncColumnKeys(env, baton->columns);
-            Napi::Array result(Napi::Array::New(env, baton->rows.size()));
-            bool failed = false;
-            for (size_t i = 0; i < baton->rows.size(); i++) {
-                (result).Set(i, stmt->RowToJS(env, &baton->rows[i]));
-                if (env.IsExceptionPending()) {
-                    // 'number' integer mode and an unsafe int64: deliver
-                    // the RangeError to the callback.
-                    failed = true;
-                    break;
-                }
-            }
+            Napi::Array result;
+            const bool failed = !stmt->CellRowsToJS(env, baton->rows,
+                baton->columns, &result);
 
             if (failed) {
                 Napi::Value argv[] = { TakePendingError(env) };
@@ -1265,19 +1320,17 @@ void Statement::ThrowStatementError(Napi::Env env) {
     exception.As<Napi::Error>().ThrowAsJavaScriptException();
 }
 
-template <class T> T* Statement::BindSync(const Napi::CallbackInfo& info) {
-    auto env = info.Env();
-
+bool Statement::SyncGate(Napi::Env env) {
     if (finalized) {
         Napi::Error::New(env, "Statement is already finalized")
             .ThrowAsJavaScriptException();
-        return NULL;
+        return false;
     }
     if (!IdleForInline()) {
         Napi::Error::New(env,
             "database is busy: sync methods require a fully idle database"
         ).ThrowAsJavaScriptException();
-        return NULL;
+        return false;
     }
     // A JavaScript collation cannot run on this thread: the comparison
     // would need the JS thread, which is the one about to block inside
@@ -1297,33 +1350,65 @@ template <class T> T* Statement::BindSync(const Napi::CallbackInfo& info) {
             "removeCollation()/db.progress() first, or use the "
             "asynchronous API"
         ).ThrowAsJavaScriptException();
-        return NULL;
+        return false;
+    }
+    return true;
+}
+
+void Statement::SyncColumnKeysLive(Napi::Env env) {
+    // The rooted keys describe a captured shape; they stay valid while the
+    // statement's own shape counters say the live statement still has that
+    // shape. sqlite3_stmt_status(SQLITE_STMTSTATUS_REPREPARE) is the same
+    // integer node:sqlite compares — a transparent re-prepare (schema
+    // change, including a column rename that changes the result labels)
+    // moves it and forces a re-read of the live names. The counter belongs
+    // to the sqlite3_stmt and a Statement prepares exactly once, so a
+    // fresh prepare can never resurrect a stale cache.
+    const int reprepares =
+        sqlite3_stmt_status(_handle, SQLITE_STMTSTATUS_REPREPARE, 0);
+    const int cols = sqlite3_column_count(_handle);
+    if (sync_keys_valid && reprepares == sync_keys_reprepares
+            && cols == sync_keys_cols) {
+        return;
     }
 
-    T* baton = Bind<T>(info);
-    if (baton == NULL) {
-        if (!env.IsExceptionPending()) {
-            Napi::TypeError::New(env, "Data type is not supported")
-                .ThrowAsJavaScriptException();
-        }
-        return NULL;
+    sync_columns.names.clear();
+    sync_columns.names.reserve(cols);
+    for (int i = 0; i < cols; i++) {
+        const char* name = sqlite3_column_name(_handle, i);
+        sync_columns.names.emplace_back(name != NULL ? name : "");
     }
-    if (IS_FUNCTION(baton->callback.Value())) {
-        delete baton;
-        Napi::TypeError::New(env, "Sync methods do not take a callback")
-            .ThrowAsJavaScriptException();
-        return NULL;
-    }
-    return baton;
+    SyncColumnKeys(env, sync_columns);
+    sync_keys_valid = true;
+    sync_keys_reprepares = reprepares;
+    sync_keys_cols = cols;
 }
 
 Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
 
-    RowBaton* baton = BindSync<RowBaton>(info);
-    if (baton == NULL) return env.Null();
-    std::unique_ptr<RowBaton> holder(baton);
+    int row_mode = SYNC_ROW_OBJECT;
+    int end = info.Length();
+    if (end > 0 && ParseSyncReadOptions(info[end - 1], &row_mode)) end--;
+    if (env.IsExceptionPending()) return env.Null();
+    if (!SyncGate(env)) return env.Null();
+    if (end > 0 && info[end - 1].IsFunction()) {
+        Napi::TypeError::New(env, "Sync methods do not take a callback")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    Parameters parameters;
+    const bool bind_supplied = (end > 0);
+    if (end > 0
+            && !ParseBindArguments(info, 0, end, &parameters)) {
+        if (!env.IsExceptionPending()) {
+            Napi::TypeError::New(env, "Data type is not supported")
+                .ThrowAsJavaScriptException();
+        }
+        return env.Null();
+    }
 
     // While this thread is inside sqlite, a user-defined function invoked
     // by the statement must refuse to make its round trip (it would wait
@@ -1332,9 +1417,8 @@ Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
 
     // Mirrors Work_Get: step unless the cursor is already exhausted and
     // no new parameters were supplied.
-    if (stmt->status != SQLITE_DONE || holder->parameters.size()
-            || holder->bind_supplied) {
-        if (!stmt->Bind(std::move(holder->parameters), holder->bind_supplied)) {
+    if (stmt->status != SQLITE_DONE || parameters.size() || bind_supplied) {
+        if (!stmt->Bind(std::move(parameters), bind_supplied)) {
             stmt->ThrowStatementError(env);
             return env.Null();
         }
@@ -1347,13 +1431,21 @@ Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
     }
 
     if (stmt->status == SQLITE_ROW) {
-        Row row;
-        Columns columns;
-        GetRow(&row, stmt->_handle, &columns);
-        stmt->SyncColumnKeys(env, columns);
+        // Straight from the live statement: no Row, no per-cell string
+        // copy. The async path still materialises a Row because it reads
+        // on a worker thread; here the row is converted on the thread that
+        // stepped it, so the intermediate was pure cost.
+        stmt->SyncColumnKeysLive(env);
+        if (row_mode == SYNC_ROW_ARRAY) {
+            // The array shape carries no keys; only the names (for the
+            // integer-mode RangeError) and their cache stay valid.
+            return stmt->CurrentRowToJS(env, {}, row_mode);
+        }
+        std::vector<napi_value> keys;
+        stmt->ResolveColumnKeys(&keys);
         // A RangeError from the integer mode propagates to the caller
         // with the pending exception.
-        return stmt->RowToJS(env, &row);
+        return stmt->CurrentRowToJS(env, keys, row_mode);
     }
     return env.Undefined();
 }
@@ -1362,19 +1454,34 @@ Napi::Value Statement::RunSync(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
 
-    RunBaton* baton = BindSync<RunBaton>(info);
-    if (baton == NULL) return env.Null();
-    std::unique_ptr<RunBaton> holder(baton);
+    int end = info.Length();
+    if (!SyncGate(env)) return env.Null();
+    if (end > 0 && info[end - 1].IsFunction()) {
+        Napi::TypeError::New(env, "Sync methods do not take a callback")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    Parameters parameters;
+    const bool bind_supplied = (end > 0);
+    if (end > 0
+            && !ParseBindArguments(info, 0, end, &parameters)) {
+        if (!env.IsExceptionPending()) {
+            Napi::TypeError::New(env, "Data type is not supported")
+                .ThrowAsJavaScriptException();
+        }
+        return env.Null();
+    }
 
     Database::SyncSqliteGuard sync_guard(stmt->db);
 
     // Mirrors Work_Run, including the explicit reset for parameterless
     // re-execution.
-    if (!holder->parameters.size() && !holder->bind_supplied) {
+    if (parameters.empty() && !bind_supplied) {
         sqlite3_reset(stmt->_handle);
     }
 
-    if (!stmt->Bind(std::move(holder->parameters), holder->bind_supplied)) {
+    if (!stmt->Bind(std::move(parameters), bind_supplied)) {
         stmt->ThrowStatementError(env);
         return env.Null();
     }
@@ -1398,26 +1505,101 @@ Napi::Value Statement::AllSync(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
 
-    RowsBaton* baton = BindSync<RowsBaton>(info);
-    if (baton == NULL) return env.Null();
-    std::unique_ptr<RowsBaton> holder(baton);
+    int row_mode = SYNC_ROW_OBJECT;
+    int end = info.Length();
+    if (end > 0 && ParseSyncReadOptions(info[end - 1], &row_mode)) end--;
+    if (env.IsExceptionPending()) return env.Null();
+    if (!SyncGate(env)) return env.Null();
+    if (end > 0 && info[end - 1].IsFunction()) {
+        Napi::TypeError::New(env, "Sync methods do not take a callback")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    Parameters parameters;
+    const bool bind_supplied = (end > 0);
+    if (end > 0
+            && !ParseBindArguments(info, 0, end, &parameters)) {
+        if (!env.IsExceptionPending()) {
+            Napi::TypeError::New(env, "Data type is not supported")
+                .ThrowAsJavaScriptException();
+        }
+        return env.Null();
+    }
 
     Database::SyncSqliteGuard sync_guard(stmt->db);
 
-    if (!holder->parameters.size() && !holder->bind_supplied) {
+    if (parameters.empty() && !bind_supplied) {
         sqlite3_reset(stmt->_handle);
     }
 
-    if (!stmt->Bind(std::move(holder->parameters), holder->bind_supplied)) {
+    if (!stmt->Bind(std::move(parameters), bind_supplied)) {
         stmt->ThrowStatementError(env);
         return env.Null();
     }
 
-    Rows rows;
-    Columns columns;
-    while ((stmt->status = sqlite3_step(stmt->_handle)) == SQLITE_ROW) {
-        rows.emplace_back();
-        GetRow(&rows.back(), stmt->_handle, &columns);
+    // One pass: step and convert together, instead of materialising the
+    // whole result set as Rows and walking it again. The old shape copied
+    // every text and blob twice and allocated a Row plus a Cell per column
+    // per row, none of which the caller ever saw.
+    //
+    // Rows are converted straight into `result` under batched handle
+    // scopes — one HandleScope per kRowsPerScope rows instead of an
+    // escapable scope per row. A stored value is rooted by the result
+    // array itself, so closing a batch's scope cannot collect anything the
+    // caller still needs; the batch only bounds how many dead handles a
+    // large read holds at once.
+    static constexpr int kRowsPerScope = 256;
+
+    Napi::Array result(Napi::Array::New(env));
+    std::vector<napi_value> keys;
+    bool keys_ready = false;
+    bool failed = false;
+    uint32_t count = 0;
+    int cols = 0;
+
+    bool exhausted = false;
+    while (!exhausted) {
+        Napi::HandleScope batch(env);
+        // Handles live only in the scope that created them: the resolved
+        // key strings must be re-resolved once per batch, not once per
+        // call — napi_get_reference_value per 256 rows is noise. The very
+        // first batch resolves them on its first row instead, after the
+        // keys have been built for this execution's shape.
+        if (keys_ready && row_mode == SYNC_ROW_OBJECT) {
+            stmt->ResolveColumnKeys(&keys);
+        }
+        for (int i = 0; i < kRowsPerScope; i++) {
+            stmt->status = sqlite3_step(stmt->_handle);
+            if (stmt->status != SQLITE_ROW) {
+                exhausted = true;
+                break;
+            }
+            if (!keys_ready) {
+                // The result shape cannot change between the rows of one
+                // execution, so the names and their keys are settled on
+                // the first row and reused for every row after it.
+                stmt->SyncColumnKeysLive(env);
+                cols = static_cast<int>(sync_columns.names.size());
+                keys_ready = true;
+                if (row_mode == SYNC_ROW_OBJECT) {
+                    stmt->ResolveColumnKeys(&keys);
+                }
+            }
+            napi_value row = NULL;
+            // A RangeError from the integer mode leaves a pending exception
+            // and reports false; the offending value may be in any row, not
+            // only the first.
+            if (!stmt->ConvertCurrentRow(env, keys, row_mode, cols, &row)) {
+                failed = true;
+                exhausted = true;
+                break;
+            }
+            napi_set_element(env, result, count++, row);
+        }
+    }
+    if (failed) {
+        return env.Null();
     }
     if (stmt->status != SQLITE_DONE) {
         stmt->message = std::string(sqlite3_errmsg(stmt->db->_handle));
@@ -1425,16 +1607,6 @@ Napi::Value Statement::AllSync(const Napi::CallbackInfo& info) {
         return env.Null();
     }
 
-    stmt->SyncColumnKeys(env, columns);
-    Napi::Array result(Napi::Array::New(env, rows.size()));
-    for (size_t i = 0; i < rows.size(); i++) {
-        // A RangeError from the integer mode propagates to the caller
-        // with the pending exception.
-        (result).Set(i, stmt->RowToJS(env, &rows[i]));
-        if (env.IsExceptionPending()) {
-            return env.Null();
-        }
-    }
     return result;
 }
 
@@ -1445,6 +1617,10 @@ void Statement::SyncColumnKeys(Napi::Env env, const Columns& columns) {
     if (column_keys_source == columns.names) {
         return;
     }
+    // The compiled row factories bake in the old names and arity, so they
+    // die with the keys. This is the only place the shape changes, so it is
+    // the only place they can go stale.
+    ResetRowFactories(env);
     column_keys.clear();
     column_keys.reserve(columns.names.size());
     for (const auto& name : columns.names) {
@@ -1641,32 +1817,286 @@ Napi::Value Statement::Status(const Napi::CallbackInfo& info) {
     return Napi::Number::New(env, value);
 }
 
-Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {
-    Napi::EscapableHandleScope scope(env);
+bool Statement::ConvertCellRow(Napi::Env env, Row* row,
+        const std::vector<napi_value>& keys, napi_value* out) {
+    const int mode = db->integer_mode;
+    const size_t key_count = keys.size();
 
-    auto result = Napi::Object::New(env);
+    // Same one-call-per-row build as the synchronous path; see
+    // ConvertCurrentRow for why the store loop below is the slow shape.
+    napi_value factory = RowFactoryForShape(env, SYNC_ROW_OBJECT);
+    if (factory != NULL && row->size() == column_keys_source.size()) {
+        const int cols = static_cast<int>(row->size());
+        std::vector<napi_value> cells(row->size());
+        for (int i = 0; i < cols; i++) {
+            bool raised = false;
+            cells[i] = CellToJS(env, (*row)[i], mode,
+                ValueOrigin(&column_keys_source, static_cast<size_t>(i)),
+                true, &raised);
+            if (raised) return false;
+        }
+        return CallRowFactory(env, factory, cells, cols, out);
+    }
+
+    napi_value result;
+    napi_create_object(env, &result);
 
     size_t i = 0;
     for (auto& cell : *row) {
-        const std::string what = (i < column_keys_source.size())
-            ? "column '" + column_keys_source[i] + "'"
-            : std::string("result column ") + std::to_string(i);
-        Napi::Value value = CellToJS(env, cell, db->integer_mode, what, true);
-        if (env.IsExceptionPending()) {
-            return scope.Escape(env.Null());
-        }
+        // The column description is passed by reference to the cached
+        // names, not built here: it is only formatted if the conversion
+        // raises the 'number'-mode RangeError. Building it eagerly was a
+        // heap allocation per cell on every successful read.
+        bool raised = false;
+        Napi::Value value = CellToJS(env, cell, mode,
+            ValueOrigin(&column_keys_source, i), true, &raised);
+        if (raised) return false;
 
         // The keys always cover the row: both are derived from the same
         // sqlite3_column_count, and a mid-stream re-prepare refreshes them
         // together. The bound is kept so a shape change that slipped through
         // can never index out of range.
-        if (i < column_keys.size()) {
-            result.Set(column_keys[i].Value(), value);
+        if (i < key_count) {
+            // Raw napi on already-resolved handles: the key references are
+            // dereferenced once per batch by the caller, not once per cell.
+            napi_set_property(env, result, keys[i], value);
         }
         i++;
     }
 
-    return scope.Escape(result);
+    *out = result;
+    return true;
+}
+
+Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {
+    Napi::EscapableHandleScope scope(env);
+
+    std::vector<napi_value> keys;
+    ResolveColumnKeys(&keys);
+
+    napi_value result = NULL;
+    if (!ConvertCellRow(env, row, keys, &result)) {
+        return scope.Escape(env.Null());
+    }
+    return scope.Escape(Napi::Value(env, result));
+}
+
+bool Statement::CellRowsToJS(Napi::Env env, Rows& rows,
+        const Columns& columns, Napi::Array* out) {
+    SyncColumnKeys(env, columns);
+
+    Napi::Array result(Napi::Array::New(env, rows.size()));
+    *out = result;
+
+    // One scope per batch rather than one per row. The handles a scope
+    // creates die with it, so the resolved keys are re-resolved inside each
+    // batch; the converted rows are safe because they are stored into
+    // `result` — a rooted array in the caller's scope — before the batch
+    // scope closes.
+    const size_t kBatch = 256;
+    std::vector<napi_value> keys;
+
+    for (size_t start = 0; start < rows.size(); start += kBatch) {
+        Napi::HandleScope batch(env);
+        ResolveColumnKeys(&keys);
+
+        const size_t end = std::min(start + kBatch, rows.size());
+        for (size_t i = start; i < end; i++) {
+            napi_value row = NULL;
+            if (!ConvertCellRow(env, &rows[i], keys, &row)) {
+                // 'number' integer mode and an unsafe int64: the RangeError
+                // is pending for the caller to deliver.
+                return false;
+            }
+            napi_set_element(env, result, static_cast<uint32_t>(i), row);
+        }
+    }
+
+    return true;
+}
+
+void Statement::ResetRowFactories(Napi::Env env) {
+    for (int i = 0; i < 2; i++) {
+        if (row_factory_[i] != NULL) {
+            napi_delete_reference(env, row_factory_[i]);
+            row_factory_[i] = NULL;
+        }
+    }
+}
+
+napi_value Statement::RowFactoryForShape(Napi::Env env, int row_mode) {
+    const int slot = (row_mode == SYNC_ROW_ARRAY) ? 1 : 0;
+
+    if (row_factory_[slot] != NULL) {
+        napi_value cached = NULL;
+        if (napi_get_reference_value(env, row_factory_[slot], &cached)
+                == napi_ok && cached != NULL) {
+            return cached;
+        }
+    }
+
+    auto* addon = env.GetInstanceData<Database::AddonData>();
+    if (addon == NULL || addon->row_factory_generator == NULL
+            || addon->row_factory_unavailable) {
+        return NULL;
+    }
+
+    // Compiling means calling JS, which is refused while an exception is
+    // pending. Bail out without diagnosing anything: the caller's store
+    // loop stays correct, and a pending exception here says nothing about
+    // whether this realm can generate code.
+    if (env.IsExceptionPending()) return NULL;
+
+    const size_t cols = column_keys_source.size();
+    if (cols == 0 || cols > static_cast<size_t>(kMaxFactoryColumns)) {
+        return NULL;
+    }
+
+    napi_value generator = NULL;
+    if (napi_get_reference_value(env, addon->row_factory_generator, &generator)
+            != napi_ok || generator == NULL) {
+        return NULL;
+    }
+
+    // The names go over as a JS array so the generated source is escaped by
+    // JSON.stringify rather than by an escaper of our own.
+    napi_value names = NULL;
+    napi_create_array_with_length(env, cols, &names);
+    for (size_t i = 0; i < cols; i++) {
+        napi_value name = NULL;
+        if (napi_create_string_utf8(env, column_keys_source[i].data(),
+                column_keys_source[i].size(), &name) != napi_ok) {
+            return NULL;
+        }
+        napi_set_element(env, names, static_cast<uint32_t>(i), name);
+    }
+
+    napi_value want_array = NULL;
+    napi_get_boolean(env, row_mode == SYNC_ROW_ARRAY, &want_array);
+    napi_value argv[] = { names, want_array };
+    napi_value undef = NULL;
+    napi_get_undefined(env, &undef);
+
+    napi_value factory = NULL;
+    const napi_status st = napi_call_function(env, undef, generator, 2, argv,
+        &factory);
+    if (st != napi_ok || factory == NULL) {
+        // A realm that forbids code generation from strings (a CSP'd
+        // renderer, --disallow-code-generation-from-strings) throws here.
+        // That is a permanent property of the environment, so remember it
+        // and never pay for the attempt again; the store loop stays
+        // correct, only slower.
+        if (env.IsExceptionPending()) {
+            napi_value ignored = NULL;
+            napi_get_and_clear_last_exception(env, &ignored);
+        }
+        addon->row_factory_unavailable = true;
+        return NULL;
+    }
+
+    napi_valuetype type = napi_undefined;
+    napi_typeof(env, factory, &type);
+    if (type != napi_function) return NULL;
+
+    napi_create_reference(env, factory, 1, &row_factory_[slot]);
+    return factory;
+}
+
+bool Statement::CallRowFactory(Napi::Env env, napi_value factory,
+        const std::vector<napi_value>& cells, int cols, napi_value* out) {
+    napi_value undef = NULL;
+    napi_get_undefined(env, &undef);
+    return napi_call_function(env, undef, factory,
+        static_cast<size_t>(cols), cells.data(), out) == napi_ok;
+}
+
+void Statement::ResolveColumnKeys(std::vector<napi_value>* out) {
+    out->clear();
+    out->reserve(column_keys.size());
+    for (auto& key : column_keys) {
+        out->push_back(key.Value());
+    }
+}
+
+bool Statement::ConvertCurrentRow(Napi::Env env,
+        const std::vector<napi_value>& keys, int row_mode, int cols,
+        napi_value* out) {
+    const int mode = db->integer_mode;
+    const size_t key_count = keys.size();
+
+    // The fast shape: convert the cells into a plain argument vector and
+    // let a generated monomorphic function build the row in one call.
+    // Profiling showed the per-column store loops below spend two thirds of
+    // a read inside V8's generic property/element paths — a LookupIterator
+    // and a map or elements-kind transition per column, which for objects
+    // also reallocates the backing property array as it grows. One call
+    // hands V8 the whole row at once, so it allocates the final shape
+    // directly. See docs/performance.md.
+    napi_value factory = RowFactoryForShape(env, row_mode);
+    if (factory != NULL) {
+        std::vector<napi_value> cells(static_cast<size_t>(cols));
+        for (int i = 0; i < cols; i++) {
+            bool raised = false;
+            cells[i] = ColumnToJS(env, _handle, i, mode,
+                ValueOrigin(&column_keys_source, static_cast<size_t>(i)),
+                &raised);
+            if (raised) return false;
+        }
+        return CallRowFactory(env, factory, cells, cols, out);
+    }
+
+    if (row_mode == SYNC_ROW_ARRAY) {
+        // The bulk-reader shape: one pre-sized array per row, values in
+        // result-column order. No property stores and no shape to
+        // transition — duplicate column names keep every value instead of
+        // collapsing, which is the point of the shape.
+        napi_value row;
+        napi_create_array_with_length(env,
+            static_cast<size_t>(cols), &row);
+        for (int i = 0; i < cols; i++) {
+            bool raised = false;
+            Napi::Value value = ColumnToJS(env, _handle, i, mode,
+                ValueOrigin(&column_keys_source, static_cast<size_t>(i)),
+                &raised);
+            if (raised) return false;
+            napi_set_element(env, row, static_cast<uint32_t>(i), value);
+        }
+        *out = row;
+        return true;
+    }
+
+    napi_value result;
+    napi_create_object(env, &result);
+
+    for (int i = 0; i < cols; i++) {
+        bool raised = false;
+        Napi::Value value = ColumnToJS(env, _handle, i, mode,
+            ValueOrigin(&column_keys_source, static_cast<size_t>(i)),
+            &raised);
+        if (raised) return false;
+        // Same bound as RowToJS: keys and columns both derive from
+        // sqlite3_column_count, so this cannot be exceeded in practice.
+        if (static_cast<size_t>(i) < key_count) {
+            // Raw napi on already-resolved handles: the key references are
+            // dereferenced once per call by the caller, not once per cell.
+            napi_set_property(env, result, keys[i], value);
+        }
+    }
+
+    *out = result;
+    return true;
+}
+
+Napi::Value Statement::CurrentRowToJS(Napi::Env env,
+        const std::vector<napi_value>& keys, int row_mode) {
+    Napi::EscapableHandleScope scope(env);
+
+    napi_value row = NULL;
+    if (!ConvertCurrentRow(env, keys, row_mode,
+            sqlite3_column_count(_handle), &row)) {
+        return scope.Escape(env.Null());
+    }
+    return scope.Escape(Napi::Value(env, row));
 }
 
 void Statement::GetRow(Row* row, sqlite3_stmt* stmt, Columns* columns) {
@@ -1752,6 +2182,10 @@ Napi::Value Statement::Finalize_(const Napi::CallbackInfo& info) {
 // db is NULL only when the constructor threw before validation finished;
 // then there is no handle, no Ref and nothing to release.
 Statement::~Statement() {
+    // The compiled row factories are strong references; drop them before
+    // the env goes away. Safe on a torn-down env: napi_delete_reference
+    // does not run JS.
+    ResetRowFactories(Env());
     if (!finalized) {
         finalized = true;
         CleanQueue();

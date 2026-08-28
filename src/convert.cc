@@ -267,8 +267,17 @@ void ValueToCell(Cell* cell, sqlite3_value* value) {
     }
 }
 
+std::string ValueOrigin::Describe() const {
+    if (literal != nullptr) return *literal;
+    if (literal_cstr != nullptr) return std::string(literal_cstr);
+    if (column_names != nullptr && index < column_names->size()) {
+        return "column '" + (*column_names)[index] + "'";
+    }
+    return "result column " + std::to_string(index);
+}
+
 Napi::Value ConvertInt64ToJS(Napi::Env env, sqlite3_int64 value,
-        int integer_mode, const std::string& what) {
+        int integer_mode, const ValueOrigin& origin) {
     // A single range compare on the int64 — deliberately not a call into
     // JS: this runs per integer cell.
     const bool safe = value >= -(1LL << 53) + 1 && value < (1LL << 53);
@@ -286,7 +295,8 @@ Napi::Value ConvertInt64ToJS(Napi::Env env, sqlite3_int64 value,
             // against. The callback-free sync paths surface this directly;
             // async completions deliver it to the user callback.
             Napi::RangeError::New(env,
-                "Integer " + std::to_string(value) + " in " + what +
+                "Integer " + std::to_string(value) + " in " +
+                    origin.Describe() +
                 " is outside the safe integer range (-(2^53-1) .. 2^53-1); "
                 "configure('integerMode', 'bigint' | 'mixed') to read it "
                 "exactly"
@@ -295,11 +305,62 @@ Napi::Value ConvertInt64ToJS(Napi::Env env, sqlite3_int64 value,
     }
 }
 
+Napi::Value ColumnToJS(Napi::Env env, sqlite3_stmt* stmt, int column,
+        int integer_mode, const ValueOrigin& origin, bool* raised) {
+    switch (sqlite3_column_type(stmt, column)) {
+        case SQLITE_INTEGER: {
+            // The one branch that can raise (the 'number'-mode RangeError
+            // for an unsafe int64): report it through `raised` so the row
+            // loop stays free of napi_is_exception_pending calls.
+            const sqlite3_int64 value = sqlite3_column_int64(stmt, column);
+            const bool safe = value >= -(1LL << 53) + 1 && value < (1LL << 53);
+            if (integer_mode == Database::INTEGER_NUMBER && !safe) {
+                if (raised != NULL) *raised = true;
+            }
+            return ConvertInt64ToJS(env, value, integer_mode, origin);
+        }
+        case SQLITE_FLOAT: {
+            return Napi::Number::New(env,
+                sqlite3_column_double(stmt, column));
+        }
+        case SQLITE_TEXT: {
+            const char* text = reinterpret_cast<const char*>(
+                sqlite3_column_text(stmt, column));
+            const int length = sqlite3_column_bytes(stmt, column);
+            if (text == NULL || length <= 0) {
+                return Napi::String::New(env, "", 0);
+            }
+            return Napi::String::New(env, text, static_cast<size_t>(length));
+        }
+        case SQLITE_BLOB: {
+            const char* blob = reinterpret_cast<const char*>(
+                sqlite3_column_blob(stmt, column));
+            const int length = sqlite3_column_bytes(stmt, column);
+            if (blob == NULL || length <= 0) {
+                return Napi::Buffer<char>::Copy(env, "", 0);
+            }
+            return Napi::Buffer<char>::Copy(env, blob,
+                static_cast<size_t>(length));
+        }
+        default: {
+            // SQLITE_NULL, and anything unexpected, as the Cell path does.
+            return env.Null();
+        }
+    }
+}
+
 Napi::Value CellToJS(Napi::Env env, Cell& cell, int integer_mode,
-        const std::string& what, bool move_payload) {
+        const ValueOrigin& origin, bool move_payload, bool* raised) {
     switch (cell.type) {
         case SQLITE_INTEGER: {
-            return ConvertInt64ToJS(env, cell.integer, integer_mode, what);
+            // The one branch that can raise; see ColumnToJS for why the
+            // failure travels in a bool rather than through the env.
+            const bool safe = cell.integer >= -(1LL << 53) + 1
+                && cell.integer < (1LL << 53);
+            if (integer_mode == Database::INTEGER_NUMBER && !safe) {
+                if (raised != NULL) *raised = true;
+            }
+            return ConvertInt64ToJS(env, cell.integer, integer_mode, origin);
         }
         case SQLITE_FLOAT: {
             return Napi::Number::New(env, cell.real);

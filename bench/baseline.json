@@ -3,7 +3,7 @@
   "note": "Per-environment medians captured deliberately via `pnpm run bench:update`. Compare only within one platform-arch signature; ratios travel across platforms, absolute milliseconds do not. See docs/performance.md.",
   "environments": {
     "darwin-arm64": {
-      "capturedAt": "2026-08-28T09:43:49.129Z",
+      "capturedAt": "2026-08-28T13:47:32.911Z",
       "environment": {
         "node": "v26.7.0",
         "platform": "darwin",
@@ -13,7 +13,7 @@
         "container": "none",
         "sqliteVersion": "3.53.4",
         "packageVersion": "9.0.0",
-        "gitSha": "04c255d+dirty",
+        "gitSha": "c15f9db+dirty",
         "exposeGc": true
       },
       "config": {
@@ -24,431 +24,451 @@
         "rmeThresholdPct": 5,
         "allocSamples": 16
       },
-      "noiseFloorPct": 1.1,
+      "noiseFloorPct": 21.31,
       "cases": {
-        "calibration/cached get (A)": {
-          "medianPerOpMs": 0.010045530225409785,
-          "rme": 0.006811195823317494,
-          "n": 32
-        },
         "calibration/cached get (B)": {
-          "medianPerOpMs": 0.009935608974358915,
-          "rme": 0.010484717298239911,
+          "medianPerOpMs": 0.00958551321467099,
+          "rme": 0.014081790541349245,
           "n": 32
         },
         "read/all: 1,000 rows × 1 cols": {
-          "medianPerOpMs": 0.00028176677777778047,
-          "rme": 0.002658695075233864,
+          "medianPerOpMs": 0.00020636297422680803,
+          "rme": 0.006044299333740295,
           "n": 32
         },
         "read/all: 1,000 rows × 4 cols": {
-          "medianPerOpMs": 0.000976836309523822,
-          "rme": 0.027347295539211867,
+          "medianPerOpMs": 0.0006156354062500072,
+          "rme": 0.0056455390880785165,
           "n": 32
         },
         "read/all: 1,000 rows × 16 cols": {
-          "medianPerOpMs": 0.0024604271250000236,
-          "rme": 0.00950250406217245,
+          "medianPerOpMs": 0.0008081770625000028,
+          "rme": 0.004567571168847488,
           "n": 32
         },
         "read/all: 20,000 rows × 1 cols": {
-          "medianPerOpMs": 0.00025745286250000276,
-          "rme": 0.0031791742070999044,
+          "medianPerOpMs": 0.00018146128333332854,
+          "rme": 0.004243616429854491,
           "n": 32
         },
         "read/all: 20,000 rows × 4 cols": {
-          "medianPerOpMs": 0.0009429885499999727,
-          "rme": 0.013581050374403637,
+          "medianPerOpMs": 0.0005631411499999786,
+          "rme": 0.00961126708643381,
           "n": 32
         },
         "read/all: 20,000 rows × 16 cols": {
-          "medianPerOpMs": 0.00242745622500006,
-          "rme": 0.009966698781573803,
+          "medianPerOpMs": 0.0007762322999999469,
+          "rme": 0.009235991596876715,
           "n": 32
         },
         "read/all: 200,000 rows × 1 cols": {
-          "medianPerOpMs": 0.00026729104250000093,
-          "rme": 0.025400290022818652,
+          "medianPerOpMs": 0.00017552218750000066,
+          "rme": 0.004961381306849221,
           "n": 32
         },
         "read/all: 200,000 rows × 4 cols": {
-          "medianPerOpMs": 0.0009880636475000028,
-          "rme": 0.004710599880661274,
+          "medianPerOpMs": 0.0006039651049999976,
+          "rme": 0.007002854908305568,
           "n": 32
         },
-        "read/all: 20,000 rows × 8 cols wide text": {
-          "medianPerOpMs": 0.0016940426999997728,
-          "rme": 0.04422359011385568,
-          "n": 48
+        "read/all: 200,000 rows × 16 cols": {
+          "medianPerOpMs": 0.0008313492725000105,
+          "rme": 0.01511166595746527,
+          "n": 32
         },
         "read/all: 20,000 rows × 8 cols mostly NULL": {
-          "medianPerOpMs": 0.0010530812750001134,
-          "rme": 0.006234193557370376,
+          "medianPerOpMs": 0.00031007534999998824,
+          "rme": 0.003641561102271489,
           "n": 32
         },
         "read/get: single row (prepared statement)": {
-          "medianPerOpMs": 0.008725886437530006,
-          "rme": 0.015467933965553711,
+          "medianPerOpMs": 0.008778186199095019,
+          "rme": 0.008221295509792921,
           "n": 32
         },
         "read/each: 20,000 rows × 4 cols": {
-          "medianPerOpMs": 0.0007852947749999658,
-          "rme": 0.013356194812428685,
+          "medianPerOpMs": 0.00048183385000002087,
+          "rme": 0.021773376860202188,
           "n": 32
         },
         "read/iterate: 20,000 rows × 4 cols (for await)": {
-          "medianPerOpMs": 0.000993237500000032,
-          "rme": 0.0037215293421532496,
+          "medianPerOpMs": 0.0006531130124999437,
+          "rme": 0.003930806835278726,
           "n": 32
         },
         "read/map: 20,000 rows × 4 cols": {
-          "medianPerOpMs": 0.0002828216187500402,
-          "rme": 0.00683024330782903,
+          "medianPerOpMs": 0.0001937029149999944,
+          "rme": 0.006745716759146442,
           "n": 32
         },
         "marshalling/integer ×20,000 (mode 'number')": {
-          "medianPerOpMs": 0.0002519950562500071,
-          "rme": 0.007802323205288058,
+          "medianPerOpMs": 0.0001573447916666434,
+          "rme": 0.0053365154815062255,
           "n": 32
         },
         "marshalling/integer ×20,000 (mode 'mixed')": {
-          "medianPerOpMs": 0.00025300599375000275,
-          "rme": 0.009028936295521157,
+          "medianPerOpMs": 0.00015888889166665952,
+          "rme": 0.0091111099805847,
           "n": 32
         },
         "marshalling/integer ×20,000 (mode 'bigint')": {
-          "medianPerOpMs": 0.00026103411250001044,
-          "rme": 0.005661423011411446,
+          "medianPerOpMs": 0.00016081058749999405,
+          "rme": 0.012446151387036785,
           "n": 32
         },
         "marshalling/float ×20,000": {
-          "medianPerOpMs": 0.000255803643750005,
-          "rme": 0.015659374281300587,
+          "medianPerOpMs": 0.0001597449625000081,
+          "rme": 0.006878346789956931,
           "n": 32
         },
         "marshalling/short text ×20,000": {
-          "medianPerOpMs": 0.0002798802062499817,
-          "rme": 0.004807670728247088,
+          "medianPerOpMs": 0.00018643520499997976,
+          "rme": 0.006131486807970686,
           "n": 32
         },
         "marshalling/long text 4 KiB ×20,000": {
-          "medianPerOpMs": 0.0013297583249997844,
-          "rme": 0.026509384703489756,
+          "medianPerOpMs": 0.001022622924999996,
+          "rme": 0.046357507582896335,
           "n": 32
         },
         "marshalling/unicode text ×20,000": {
-          "medianPerOpMs": 0.00039928541249992125,
-          "rme": 0.0030738507132346514,
+          "medianPerOpMs": 0.0002811106749999908,
+          "rme": 0.007409248154583344,
           "n": 32
         },
         "marshalling/NULL ×20,000": {
-          "medianPerOpMs": 0.00024066926875002538,
-          "rme": 0.005007376499961769,
+          "medianPerOpMs": 0.00015441701250001644,
+          "rme": 0.0275769437699936,
           "n": 32
         },
         "marshalling/blob 64 B ×20,000": {
-          "medianPerOpMs": 0.0005181343874999584,
-          "rme": 0.01917132514692074,
+          "medianPerOpMs": 0.000424878125000032,
+          "rme": 0.03007297680949475,
           "n": 32
         },
         "marshalling/blob 4,095 B ×20,000 (copy boundary)": {
-          "medianPerOpMs": 0.0013172625249997507,
-          "rme": 0.044513070771464484,
+          "medianPerOpMs": 0.0009931604499999595,
+          "rme": 0.017766288417957653,
           "n": 32
         },
         "marshalling/blob 4 KiB ×20,000 (external boundary)": {
-          "medianPerOpMs": 0.0012928458250000404,
-          "rme": 0.00637361380669497,
+          "medianPerOpMs": 0.0009960166500000923,
+          "rme": 0.015169287079670302,
+          "n": 32
+        },
+        "marshalling/blob 64 KiB ×4,096": {
+          "medianPerOpMs": 0.005209818481445083,
+          "rme": 0.011344429216119604,
           "n": 32
         },
         "marshalling/blob 1 MiB ×256": {
-          "medianPerOpMs": 0.169722982421888,
-          "rme": 0.04635886048091257,
+          "medianPerOpMs": 0.05349772265624608,
+          "rme": 0.009889618549026698,
           "n": 32
         },
         "marshalling/blob round-trip: 2,000 × 256 KiB": {
-          "medianPerOpMs": 0.08716990625000107,
-          "rme": 0.008294863802278066,
+          "medianPerOpMs": 0.08983511474999795,
+          "rme": 0.01889781495493591,
           "n": 32
         },
         "marshalling/blob stream: 100 MiB round trip": {
-          "medianPerOpMs": 25.799062500009313,
-          "rme": 0.019364395508511097,
+          "medianPerOpMs": 26.733979000004183,
+          "rme": 0.03523060484182776,
           "n": 12
         },
         "write/run: prepared insert ×1,000": {
-          "medianPerOpMs": 0.009270260500001314,
-          "rme": 0.013099685818080117,
+          "medianPerOpMs": 0.009815708250000171,
+          "rme": 0.024673461540401544,
           "n": 32
         },
         "write/db.run: prepare per call ×1,000": {
-          "medianPerOpMs": 0.01972087499999179,
-          "rme": 0.012683780511972935,
+          "medianPerOpMs": 0.02021541699999216,
+          "rme": 0.029007772879655423,
           "n": 32
         },
         "write/db.run: statement cache ×1,000": {
-          "medianPerOpMs": 0.00995194800000172,
-          "rme": 0.006414673790151667,
+          "medianPerOpMs": 0.01053277099999832,
+          "rme": 0.025163534838332675,
           "n": 32
         },
         "write/insert: ×1,000 in one transaction (file db)": {
-          "medianPerOpMs": 0.00841795415000015,
-          "rme": 0.007426706523458648,
+          "medianPerOpMs": 0.009192914388889525,
+          "rme": 0.00994287212474996,
+          "n": 32
+        },
+        "write/insert: ×1,000 autocommit (file db)": {
+          "medianPerOpMs": 0.2310897710000063,
+          "rme": 0.03046905895392383,
           "n": 32
         },
         "write/exec: 100-statement script": {
-          "medianPerOpMs": 0.0009146630184331691,
-          "rme": 0.001554499623550399,
+          "medianPerOpMs": 0.0009304569811316675,
+          "rme": 0.004866750402066976,
           "n": 32
         },
         "sync-vs-async/get: batch of 1 (async)": {
-          "medianPerOpMs": 0.010338706221772095,
-          "rme": 0.011614766706301492,
+          "medianPerOpMs": 0.0099231019588178,
+          "rme": 0.015061222167692165,
           "n": 32
         },
         "sync-vs-async/getSync: batch of 1": {
-          "medianPerOpMs": 0.0013326750970065482,
-          "rme": 0.011264836805154358,
+          "medianPerOpMs": 0.0009331852521361958,
+          "rme": 0.013533561129074289,
           "n": 32
         },
         "sync-vs-async/run: batch of 1 (async)": {
-          "medianPerOpMs": 0.011543604360464765,
-          "rme": 0.0036037397029153517,
+          "medianPerOpMs": 0.011541296678123782,
+          "rme": 0.01991896542000105,
           "n": 32
         },
         "sync-vs-async/runSync: batch of 1": {
-          "medianPerOpMs": 0.0017672032962100423,
-          "rme": 0.005189788809606095,
+          "medianPerOpMs": 0.0017503726974850231,
+          "rme": 0.006327406058307021,
           "n": 32
         },
         "sync-vs-async/get: batch of 10 (async)": {
-          "medianPerOpMs": 0.010039508928568874,
-          "rme": 0.01189602304695289,
+          "medianPerOpMs": 0.00974401940298568,
+          "rme": 0.009049025556362646,
           "n": 32
         },
         "sync-vs-async/getSync: batch of 10": {
-          "medianPerOpMs": 0.001385131701388976,
-          "rme": 0.007759718897581895,
+          "medianPerOpMs": 0.0009561655517575929,
+          "rme": 0.0075206166720947305,
           "n": 32
         },
         "sync-vs-async/run: batch of 10 (async)": {
-          "medianPerOpMs": 0.010218178934011689,
-          "rme": 0.00798671125204312,
+          "medianPerOpMs": 0.010491170899469927,
+          "rme": 0.01172462326969579,
           "n": 32
         },
         "sync-vs-async/runSync: batch of 10": {
-          "medianPerOpMs": 0.0012082340256565059,
-          "rme": 0.004064214542065195,
+          "medianPerOpMs": 0.0012013318126888775,
+          "rme": 0.004643009119420809,
           "n": 32
         },
         "sync-vs-async/get: batch of 100 (async)": {
-          "medianPerOpMs": 0.009928750000006403,
-          "rme": 0.01104955306540595,
+          "medianPerOpMs": 0.009722145749998162,
+          "rme": 0.021049397711357627,
           "n": 32
         },
         "sync-vs-async/getSync: batch of 100": {
-          "medianPerOpMs": 0.0014043012500001674,
-          "rme": 0.007621153818244092,
+          "medianPerOpMs": 0.001001479246231099,
+          "rme": 0.009823625160825904,
           "n": 32
         },
         "sync-vs-async/run: batch of 100 (async)": {
-          "medianPerOpMs": 0.010180679999994984,
-          "rme": 0.004284986754539711,
+          "medianPerOpMs": 0.010366184210529594,
+          "rme": 0.018294088509187505,
           "n": 32
         },
         "sync-vs-async/runSync: batch of 100": {
-          "medianPerOpMs": 0.0011946837349396118,
-          "rme": 0.005576588046650036,
+          "medianPerOpMs": 0.0011947717365268012,
+          "rme": 0.0035074422051861896,
           "n": 32
         },
         "sync-vs-async/get: batch of 10,000 (async)": {
-          "medianPerOpMs": 0.00971873964999977,
-          "rme": 0.005765711606493298,
+          "medianPerOpMs": 0.00955222505000056,
+          "rme": 0.015794836526018638,
           "n": 32
         },
         "sync-vs-async/getSync: batch of 10,000": {
-          "medianPerOpMs": 0.0014041791499999818,
-          "rme": 0.006802622015030433,
+          "medianPerOpMs": 0.0010112541750000674,
+          "rme": 0.01067387589518208,
           "n": 32
         },
         "sync-vs-async/run: batch of 10,000 (async)": {
-          "medianPerOpMs": 0.010338022900000214,
-          "rme": 0.0026070821530813394,
+          "medianPerOpMs": 0.010269968749999681,
+          "rme": 0.012079313775918952,
           "n": 32
         },
         "sync-vs-async/runSync: batch of 10,000": {
-          "medianPerOpMs": 0.0011993187500003843,
-          "rme": 0.008526389200038342,
+          "medianPerOpMs": 0.0012089593749999039,
+          "rme": 0.006969651068841056,
           "n": 32
         },
         "sync-vs-async/allSync: 20,000 rows × 4 cols": {
-          "medianPerOpMs": 0.000896096899999975,
-          "rme": 0.008119127518793753,
+          "medianPerOpMs": 0.0005788437375000285,
+          "rme": 0.03912296121846055,
+          "n": 32
+        },
+        "sync-vs-async/allSync (arrays): 20,000 rows × 4 cols": {
+          "medianPerOpMs": 0.0005573343750002095,
+          "rme": 0.04302838203062271,
+          "n": 32
+        },
+        "sync-vs-async/getSync (native path): single row": {
+          "medianPerOpMs": 0.0009147042157749714,
+          "rme": 0.011646131068744027,
           "n": 32
         },
         "baseline/node:sqlite/get: single row (prepared)": {
-          "medianPerOpMs": 0.0007915300826573705,
-          "rme": 0.005594551915207656,
+          "medianPerOpMs": 0.0008059231209385095,
+          "rme": 0.019477234119090983,
           "n": 32
         },
         "baseline/node:sqlite/all: 20,000 rows × 4 cols": {
-          "medianPerOpMs": 0.00046277761249984906,
-          "rme": 0.008021644521310151,
+          "medianPerOpMs": 0.0004992458374999842,
+          "rme": 0.01894735376720963,
+          "n": 32
+        },
+        "baseline/node:sqlite/all (returnArrays): 20,000 rows × 4 cols": {
+          "medianPerOpMs": 0.000377727433333348,
+          "rme": 0.03685691172530574,
           "n": 32
         },
         "baseline/node:sqlite/insert: prepared ×1,000": {
-          "medianPerOpMs": 0.0007845095961534893,
-          "rme": 0.010848080276816887,
+          "medianPerOpMs": 0.0008263315833331338,
+          "rme": 0.011061161989368642,
           "n": 32
         },
         "baseline/node:sqlite/exec: 100-statement script": {
-          "medianPerOpMs": 0.0009390738625591124,
-          "rme": 0.008882377482229413,
+          "medianPerOpMs": 0.0010165604249999889,
+          "rme": 0.008018780585532603,
           "n": 32
         },
         "overhead/stmt.get: 1,000 (callback)": {
-          "medianPerOpMs": 0.007771236166668435,
-          "rme": 0.007963833810538746,
+          "medianPerOpMs": 0.008009125166667217,
+          "rme": 0.006365135468045094,
           "n": 32
         },
         "overhead/stmt.get: 1,000 (promise)": {
-          "medianPerOpMs": 0.007011874999996508,
-          "rme": 0.008756977745866208,
+          "medianPerOpMs": 0.007873500166667024,
+          "rme": 0.022280698497495463,
           "n": 32
         },
         "overhead/db.run cached: 1,000": {
-          "medianPerOpMs": 0.01016205225000158,
-          "rme": 0.0041965686613214485,
+          "medianPerOpMs": 0.010184395750002295,
+          "rme": 0.010926513791780825,
           "n": 32
         },
         "overhead/db.run cached + trace listener: 1,000": {
-          "medianPerOpMs": 0.01118070825000177,
-          "rme": 0.015433033949189713,
+          "medianPerOpMs": 0.01135193750000326,
+          "rme": 0.01719191107242763,
           "n": 32
         },
         "overhead/db.run cached + profile listener: 1,000": {
-          "medianPerOpMs": 0.010829947999998694,
-          "rme": 0.016017482263506196,
+          "medianPerOpMs": 0.01136448974999803,
+          "rme": 0.0148649216743258,
           "n": 32
         },
         "overhead/db.run cached + commit listener: 1,000 autocommits": {
-          "medianPerOpMs": 0.01069491674999881,
-          "rme": 0.005254793123814571,
+          "medianPerOpMs": 0.011574677000004158,
+          "rme": 0.015685568375295313,
           "n": 32
         },
         "overhead/db.run cached + change+commit listeners: 1,000": {
-          "medianPerOpMs": 0.010603552000000491,
-          "rme": 0.007207702663653699,
+          "medianPerOpMs": 0.011294906249997438,
+          "rme": 0.020795701601738863,
           "n": 32
         },
         "overhead/db.run cached after listener removal: 1,000": {
-          "medianPerOpMs": 0.010268323000003875,
-          "rme": 0.008832771427041806,
+          "medianPerOpMs": 0.010606656249998195,
+          "rme": 0.00954932191756637,
           "n": 32
         },
         "overhead/stmt.get: 10,000 with cancellation token": {
-          "medianPerOpMs": 0.006490883350001241,
-          "rme": 0.0035227922791729875,
+          "medianPerOpMs": 0.006347218799999973,
+          "rme": 0.007564009767501021,
           "n": 32
         },
         "overhead/get: statement cache hit": {
-          "medianPerOpMs": 0.008436187499995867,
-          "rme": 0.010068262471096101,
+          "medianPerOpMs": 0.008378031499996722,
+          "rme": 0.007667829325313704,
           "n": 32
         },
         "overhead/get: statement cache miss": {
-          "medianPerOpMs": 0.020322187499987196,
-          "rme": 0.01335774015467554,
+          "medianPerOpMs": 0.022077146000010543,
+          "rme": 0.02035807753416509,
           "n": 32
         },
         "overhead/get: statement cache disabled": {
-          "medianPerOpMs": 0.018613104000003662,
-          "rme": 0.007397892904052023,
+          "medianPerOpMs": 0.019664083500014383,
+          "rme": 0.01073341404469531,
           "n": 32
         },
         "overhead/filter 20k: in SQL (a % 7 = 0)": {
-          "medianPerOpMs": 0.00005343404473682504,
-          "rme": 0.004252352519768235,
+          "medianPerOpMs": 0.000044461410227284596,
+          "rme": 0.006903969660767325,
           "n": 32
         },
         "overhead/filter 20k: JS function per row": {
-          "medianPerOpMs": 0.018593859374999737,
-          "rme": 0.00797261461489698,
+          "medianPerOpMs": 0.018616616674999385,
+          "rme": 0.010666518571415828,
           "n": 24
         },
         "overhead/filter 20k: JS after all()": {
-          "medianPerOpMs": 0.00026887812500008294,
-          "rme": 0.022642310061755506,
+          "medianPerOpMs": 0.00019324083500003327,
+          "rme": 0.006994717239580016,
           "n": 32
         },
         "overhead/JS round trip: 20k minimal calls": {
-          "medianPerOpMs": 0.018528647900000215,
-          "rme": 0.00732334467858852,
+          "medianPerOpMs": 0.0185765739500006,
+          "rme": 0.010924600550437086,
           "n": 24
         },
         "overhead/JS aggregate: 20k steps": {
-          "medianPerOpMs": 0.01834567185000051,
-          "rme": 0.00672127333404264,
+          "medianPerOpMs": 0.018403896875000644,
+          "rme": 0.008001334635801086,
           "n": 24
         },
         "overhead/JS collation: sort 10k as text": {
-          "medianPerOpMs": 0.13973669789999985,
-          "rme": 0.00693993463831048,
+          "medianPerOpMs": 0.14044748540000002,
+          "rme": 0.00754131960414278,
           "n": 12
         },
         "overhead/db.transaction: 200 empty bodies": {
-          "medianPerOpMs": 0.016618576249990535,
-          "rme": 0.0057541281056787946,
+          "medianPerOpMs": 0.016148020833328093,
+          "rme": 0.009047729017343714,
           "n": 32
         },
         "overhead/raw BEGIN+COMMIT: 200 pairs": {
-          "medianPerOpMs": 0.013946919642850324,
-          "rme": 0.005770168144131271,
+          "medianPerOpMs": 0.014685877857129007,
+          "rme": 0.009655583115541747,
           "n": 32
         },
         "overhead/open+close: 1,000 :memory: connections": {
-          "medianPerOpMs": 0.022463610986544702,
-          "rme": 0.0038251200584620156,
+          "medianPerOpMs": 0.02273938875877889,
+          "rme": 0.008918254998493436,
           "n": 32
         },
         "concurrency/50 concurrent queries: parallelize()": {
-          "medianPerOpMs": 0.2566156249999767,
-          "rme": 0.005963452147191693,
+          "medianPerOpMs": 0.1885145799999009,
+          "rme": 0.008761497386530434,
           "n": 32
         },
         "concurrency/50 concurrent queries: serialize()": {
-          "medianPerOpMs": 0.2764720799998031,
-          "rme": 0.0052627194753432326,
+          "medianPerOpMs": 0.19999333499989008,
+          "rme": 0.012421238937366129,
           "n": 32
         },
         "concurrency/pool.read: 1,000 round trips": {
-          "medianPerOpMs": 0.022865270499998588,
-          "rme": 0.007289067496859204,
+          "medianPerOpMs": 0.02371702050000022,
+          "rme": 0.01249699161175056,
           "n": 32
         },
         "concurrency/pool.get: 1,000 round trips": {
-          "medianPerOpMs": 0.022192896000007747,
-          "rme": 0.002635956118361314,
+          "medianPerOpMs": 0.02324047950001841,
+          "rme": 0.012741324893633593,
           "n": 32
         },
         "concurrency/pool.write: 1,000 round trips": {
-          "medianPerOpMs": 0.043288166500002265,
-          "rme": 0.005118315648917148,
+          "medianPerOpMs": 0.05151693749999686,
+          "rme": 0.015753110324138706,
           "n": 32
         },
         "concurrency/pool.all: 20,000 rows (postMessage transfer)": {
-          "medianPerOpMs": 0.001574633349999931,
-          "rme": 0.004336105846491992,
+          "medianPerOpMs": 0.0012431135500009986,
+          "rme": 0.0079777104830563,
           "n": 32
         },
         "concurrency/200 concurrent reads: pool (4 readers)": {
-          "medianPerOpMs": 0.4917160424999747,
-          "rme": 0.012400876670519636,
+          "medianPerOpMs": 0.4709746874999837,
+          "rme": 0.01007105457501741,
           "n": 32
         },
         "concurrency/200 concurrent reads: single connection": {
-          "medianPerOpMs": 0.5084252075000404,
-          "rme": 0.014176201619520276,
+          "medianPerOpMs": 0.44759697999994386,
+          "rme": 0.005552140831537498,
           "n": 32
         }
       }

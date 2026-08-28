@@ -12,6 +12,9 @@ by `pnpm run bench`; nothing is hand-timed.
 - [Linux (arm64, Debian container)](#linux-arm64-debian-container)
 - [When to use which API](#when-to-use-which-api)
 - [Where this package loses](#where-this-package-loses)
+  - [How rows are built](#how-rows-are-built)
+  - [Statement preparation](#statement-preparation)
+  - [BLOB columns](#blob-columns)
 - [Allocation per operation](#allocation-per-operation)
 - [CI posture](#ci-posture)
 - [Limits of these numbers](#limits-of-these-numbers)
@@ -77,32 +80,27 @@ numbers. **Ratios are what travel across platforms; absolute
 milliseconds do not** — see [Linux](#linux-arm64-debian-container) for
 how much the absolutes move.
 
-### Sync vs async — the claim README used to make
+### Sync vs async
 
-README v9 previously said the sync methods are "roughly 6x faster than
-the async equivalents for interactive lookups", a figure from a
-one-sample harness. Measured properly (both sides using the statement
-cache, batch of N sequential operations, per-op medians):
+Both sides using the statement cache, batch of N sequential operations,
+per-op medians:
 
 | Case | async | sync | sync advantage |
 |---|---|---|---|
-| `get`, batch of 1 | 10.0 µs/op | 1.27 µs/op | **7.9×** |
-| `get`, batch of 10 | 10.4 µs/op | 1.31 µs/op | **8.0×** |
-| `get`, batch of 100 | 9.9 µs/op | 1.33 µs/op | **7.4×** |
-| `get`, batch of 10,000 | 9.6 µs/op | 1.31 µs/op | **7.3×** |
-| `run`, batch of 1 | 11.4 µs/op | 1.67 µs/op | **6.8×** |
-| `run`, batch of 10 | 9.8 µs/op | 1.13 µs/op | **8.7×** |
-| `run`, batch of 100 | 9.8 µs/op | 1.13 µs/op | **8.7×** |
-| `run`, batch of 10,000 | 9.9 µs/op | 1.14 µs/op | **8.7×** |
-| `all`, 20,000 rows × 4 cols | 844 ns/row | 815 ns/row | 1.04× — *within the run's noise floor* |
+| `get`, batch of 1 | 9.68 µs/op | 930 ns/op | **10.4×** |
+| `get`, batch of 10 | 9.38 µs/op | 974 ns/op | **9.6×** |
+| `get`, batch of 100 | 9.71 µs/op | 988 ns/op | **9.8×** |
+| `get`, batch of 10,000 | 9.63 µs/op | 1.00 µs/op | **9.6×** |
+| `run`, batch of 1 | 11.43 µs/op | 1.71 µs/op | **6.7×** |
+| `run`, batch of 10 | 10.33 µs/op | 1.19 µs/op | **8.7×** |
+| `run`, batch of 100 | 10.34 µs/op | 1.18 µs/op | **8.8×** |
+| `run`, batch of 10,000 | 10.37 µs/op | 1.19 µs/op | **8.7×** |
+| `all`, 20,000 rows × 4 cols | 561 ns/row | 557 ns/row | parity (within the 3.8% floor) |
 
-Case RMEs were 0.2–1.6%; the ratio spread across three full runs was
-±0.5×. So the honest claim is: **7–8× for single-row interactive
-lookups and writes, flat from 1 to 10,000 operations — and no advantage
-at all for large result sets**, because one threadpool round trip is
-amortised across every row. The README now says exactly this. The old
-"6x" was directionally right and under-claimed for `run`; it came from a
-harness that took one sample.
+Case RMEs were 0.3–1.9%. The claim is: **7–10× for single-row
+interactive lookups and writes, flat from 1 to 10,000 operations, and
+level with async for large result sets** — the same marshalling work
+either way, with or without the threadpool round trip.
 
 The async per-op cost (~10 µs) is dominated by the threadpool round
 trip, which is what the sync path avoids; it does not grow with batch
@@ -112,21 +110,21 @@ size, which is why the ratio is flat.
 
 | Case | median | RME |
 |---|---|---|
-| `all`: 1,000 rows × 1 col | 247 ns | 0.3% |
-| `all`: 20,000 rows × 1 col | 225 ns | 0.3% |
-| `all`: 200,000 rows × 1 col | 241 ns | 2.5% |
-| `all`: 1,000 rows × 4 cols | 832 ns | 0.7% |
-| `all`: 20,000 rows × 4 cols | 844 ns | 1.6% |
-| `all`: 200,000 rows × 4 cols | 880 ns | 0.7% |
-| `all`: 1,000 rows × 16 cols | 2.12 µs | 0.2% |
-| `all`: 20,000 rows × 16 cols | 2.25 µs | 1.0% |
-| `all`: 200,000 rows × 16 cols | 2.26 µs | 1.0% |
-| `all`: 20,000 × 8 cols **wide text** (~100 chars) | 1.48 µs | 2.1% |
-| `all`: 20,000 × 8 cols **mostly NULL** | 927 ns | 0.8% |
-| `each`: 20,000 × 4 | 696 ns | 0.8% |
-| `iterate` (`for await`): 20,000 × 4 | 877 ns | 0.5% |
-| `map`: 20,000 × 4 | 229 ns | 0.8% |
-| `get` single row (prepared statement) | 7.56 µs | 1.8% |
+| `all`: 1,000 rows × 1 col | 209 ns | 0.4% |
+| `all`: 20,000 rows × 1 col | 182 ns | 0.6% |
+| `all`: 200,000 rows × 1 col | 177 ns | 0.6% |
+| `all`: 1,000 rows × 4 cols | 614 ns | 0.6% |
+| `all`: 20,000 rows × 4 cols | 561 ns | 0.9% |
+| `all`: 200,000 rows × 4 cols | 604 ns | 0.8% |
+| `all`: 1,000 rows × 16 cols | 815 ns | 0.3% |
+| `all`: 20,000 rows × 16 cols | 807 ns | 1.9% |
+| `all`: 200,000 rows × 16 cols | 841 ns | 1.5% |
+| `all`: 20,000 × 8 cols **wide text** (~100 chars) | REJECTED | — |
+| `all`: 20,000 × 8 cols **mostly NULL** | 312 ns | 0.9% |
+| `each`: 20,000 × 4 | 475 ns | 2.4% |
+| `iterate` (`for await`): 20,000 × 4 | 657 ns | 1.0% |
+| `map`: 20,000 × 4 | 195 ns | 0.5% |
+| `get` single row (prepared statement) | 8.90 µs | 0.9% |
 
 Notes: per-row cost is flat from 20k to 200k rows (no hidden
 super-linear term). `each` beats `all` per row (no result array);
@@ -138,21 +136,21 @@ like with like.
 
 | Value type | median/row | RME |
 |---|---|---|
-| INTEGER (mode `number`) | 232 ns | 0.6% |
-| INTEGER (mode `mixed`) | 233 ns | 0.6% |
-| INTEGER (mode `bigint`) | 237 ns | 0.9% |
-| REAL | 245 ns | 0.6% |
-| TEXT short | 257 ns | 0.8% |
-| TEXT 4 KiB | 1.11 µs | 2.9% |
-| TEXT unicode | 360 ns | 0.7% |
-| NULL | 225 ns | 0.3% |
-| BLOB 64 B | 480 ns | 1.7% |
-| BLOB 4,095 B (copy side of the boundary) | 1.07 µs | 3.6% |
-| BLOB 4 KiB (zero-copy side) | 1.10 µs | 0.4% |
-| BLOB 64 KiB × 4,096 | REJECTED (RME 25.1%; observed 8.6–16.7 µs) | — |
-| BLOB 1 MiB × 256 | REJECTED (RME 14.0%; observed 109–198 µs) | — |
-| blob round-trip 2,000 × 256 KiB | 75.1 µs | 0.5% |
-| blob stream 100 MiB round trip | 21.3 ms | 2.5% |
+| INTEGER (mode `number`) | 159 ns | 0.8% |
+| INTEGER (mode `mixed`) | 157 ns | 0.7% |
+| INTEGER (mode `bigint`) | 162 ns | 0.7% |
+| REAL | 161 ns | 1.0% |
+| TEXT short | 183 ns | 0.6% |
+| TEXT 4 KiB | 1.04 µs | 4.9% |
+| TEXT unicode | 278 ns | 0.7% |
+| NULL | 147 ns | 0.6% |
+| BLOB 64 B | 410 ns | 3.3% |
+| BLOB 4,095 B (copy side of the boundary) | 990 ns | 1.6% |
+| BLOB 4 KiB (zero-copy side) | 1.01 µs | 1.7% |
+| BLOB 64 KiB × 4,096 | 5.13 µs | 1.0% |
+| BLOB 1 MiB × 256 | 52.86 µs | 1.0% |
+| blob round-trip 2,000 × 256 KiB | 94.84 µs | 0.4% |
+| blob stream 100 MiB round trip | 26.42 ms | 1.9% |
 
 The 4,095/4,096 pair straddles the zero-copy boundary in `CellToJS`
 (`src/convert.cc`): at ≥ 4096 bytes the payload moves into an external
@@ -168,16 +166,16 @@ allocator and GC behaviour that is genuinely bimodal.
 
 | Case | median | RME |
 |---|---|---|
-| prepared `run` insert | 9.11 µs | 0.3% |
-| `db.run` prepare-per-call | 18.4 µs | 0.1% |
-| `db.run` with statement cache | 9.82 µs | 0.3% |
-| `exec` 100-statement script | 806 ns/stmt | 0.7% |
-| **1,000 inserts in one transaction (file db)** | **7.54 µs** | 0.5% |
+| prepared `run` insert | 9.23 µs | 1.1% |
+| `db.run` prepare-per-call | 19.69 µs | 1.3% |
+| `db.run` with statement cache | 10.35 µs | 1.2% |
+| `exec` 100-statement script | 929 ns/stmt | 0.6% |
+| **1,000 inserts in one transaction (file db)** | **8.87 µs** | 0.7% |
 | 1,000 inserts autocommit (file db) | REJECTED (RME 81%; observed 175 µs–1.95 ms) | — |
 
 The transaction lever is the one case where the harness refuses to print
 the headline number, and the refusal *is* the finding: batched inserts
-cost a stable ~7.5 µs each on a journal-backed file, while autocommit
+cost a stable ~8.9 µs each on a journal-backed file, while autocommit
 inserts ranged from 175 µs to 1.95 ms — **at least 23× slower at the
 fast end of its own observed range, and up to ~260× at the slow end**.
 The distribution is intrinsically bimodal (journal create/delete and
@@ -273,13 +271,20 @@ README quotes both.
 ## When to use which API
 
 - **Sync (`getSync`/`runSync`/`allSync`)** for interactive, single-row
-  work on an idle connection: 7–8× per call. It throws if anything is in
+  work on an idle connection: 7–9× per call. It throws if anything is in
   flight, and it blocks the event loop for the duration — including
   `busyTimeout` waits — so it is wrong for anything slow or contended.
-  For large result sets it buys nothing over `all` (see the crossover
-  row above).
+  For large result sets it is now marginally faster than `all` (~1.15×,
+  the crossover row above) — and `{ rowMode: 'array' }` trades the
+  per-row objects for arrays when a bulk reader does not need them
+  (see [How rows are built](#how-rows-are-built)).
+  The `Database`-level forms keep a statement cache of their own, so
+  `db.getSync(sql, ...)` does not prepare and finalize per call; that is
+  automatic and needs no `cacheStatements()`.
 - **Statement cache** (`db.cacheStatements()`): 2.4–2.6× on repeated
-  one-shot calls; first call of each SQL string pays the prepare. The
+  one-shot calls; first call of each SQL string pays the prepare. This
+  is the opt-in cache for the *asynchronous* calls — the synchronous
+  ones always cache (above). The
   cache is bypassed under `serialize()` and while an exclusive operation
   (`exec`/`close`/`wait`/`loadExtension`) is queued, so cached-call
   latency can differ by mode — the `miss`/`disabled` cases quantify the
@@ -306,23 +311,131 @@ README quotes both.
 ## Where this package loses
 
 Measured against Node's built-in `node:sqlite` (`DatabaseSync`), same
-fixtures, same statement shapes (sync vs sync):
+fixtures, same statement shapes (sync vs sync). The numbers below are
+one filtered run of the suite (Node v26.7.0, darwin/arm64, same
+process, noise floor 2.0%), so every ratio is a validated same-process
+comparison. The fixture is `(INTEGER, REAL, TEXT, BLOB)` on both sides.
 
-| Case | `@appthreat/sqlite3` | `node:sqlite` | node:sqlite advantage |
+| Case | `@appthreat/sqlite3` | `node:sqlite` | ratio |
 |---|---|---|---|
-| `get` single row (prepared) | 1.27 µs | 748 ns | **1.7×** |
-| `all` 20,000 × 4 | 815 ns/row | 429 ns/row | **1.9×** |
-| insert (prepared) | 1.67 µs | 766 ns | **2.2×** |
-| `exec` 100-statement script | 806 ns/stmt | 896 ns/stmt | parity (0.90× — within noise) |
+| `get` single row (prepared) | 895 ns | 816 ns | 1.10× slower |
+| `all` 20,000 × 4 (objects) | 557 ns/row | 489 ns/row | 1.14× slower |
+| `all` 20,000 × 4 (arrays: `rowMode`/`returnArrays`) | 563 ns/row | 374 ns/row | 1.51× slower |
+| insert (prepared) | 1.19 µs | 816 ns | 1.46× slower |
+| `exec` 100-statement script | 929 ns/stmt | 1.00 µs/stmt | 1.08× faster |
+
+The read gap is almost entirely one column type. The fixture above is
+`(INTEGER, REAL, TEXT, BLOB)`; on the same four-column row *without* a
+BLOB this package is at parity or ahead — 0.98× on
+`(INTEGER, REAL, TEXT, TEXT)`, 0.95× on four integers — and blobs cost
+1.29×, for the reason in [BLOB columns](#blob-columns) below.
 
 `node:sqlite` calls the C API directly from JS with no JavaScript
 wrapper layer, statement cache, or mode-aware integer conversion in
-between, and it shows. What this package offers in exchange is the
-async, non-blocking surface (the event loop stays free), the worker
-pool, transactions-with-savepoints, hooks, sessions/blob I/O and
-per-connection configuration — none of which `node:sqlite` has. If
-none of that matters for your workload, the built-in is the faster
-sync driver and this document is not going to pretend otherwise.
+between. What this package offers in exchange is the async,
+non-blocking surface (the event loop stays free), the worker pool,
+transactions-with-savepoints, hooks, sessions/blob I/O and
+per-connection configuration — none of which `node:sqlite` has.
+
+### How rows are built
+
+A row is not assembled column by column from C++. Storing each column
+into a fresh object makes V8 walk a `LookupIterator`, take a map
+transition, and reallocate the backing property array on every added
+column — cost quadratic in column count. Setting elements on a
+pre-sized array is no better: it still goes through the generic
+`Object::Set(uint32)` path with an elements-kind check per element.
+Node-API has no bulk object-construction call, so the way out is to
+stop crossing the boundary per column at all.
+
+Instead, the addon converts the cells into an argument vector and calls
+a **generated monomorphic JS function** once per row. For a result with
+columns `id, name, ts, data` the compiled builder is:
+
+```js
+function (v0, v1, v2, v3) { return { id: v0, name: v1, ts: v2, data: v3 }; }
+```
+
+V8 compiles that to an object literal of a single fixed shape, so the
+row is allocated with its final map in one step, and one
+`napi_call_function` replaces N property stores. The builder is
+compiled once per result shape and cached on the statement, keyed to
+the shape: a transparent re-prepare (a schema change behind
+`sqlite3_step`) rebuilds it along with the column keys. The same
+builder serves the asynchronous completions — `all`, `each`, `fetch`
+and their promise forms — which additionally open one handle scope per
+256 rows rather than one per row.
+
+Measured, same process, integer columns:
+
+| | 4 columns | 16 columns |
+|---|---|---|
+| `node:sqlite` (objects) | 273 ns/row | 845 ns/row |
+| `@appthreat/sqlite3` (objects) | 251 ns/row | 583 ns/row |
+
+Per *cell* this package converts at ~30 ns against `node:sqlite`'s
+~46–54 ns. Because the object shape now costs what the array shape
+costs, `{ rowMode: 'array' }` is no longer meaningfully faster than the
+default (557 vs 563 ns/row above, inside the noise floor); choose it
+when a bulk reader genuinely wants arrays, not for speed.
+
+The row shape is exactly what per-column stores produced: the same
+prototype, the same result-column order, the same last-duplicate-wins
+collapse for repeated column names, and the same treatment of a
+`__proto__` column (an object literal assigns the prototype for that
+key rather than creating an own property, which is what a property
+store did too). `test/sync.test.js` pins all of it, including column
+names containing quotes, backslashes and newlines — those names are
+interpolated into generated source, so their escaping is part of the
+contract.
+
+Two limits are deliberate:
+
+- Results wider than **256 columns** use the per-column store loop; a
+  generated function stops paying for itself there and approaches V8's
+  parameter limit.
+- Realms that forbid code generation from strings — a CSP'd Electron
+  renderer, `--disallow-code-generation-from-strings` — cannot compile
+  a builder. The addon detects that once per environment and falls back
+  to the store loop, so this is a performance feature that degrades
+  rather than one that fails.
+
+### Statement preparation
+
+`db.getSync`/`allSync`/`runSync` keep their own statement cache (64
+entries, LRU), so the `Database`-level convenience forms do not prepare
+and finalize a statement per call — that costs ~5.6 µs against ~0.75 µs
+for the same query through a prepared statement. It is automatic and
+independent of `cacheStatements()`, which remains opt-in and governs
+the *asynchronous* calls only. Both caches are emptied by `close()` and
+by every user-function registration, since a prepared statement keeps
+invoking the implementation it was compiled against.
+
+### BLOB columns
+
+Blobs cost this package ~1.29× of `node:sqlite`, and the reason is the
+return type. `napi_create_buffer_copy` builds a `Uint8Array` and then
+re-prototypes it to `Buffer.prototype`, which costs a V8 map update per
+blob:
+
+```
+napi_create_buffer_copy      3678 samples
+└─ node::Buffer::Copy        3527
+   └─ node::Buffer::New       766
+      └─ v8::Object::SetPrototypeV2   720
+         └─ JSObject::SetPrototype    455
+            └─ MapUpdater::Update()   374
+```
+
+`node:sqlite` returns a plain `Uint8Array` and never pays it. This
+package returns a `Buffer`, as every previous version did and as the
+type declarations promise; returning `Uint8Array` instead would break
+every caller doing `Buffer.isBuffer(row.data)`. Constructing the
+`Buffer` in JS is cheaper (~27 ns against the ~76 ns per blob this
+costs), but capturing that would require a type check on every value in
+the generated builder — slowing every non-blob row to speed up blob
+rows. The cost is the price of the compatible return type, and it is
+paid only on BLOB columns.
 
 `better-sqlite3` can be added as an optional mirror with
 `npm i --no-save better-sqlite3 && pnpm run bench -- --compare` — it is

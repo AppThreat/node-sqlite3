@@ -111,6 +111,17 @@ public:
         bool cannot_run_js = false;
         napi_ref probe_object = NULL;
         napi_ref probe_key = NULL;
+        // The JS row-factory generator, registered once at module load by
+        // lib/sqlite3.js. Given the result column names it compiles a
+        // monomorphic function that builds one row from its arguments, so
+        // a row costs one napi_call_function instead of one V8 property
+        // store per column. NULL when the JS half never registered it, or
+        // when the environment forbids code generation from strings — both
+        // fall back to the per-cell store loop.
+        napi_ref row_factory_generator = NULL;
+        // Set once the generator has refused (a CSP/no-codegen realm), so
+        // the refusal is not retried per statement.
+        bool row_factory_unavailable = false;
     };
 
     // True when this environment can no longer accept JS mutation — it

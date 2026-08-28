@@ -102,6 +102,29 @@ export type AggregateDefinition = FunctionOptions & {
 export type Row = Record<string, unknown>;
 
 /**
+ * Row-shape options for the synchronous read paths (`getSync`/`allSync`).
+ *
+ * - `'object'` (the default) keeps the historical shape: one plain object
+ *   per row on `Object.prototype`, in result-column order, with a
+ *   duplicate column name collapsing to the last value.
+ * - `'array'` yields one array per row instead — values in result-column
+ *   order, duplicate column names keeping every value. The bulk-reader
+ *   shape for CSV export / ETL / `SELECT` into a typed structure; it
+ *   skips the per-cell property stores entirely and is the fastest row
+ *   the synchronous paths can build.
+ *
+ * The option is recognised as a trailing `{ rowMode: ... }` argument; a
+ * named bind parameter could never have that bare key (bind keys carry a
+ * sigil or are positional numbers), so it is unambiguous.
+ *
+ * @since 9.0.0
+ */
+export interface SyncRowModeOptions {
+    /** The requested row shape. */
+    rowMode?: 'object' | 'array';
+}
+
+/**
  * How INTEGER columns and `lastID` are converted to JS.
  *
  * - `'number'` (default): numbers when safely representable, a
@@ -1129,11 +1152,29 @@ export declare class Statement extends EventEmitter {
     ): this;
 
     /**
-     * Synchronous fast path: steps once on the main thread and returns
-     * the first row.
+     * Synchronous fast path returning the first row as an array of the
+     * row's values in result-column order (duplicate columns keep every
+     * value). The bulk-reader shape: no per-cell property stores.
      *
      * @param params parameters as one array/named object or variadic
-     *   values.
+     *   values, followed by the `{ rowMode: 'array' }` options bag.
+     * @returns the row's values, or undefined when the statement yields
+     *   none.
+     * @throws {Error} When the database is not fully idle, from inside an
+     *   async completion callback, on an unsupported bind type, or when a
+     *   callback is passed.
+     * @since 9.0.0
+     */
+    getSync(
+        ...params: [...(BindValue | BindParams)[], { rowMode: 'array' }]
+    ): unknown[] | undefined;
+
+    /**
+     * Synchronous fast path: steps once on the main thread and returns
+     * the first row as an object (the default row shape).
+     *
+     * @param params parameters as one array/named object or variadic
+     *   values, optionally followed by a `{ rowMode: ... }` options bag.
      * @returns the row, or undefined when the statement yields none.
      * @throws {Error} When the database is not fully idle, from inside an
      *   async completion callback, on an unsupported bind type, or when a
@@ -1159,7 +1200,26 @@ export declare class Statement extends EventEmitter {
     runSync(...params: (BindValue | BindParams)[]): this;
 
     /**
-     * Synchronous fast path: steps through every row on the main thread.
+     * Synchronous fast path stepping through every row, returning one
+     * array of values per row in result-column order (duplicate columns
+     * keep every value). The bulk-reader shape: no per-cell property
+     * stores.
+     *
+     * @param params parameters as one array/named object or variadic
+     *   values, followed by the `{ rowMode: 'array' }` options bag.
+     * @returns every result row, as arrays.
+     * @throws {Error} When the database is not fully idle, from inside an
+     *   async completion callback, on an unsupported bind type, or when a
+     *   callback is passed.
+     * @since 9.0.0
+     */
+    allSync(
+        ...params: [...(BindValue | BindParams)[], { rowMode: 'array' }]
+    ): unknown[][];
+
+    /**
+     * Synchronous fast path: steps through every row on the main thread,
+     * returning one object per row (the default row shape).
      *
      * @param params parameters as one array/named object or variadic
      *   values.
@@ -1352,6 +1412,24 @@ declare const binding: {
      * @since 9.0.0
      */
     invertChangeset(changeset: ChangesetBytes): Uint8Array;
+
+    /**
+     * Installs the generator the addon uses to compile a row builder for
+     * each result shape, so a row costs one call into JS instead of one
+     * property store per column from C++. Called once by lib/sqlite3.js at
+     * module load; not part of the supported surface.
+     *
+     * @param generator builds a row function from the column names and a
+     *   flag selecting the array row shape.
+     * @returns nothing.
+     * @internal
+     */
+    setRowFactoryGenerator(
+        generator: (
+            names: string[],
+            wantArray: boolean,
+        ) => (...values: unknown[]) => unknown,
+    ): void;
 
     /**
      * Concatenates two changesets into one equivalent to applying both in
