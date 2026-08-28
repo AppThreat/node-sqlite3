@@ -195,6 +195,13 @@ async function main() {
     }
     console.log('');
 
+    // Promotion path: --baseline-from merges an already-recorded run and
+    // exits without measuring anything (used for CI artifacts).
+    if (opts.baselineFrom) {
+        promoteResultsToBaseline(opts.baselineFrom, opts.baselinePath);
+        return 0;
+    }
+
     const suite = await buildSuite(sqlite3, { compare: opts.compare });
     for (const skip of suite.skipped) console.log(`skipped: ${skip}`);
     if (suite.skipped.length > 0) console.log('');
@@ -402,9 +409,6 @@ async function main() {
         console.log(
             `\nbaseline written: ${sig} → ${measured.length} cases (${opts.baselinePath})`,
         );
-    }
-    if (opts.baselineFrom) {
-        promoteResultsToBaseline(opts.baselineFrom, opts.baselinePath);
     }
 
     if (opts.compare) {

@@ -394,10 +394,11 @@ export function transactionCases(db) {
         {
             name: 'overhead/db.transaction: 200 empty bodies',
             group: 'overhead',
+            ops: 200,
             iter: async (_env, n) => {
                 for (let r = 0; r < n; r++) {
                     for (let i = 0; i < 200; i++) {
-                        await db.transaction(async () => undefined)();
+                        await db.transaction(async () => undefined);
                     }
                 }
             },
@@ -405,6 +406,7 @@ export function transactionCases(db) {
         {
             name: 'overhead/raw BEGIN+COMMIT: 200 pairs',
             group: 'overhead',
+            ops: 200,
             iter: async (_env, n) => {
                 for (let r = 0; r < n; r++) {
                     for (let i = 0; i < 200; i++) {
