@@ -1,7 +1,6 @@
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { pathToFileURL } from 'node:url';
 
 import sqlite3 from '../lib/sqlite3.js';
 
@@ -969,9 +968,11 @@ describe('row factory: realms that forbid code generation', function () {
         // renderer or this flag forbids it, and the addon must degrade to
         // building rows column by column rather than fail. Run out of
         // process because the restriction is per-isolate.
-        const lib = pathToFileURL(
-            new URL('../lib/sqlite3.js', import.meta.url).pathname,
-        );
+        // Already a file: URL — import it as one. Going via .pathname and
+        // back through pathToFileURL doubles the drive letter on Windows
+        // ("D:\D:\a\...", because "/D:/a/..." reads as a relative path)
+        // and drops percent-encoding on any path containing spaces.
+        const lib = new URL('../lib/sqlite3.js', import.meta.url).href;
         const script = `
             import mod from '${lib}';
             const sqlite3 = mod.verbose ? mod : mod.default;
