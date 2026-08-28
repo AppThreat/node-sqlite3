@@ -363,6 +363,9 @@ jobs:
               || startsWith(github.ref, 'refs/tags/')))
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    env:
+      SQLITE_PREFIX: /usr
+      SQLITE_LIBNAME: sqlcipher
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Setup pnpm
@@ -377,12 +380,18 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlcipher-dev
       - name: Build against the system SQLCipher
         env:
+          # node-gyp 13 forwards everything after `--` to gyp as build-file
+          # names, so `rebuild -- --sqlite=…` dies with "not found while
+          # trying to load". The binding.gyp `sqlite` and `sqlite_libname`
+          # variables are gyp defines: set them through the GYP_DEFINES
+          # environment variable, which gyp reads on every run.
+          GYP_DEFINES: 'sqlite=${{ env.SQLITE_PREFIX }} sqlite_libname=${{ env.SQLITE_LIBNAME }}'
           # binding.gyp adds <(sqlite)/include; Debian keeps the SQLCipher
-          # headers under /usr/include/sqlcipher, so point the compiler at
-          # them too (the same CPPFLAGS dance as docs/security.md).
-          CPPFLAGS: '-I/usr/include/sqlcipher'
-          LDFLAGS: '-lsqlcipher'
-        run: pnpm run rebuild -- --sqlite=/usr --sqlite_libname=sqlcipher
+          # headers under $SQLITE_PREFIX/include/sqlcipher, so point the
+          # compiler at them too (the same CPPFLAGS dance as docs/security.md).
+          CPPFLAGS: '-I${{ env.SQLITE_PREFIX }}/include/sqlcipher'
+          LDFLAGS: '-l${{ env.SQLITE_LIBNAME }}'
+        run: pnpm run rebuild
       - name: 'Smoke: encrypted database round trip'
         run: |
           node --input-type=module -e "
