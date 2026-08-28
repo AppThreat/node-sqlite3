@@ -390,6 +390,17 @@ Baselines are per `platform-arch` and are regenerated deliberately:
 `linux-x64` entry would first be captured — run the job once, download
 the artifact, promote, commit).
 
+**A calibration fact learned the hard way**: comparing two quiet runs of
+the *identical binary* on the same machine moved two
+threadpool-dominated cases by +11–16%, while each run's own A/A noise
+floor was 0.2–4.3%. Within one process, ratios are extremely reliable;
+across processes, absolute medians of round-trip-shaped cases drift
+more than the 10% gate. So a single local `FAIL` at the 10–15% margin
+warrants a rerun before it is believed — a *pattern* of related cases
+regressing together (as in the deliberate-regression check, where the
+integer cases rose and the float control stayed flat) is the signal
+that distinguishes a real regression from process drift.
+
 ## Limits of these numbers
 
 - **Memory footprint**: the four large-blob cases (`blob 64 KiB`,
