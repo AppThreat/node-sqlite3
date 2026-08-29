@@ -4,7 +4,6 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
 
 ![NPM Downloads](https://img.shields.io/npm/dm/%40appthreat%2Fsqlite3)
 [![Latest release](https://img.shields.io/github/release/AppThreat/node-sqlite3.svg)](https://www.npmjs.com/package/@appthreat/sqlite3)
-![Node-API v9 Badge](https://github.com/nodejs/abi-stable-node/blob/doc/assets/Node-API%20v10%20Badge.svg)
 
 # Features
 
