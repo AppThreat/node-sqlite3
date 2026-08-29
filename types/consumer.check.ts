@@ -57,8 +57,8 @@ async function consumer(): Promise<void> {
     const constructed = new sqlite3.Database(':memory:', {
         untrusted: true,
     });
-    // @ts-expect-error untrusted is boolean
     const constructed2 = new sqlite3.Database(':memory:', {
+        // @ts-expect-error untrusted is boolean
         untrusted: 'yes',
     });
     void constructed;
