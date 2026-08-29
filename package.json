@@ -32,7 +32,7 @@
         "electron": "43.4.1",
         "prebuildify": "^6.0.1",
         "semver": "^7.8.5",
-        "typescript": "~5.9.3"
+        "typescript": "7.0.2"
     },
     "peerDependencies": {
         "node-gyp": "13.x"
