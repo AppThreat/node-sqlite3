@@ -95,6 +95,13 @@ class Backup : public Napi::ObjectWrap<Backup> {
 public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
 
+    // Cross-class argument validation, against this env's constructor —
+    // see Database::HasInstanceIn.
+    static inline bool HasInstance(Napi::Value val) {
+        return Database::HasInstanceIn(val,
+            &Database::AddonData::backup_ctor);
+    }
+
     struct Baton {
         napi_async_work request = NULL;
         Backup* backup;
@@ -123,7 +130,7 @@ public:
         }
         virtual ~InitializeBaton() override {
             backup->Unref();
-            if (!db->IsOpen() && db->IsLocked()) {
+            if (db->IsClosed()) {
                 // The database handle was closed before the backup could be opened.
                 backup->FinishAll();
             }
@@ -158,15 +165,32 @@ public:
     WORK_DEFINITION(Step)
     WORK_DEFINITION(Finish)
 
+    // End-of-call bookkeeping for an asynchronous backup operation.
+    void EndCall();
+
+    // Runs EndCall() on every exit path from a Work_After* handler.
+    // TRY_CATCH_CALL returns early when a JS callback throws, so doing the
+    // bookkeeping inline (the old trailing BACKUP_END() macro) was skipped
+    // on that path — leaving `locked` set and db->pending elevated forever.
+    // A leaked pending count permanently disables the connection's sync
+    // fast path and blocks every exclusive operation (close/exec/wait/
+    // loadExtension all assert pending == 0). Mirrors
+    // Statement::CallGuard.
+    struct CallGuard {
+        Backup* backup;
+        explicit CallGuard(Backup* b) : backup(b) {}
+        ~CallGuard() { backup->EndCall(); }
+        CallGuard(const CallGuard&) = delete;
+        CallGuard& operator=(const CallGuard&) = delete;
+    };
+
     Napi::Value IdleGetter(const Napi::CallbackInfo& info);
     Napi::Value CompletedGetter(const Napi::CallbackInfo& info);
     Napi::Value FailedGetter(const Napi::CallbackInfo& info);
     Napi::Value PageCountGetter(const Napi::CallbackInfo& info);
     Napi::Value RemainingGetter(const Napi::CallbackInfo& info);
-    Napi::Value FatalErrorGetter(const Napi::CallbackInfo& info);
     Napi::Value RetryErrorGetter(const Napi::CallbackInfo& info);
 
-    void FatalErrorSetter(const Napi::CallbackInfo& info, const Napi::Value& value);
     void RetryErrorSetter(const Napi::CallbackInfo& info, const Napi::Value& value);
 
 protected:
@@ -183,7 +207,9 @@ protected:
     void FinishSqlite();
     void GetRetryErrors(std::set<int>& retryErrorsSet);
 
-    Database* db;
+    // NULL when the constructor threw before validation completed; every
+    // destructor path gates on it.
+    Database* db = NULL;
 
     sqlite3_backup* _handle = NULL;
     sqlite3* _otherDb = NULL;

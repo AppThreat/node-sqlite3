@@ -23,6 +23,9 @@ Napi::Object Backup::Init(Napi::Env env, Napi::Object exports) {
         InstanceAccessor("retryErrors", &Backup::RetryErrorGetter, &Backup::RetryErrorSetter),
     });
 
+    // Per-env (see Database::AddonData).
+    env.GetInstanceData<Database::AddonData>()->backup_ctor =
+        Napi::Persistent(t);
     exports.Set("Backup", t);
     return exports;
 }
@@ -60,7 +63,7 @@ template <class T> void Backup::Error(T* baton) {
     Backup* backup = baton->backup;
     // Fail hard on logic errors.
     assert(backup->status != 0);
-    EXCEPTION(Napi::String::New(env, backup->message), backup->status, exception);
+    EXCEPTION(backup->message, backup->status, exception);
 
     Napi::Function cb = baton->callback.Value();
 
@@ -78,10 +81,21 @@ void Backup::CleanQueue() {
     auto env = this->Env();
     Napi::HandleScope scope(env);
 
+    // Environment teardown (worker termination): failing the queued
+    // calls constructs JS on a dying environment, which is fatal. Drop
+    // them instead — reference cleanup still works there, so the
+    // batons are destroyed normally.
+    if (Database::EnvCannotRunJs(env)) {
+        while (!queue.empty()) {
+            queue.pop();
+        }
+        return;
+    }
+
     if (inited && !queue.empty()) {
         // This backup has already been initialized and is now finished.
         // Fire error for all remaining items in the queue.
-        EXCEPTION(Napi::String::New(env, "Backup is already finished"), SQLITE_MISUSE, exception);
+        EXCEPTION("Backup is already finished", SQLITE_MISUSE, exception);
         Napi::Value argv[] = { exception };
         bool called = false;
 
@@ -211,12 +225,26 @@ void Backup::Work_Initialize(napi_env e, void* data) {
     sqlite3_mutex_leave(mtx);
 }
 
+void Backup::EndCall() {
+    assert(locked);
+    assert(db->pending);
+    locked = false;
+    db->pending--;
+    Process();
+    db->Process();
+}
+
 void Backup::Work_AfterInitialize(napi_env e, napi_status status, void* data) {
     std::unique_ptr<InitializeBaton> baton(static_cast<InitializeBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* backup = baton->backup;
 
     auto env = backup->Env();
     Napi::HandleScope scope(env);
+
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    BACKUP_END();
 
     if (backup->status != SQLITE_OK) {
         Error(baton.get());
@@ -230,7 +258,6 @@ void Backup::Work_AfterInitialize(napi_env e, napi_status status, void* data) {
             TRY_CATCH_CALL(backup->Value(), cb, 1, argv);
         }
     }
-    BACKUP_END();
 }
 
 Napi::Value Backup::Step(const Napi::CallbackInfo& info) {
@@ -276,10 +303,15 @@ void Backup::Work_Step(napi_env e, void* data) {
 
 void Backup::Work_AfterStep(napi_env e, napi_status status, void* data) {
     std::unique_ptr<StepBaton> baton(static_cast<StepBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* backup = baton->backup;
 
     auto env = backup->Env();
     Napi::HandleScope scope(env);
+
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    BACKUP_END();
 
     if (backup->status == SQLITE_DONE) {
         backup->completed = true;
@@ -298,8 +330,6 @@ void Backup::Work_AfterStep(napi_env e, napi_status status, void* data) {
             TRY_CATCH_CALL(backup->Value(), cb, 2, argv);
         }
     }
-
-    BACKUP_END();
 }
 
 Napi::Value Backup::Finish(const Napi::CallbackInfo& info) {
@@ -324,10 +354,15 @@ void Backup::Work_Finish(napi_env e, void* data) {
 
 void Backup::Work_AfterFinish(napi_env e, napi_status status, void* data) {
     std::unique_ptr<Baton> baton(static_cast<Baton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
     auto* backup = baton->backup;
 
     auto env = backup->Env();
     Napi::HandleScope scope(env);
+
+    // Runs the end-of-call bookkeeping on every exit path, including
+    // TRY_CATCH_CALL's early return when a JS callback throws.
+    BACKUP_END();
 
     backup->FinishAll();
 
@@ -336,8 +371,6 @@ void Backup::Work_AfterFinish(napi_env e, napi_status status, void* data) {
     if (!cb.IsEmpty() && cb.IsFunction()) {
         TRY_CATCH_CALL(backup->Value(), cb, 0, NULL);
     }
-
-    BACKUP_END();
 }
 
 void Backup::FinishAll() {
@@ -348,7 +381,9 @@ void Backup::FinishAll() {
     finished = true;
     CleanQueue();
     FinishSqlite();
-    db->Unref();
+    // db is NULL only when the constructor threw before validation
+    // finished; then no Ref was taken either.
+    if (db) db->Unref();
 }
 
 void Backup::FinishSqlite() {

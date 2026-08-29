@@ -1,0 +1,27 @@
+{
+    "compilerOptions": {
+        "allowJs": true,
+        "checkJs": true,
+        "strict": true,
+        "alwaysStrict": true,
+        "module": "nodenext",
+        "moduleResolution": "nodenext",
+        "target": "esnext",
+        "lib": ["esnext"],
+        "types": ["node"],
+        "declaration": true,
+        "emitDeclarationOnly": true,
+        "skipLibCheck": false,
+        "outDir": "types-gen",
+        "rootDir": "lib"
+    },
+    "include": [
+        "lib/sqlite3.js",
+        "lib/promises.js",
+        "lib/trace.js",
+        "lib/augment.d.ts",
+        "lib/native.d.ts",
+        "lib/pool.js",
+        "lib/worker.js"
+    ]
+}

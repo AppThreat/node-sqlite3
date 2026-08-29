@@ -8,10 +8,36 @@
 #include "database.h"
 #include "statement.h"
 #include "backup.h"
+#include "session.h"
+#include "blob.h"
 
 using namespace node_sqlite3;
 
 namespace {
+
+// setRowFactoryGenerator(fn): installs the JS half of the row builder.
+//
+// The generator takes (columnNames, arrayShape) and returns a function that
+// builds one row from its arguments — see makeRowFactory in lib/sqlite3.js.
+// It lives in JS so the generated source is escaped by JSON.stringify rather
+// than by a hand-rolled C++ escaper, and so a realm that forbids code
+// generation from strings fails in one catchable place.
+Napi::Value SetRowFactoryGenerator(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (info.Length() < 1 || !info[0].IsFunction()) {
+        Napi::TypeError::New(env, "setRowFactoryGenerator requires a function")
+            .ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+    auto* addon = env.GetInstanceData<Database::AddonData>();
+    if (addon == NULL) return env.Undefined();
+    if (addon->row_factory_generator != NULL) {
+        napi_delete_reference(env, addon->row_factory_generator);
+        addon->row_factory_generator = NULL;
+    }
+    napi_create_reference(env, info[0], 1, &addon->row_factory_generator);
+    return env.Undefined();
+}
 
 Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
     Napi::HandleScope scope(env);
@@ -19,6 +45,18 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
     Database::Init(env, exports);
     Statement::Init(env, exports);
     Backup::Init(env, exports);
+    Session::Init(env, exports);
+    ChangesetIter::Init(env, exports);
+    Blob::Init(env, exports);
+
+    exports.Set("setRowFactoryGenerator",
+        Napi::Function::New(env, SetRowFactoryGenerator));
+    exports.Set("invertChangeset",
+        Napi::Function::New(env, InvertChangeset));
+    exports.Set("concatChangeset",
+        Napi::Function::New(env, ConcatChangeset));
+    exports.Set("iterateChangeset",
+        Napi::Function::New(env, IterateChangeset));
 
     exports.DefineProperties({
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_READONLY, OPEN_READONLY)
@@ -28,6 +66,9 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_URI, OPEN_URI)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_SHAREDCACHE, OPEN_SHAREDCACHE)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_PRIVATECACHE, OPEN_PRIVATECACHE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_NOMUTEX, OPEN_NOMUTEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_MEMORY, OPEN_MEMORY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_EXRESCODE, OPEN_EXRESCODE)
         DEFINE_CONSTANT_STRING(exports, SQLITE_VERSION, VERSION)
 #ifdef SQLITE_SOURCE_ID
         DEFINE_CONSTANT_STRING(exports, SQLITE_SOURCE_ID, SOURCE_ID)
@@ -62,6 +103,86 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_RANGE, RANGE)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_NOTADB, NOTADB)
 
+        // Extended result codes (Deliverable 02). Enabled per connection by
+        // sqlite3_extended_result_codes() in Work_Open; err.code carries the
+        // extended name and err.primaryCode the primary one.
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ERROR_MISSING_COLLSEQ, ERROR_MISSING_COLLSEQ)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ERROR_RETRY, ERROR_RETRY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ERROR_SNAPSHOT, ERROR_SNAPSHOT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ERROR_RESERVESIZE, ERROR_RESERVESIZE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ERROR_KEY, ERROR_KEY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ERROR_UNABLE, ERROR_UNABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_READ, IOERR_READ)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_SHORT_READ, IOERR_SHORT_READ)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_WRITE, IOERR_WRITE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_FSYNC, IOERR_FSYNC)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_DIR_FSYNC, IOERR_DIR_FSYNC)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_TRUNCATE, IOERR_TRUNCATE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_FSTAT, IOERR_FSTAT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_UNLOCK, IOERR_UNLOCK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_RDLOCK, IOERR_RDLOCK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_DELETE, IOERR_DELETE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_BLOCKED, IOERR_BLOCKED)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_NOMEM, IOERR_NOMEM)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_ACCESS, IOERR_ACCESS)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_CHECKRESERVEDLOCK, IOERR_CHECKRESERVEDLOCK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_LOCK, IOERR_LOCK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_CLOSE, IOERR_CLOSE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_DIR_CLOSE, IOERR_DIR_CLOSE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_SHMOPEN, IOERR_SHMOPEN)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_SHMSIZE, IOERR_SHMSIZE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_SHMLOCK, IOERR_SHMLOCK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_SHMMAP, IOERR_SHMMAP)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_SEEK, IOERR_SEEK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_DELETE_NOENT, IOERR_DELETE_NOENT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_MMAP, IOERR_MMAP)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_GETTEMPPATH, IOERR_GETTEMPPATH)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_CONVPATH, IOERR_CONVPATH)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_VNODE, IOERR_VNODE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_AUTH, IOERR_AUTH)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_BEGIN_ATOMIC, IOERR_BEGIN_ATOMIC)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_COMMIT_ATOMIC, IOERR_COMMIT_ATOMIC)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_ROLLBACK_ATOMIC, IOERR_ROLLBACK_ATOMIC)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_DATA, IOERR_DATA)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_CORRUPTFS, IOERR_CORRUPTFS)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_IN_PAGE, IOERR_IN_PAGE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_BADKEY, IOERR_BADKEY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IOERR_CODEC, IOERR_CODEC)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_LOCKED_SHAREDCACHE, LOCKED_SHAREDCACHE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_LOCKED_VTAB, LOCKED_VTAB)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_BUSY_RECOVERY, BUSY_RECOVERY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_BUSY_SNAPSHOT, BUSY_SNAPSHOT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_BUSY_TIMEOUT, BUSY_TIMEOUT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CANTOPEN_NOTEMPDIR, CANTOPEN_NOTEMPDIR)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CANTOPEN_ISDIR, CANTOPEN_ISDIR)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CANTOPEN_FULLPATH, CANTOPEN_FULLPATH)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CANTOPEN_CONVPATH, CANTOPEN_CONVPATH)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CANTOPEN_DIRTYWAL, CANTOPEN_DIRTYWAL)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CANTOPEN_SYMLINK, CANTOPEN_SYMLINK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CORRUPT_VTAB, CORRUPT_VTAB)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CORRUPT_SEQUENCE, CORRUPT_SEQUENCE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CORRUPT_INDEX, CORRUPT_INDEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_READONLY_RECOVERY, READONLY_RECOVERY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_READONLY_CANTLOCK, READONLY_CANTLOCK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_READONLY_ROLLBACK, READONLY_ROLLBACK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_READONLY_DBMOVED, READONLY_DBMOVED)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_READONLY_CANTINIT, READONLY_CANTINIT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_READONLY_DIRECTORY, READONLY_DIRECTORY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ABORT_ROLLBACK, ABORT_ROLLBACK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_CHECK, CONSTRAINT_CHECK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_COMMITHOOK, CONSTRAINT_COMMITHOOK)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_FOREIGNKEY, CONSTRAINT_FOREIGNKEY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_FUNCTION, CONSTRAINT_FUNCTION)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_NOTNULL, CONSTRAINT_NOTNULL)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_PRIMARYKEY, CONSTRAINT_PRIMARYKEY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_TRIGGER, CONSTRAINT_TRIGGER)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_UNIQUE, CONSTRAINT_UNIQUE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_VTAB, CONSTRAINT_VTAB)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_ROWID, CONSTRAINT_ROWID)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_PINNED, CONSTRAINT_PINNED)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CONSTRAINT_DATATYPE, CONSTRAINT_DATATYPE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_AUTH_USER, AUTH_USER)
+
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_LIMIT_LENGTH, LIMIT_LENGTH)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_LIMIT_SQL_LENGTH, LIMIT_SQL_LENGTH)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_LIMIT_COLUMN, LIMIT_COLUMN)
@@ -74,6 +195,83 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_LIMIT_VARIABLE_NUMBER, LIMIT_VARIABLE_NUMBER)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_LIMIT_TRIGGER_DEPTH, LIMIT_TRIGGER_DEPTH)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_LIMIT_WORKER_THREADS, LIMIT_WORKER_THREADS)
+
+        // Authorizer action codes and decisions (Deliverable 07). The
+        // codes collide numerically with result codes (SQLITE_INSERT is
+        // 18) but never under these names; OK is the result-code OK.
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_INDEX, CREATE_INDEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_TABLE, CREATE_TABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_TEMP_INDEX, CREATE_TEMP_INDEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_TEMP_TABLE, CREATE_TEMP_TABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_TEMP_TRIGGER, CREATE_TEMP_TRIGGER)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_TEMP_VIEW, CREATE_TEMP_VIEW)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_TRIGGER, CREATE_TRIGGER)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_VIEW, CREATE_VIEW)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DELETE, DELETE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_INDEX, DROP_INDEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_TABLE, DROP_TABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_TEMP_INDEX, DROP_TEMP_INDEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_TEMP_TABLE, DROP_TEMP_TABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_TEMP_TRIGGER, DROP_TEMP_TRIGGER)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_TEMP_VIEW, DROP_TEMP_VIEW)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_TRIGGER, DROP_TRIGGER)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_VIEW, DROP_VIEW)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_INSERT, INSERT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_PRAGMA, PRAGMA)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_READ, READ)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_SELECT, SELECT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_TRANSACTION, TRANSACTION)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_UPDATE, UPDATE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ATTACH, ATTACH)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DETACH, DETACH)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ALTER_TABLE, ALTER_TABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_REINDEX, REINDEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_ANALYZE, ANALYZE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CREATE_VTABLE, CREATE_VTABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DROP_VTABLE, DROP_VTABLE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_FUNCTION, FUNCTION)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_SAVEPOINT, SAVEPOINT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_RECURSIVE, RECURSIVE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DENY, DENY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_IGNORE, IGNORE)
+
+        // sqlite3_stmt_status counters (Statement#status).
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_FULLSCAN_STEP, STMTSTATUS_FULLSCAN_STEP)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_SORT, STMTSTATUS_SORT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_AUTOINDEX, STMTSTATUS_AUTOINDEX)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_VM_STEP, STMTSTATUS_VM_STEP)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_REPREPARE, STMTSTATUS_REPREPARE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_RUN, STMTSTATUS_RUN)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_FILTER_MISS, STMTSTATUS_FILTER_MISS)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_FILTER_HIT, STMTSTATUS_FILTER_HIT)
+
+        // The sqlite3_db_config subset Database#dbConfig exposes.
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_ENABLE_FKEY, DBCONFIG_ENABLE_FKEY)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_ENABLE_TRIGGER, DBCONFIG_ENABLE_TRIGGER)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_ENABLE_VIEW, DBCONFIG_ENABLE_VIEW)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, DBCONFIG_ENABLE_LOAD_EXTENSION)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_DEFENSIVE, DBCONFIG_DEFENSIVE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_WRITABLE_SCHEMA, DBCONFIG_WRITABLE_SCHEMA)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_TRUSTED_SCHEMA, DBCONFIG_TRUSTED_SCHEMA)
+
+        // sqlite3_wal_checkpoint_v2 modes (Database#checkpoint; the JS
+        // layer also accepts the mode as a string).
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHECKPOINT_PASSIVE, CHECKPOINT_PASSIVE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHECKPOINT_FULL, CHECKPOINT_FULL)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHECKPOINT_RESTART, CHECKPOINT_RESTART)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHECKPOINT_TRUNCATE, CHECKPOINT_TRUNCATE)
+
+        // Changeset conflict-handler decisions (Deliverable 08): what
+        // db.applyChangeset does when a change cannot be applied. The
+        // conflict codes below describe why the handler fired.
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_OMIT, CHANGESET_OMIT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_REPLACE, CHANGESET_REPLACE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_ABORT, CHANGESET_ABORT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_DATA, CHANGESET_DATA)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_NOTFOUND, CHANGESET_NOTFOUND)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_CONFLICT, CHANGESET_CONFLICT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_CONSTRAINT, CHANGESET_CONSTRAINT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_CHANGESET_FOREIGN_KEY, CHANGESET_FOREIGN_KEY)
     });
 
     return exports;
@@ -81,7 +279,9 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
 
 }
 
-const char* sqlite_code_string(int code) {
+// Names of the 26 primary result codes. Used directly and as the
+// code & 0xff fallback for unrecognised extended codes.
+static const char* sqlite_primary_code_string(int code) {
     switch (code) {
         case SQLITE_OK:         return "SQLITE_OK";
         case SQLITE_ERROR:      return "SQLITE_ERROR";
@@ -112,8 +312,99 @@ const char* sqlite_code_string(int code) {
         case SQLITE_NOTADB:     return "SQLITE_NOTADB";
         case SQLITE_ROW:        return "SQLITE_ROW";
         case SQLITE_DONE:       return "SQLITE_DONE";
-        default:                return "UNKNOWN";
+        default:                return NULL;
     }
+}
+
+// Maps a result code — primary or extended — to its SQLite name.
+// Extended result codes are enabled per connection (Work_Open), so step
+// failures report e.g. SQLITE_CONSTRAINT_UNIQUE rather than bare
+// SQLITE_CONSTRAINT. Unknown codes degrade to the primary name of
+// code & 0xff, then to SQLITE_UNKNOWN(<code>).
+std::string sqlite_code_string(int code) {
+    switch (code) {
+        case SQLITE_ERROR_MISSING_COLLSEQ:    return "SQLITE_ERROR_MISSING_COLLSEQ";
+        case SQLITE_ERROR_RETRY:              return "SQLITE_ERROR_RETRY";
+        case SQLITE_ERROR_SNAPSHOT:           return "SQLITE_ERROR_SNAPSHOT";
+        case SQLITE_ERROR_RESERVESIZE:        return "SQLITE_ERROR_RESERVESIZE";
+        case SQLITE_ERROR_KEY:                return "SQLITE_ERROR_KEY";
+        case SQLITE_ERROR_UNABLE:             return "SQLITE_ERROR_UNABLE";
+        case SQLITE_IOERR_READ:               return "SQLITE_IOERR_READ";
+        case SQLITE_IOERR_SHORT_READ:         return "SQLITE_IOERR_SHORT_READ";
+        case SQLITE_IOERR_WRITE:              return "SQLITE_IOERR_WRITE";
+        case SQLITE_IOERR_FSYNC:              return "SQLITE_IOERR_FSYNC";
+        case SQLITE_IOERR_DIR_FSYNC:          return "SQLITE_IOERR_DIR_FSYNC";
+        case SQLITE_IOERR_TRUNCATE:           return "SQLITE_IOERR_TRUNCATE";
+        case SQLITE_IOERR_FSTAT:              return "SQLITE_IOERR_FSTAT";
+        case SQLITE_IOERR_UNLOCK:             return "SQLITE_IOERR_UNLOCK";
+        case SQLITE_IOERR_RDLOCK:             return "SQLITE_IOERR_RDLOCK";
+        case SQLITE_IOERR_DELETE:             return "SQLITE_IOERR_DELETE";
+        case SQLITE_IOERR_BLOCKED:            return "SQLITE_IOERR_BLOCKED";
+        case SQLITE_IOERR_NOMEM:              return "SQLITE_IOERR_NOMEM";
+        case SQLITE_IOERR_ACCESS:             return "SQLITE_IOERR_ACCESS";
+        case SQLITE_IOERR_CHECKRESERVEDLOCK:  return "SQLITE_IOERR_CHECKRESERVEDLOCK";
+        case SQLITE_IOERR_LOCK:               return "SQLITE_IOERR_LOCK";
+        case SQLITE_IOERR_CLOSE:              return "SQLITE_IOERR_CLOSE";
+        case SQLITE_IOERR_DIR_CLOSE:          return "SQLITE_IOERR_DIR_CLOSE";
+        case SQLITE_IOERR_SHMOPEN:            return "SQLITE_IOERR_SHMOPEN";
+        case SQLITE_IOERR_SHMSIZE:            return "SQLITE_IOERR_SHMSIZE";
+        case SQLITE_IOERR_SHMLOCK:            return "SQLITE_IOERR_SHMLOCK";
+        case SQLITE_IOERR_SHMMAP:             return "SQLITE_IOERR_SHMMAP";
+        case SQLITE_IOERR_SEEK:               return "SQLITE_IOERR_SEEK";
+        case SQLITE_IOERR_DELETE_NOENT:       return "SQLITE_IOERR_DELETE_NOENT";
+        case SQLITE_IOERR_MMAP:               return "SQLITE_IOERR_MMAP";
+        case SQLITE_IOERR_GETTEMPPATH:        return "SQLITE_IOERR_GETTEMPPATH";
+        case SQLITE_IOERR_CONVPATH:           return "SQLITE_IOERR_CONVPATH";
+        case SQLITE_IOERR_VNODE:              return "SQLITE_IOERR_VNODE";
+        case SQLITE_IOERR_AUTH:               return "SQLITE_IOERR_AUTH";
+        case SQLITE_IOERR_BEGIN_ATOMIC:       return "SQLITE_IOERR_BEGIN_ATOMIC";
+        case SQLITE_IOERR_COMMIT_ATOMIC:      return "SQLITE_IOERR_COMMIT_ATOMIC";
+        case SQLITE_IOERR_ROLLBACK_ATOMIC:    return "SQLITE_IOERR_ROLLBACK_ATOMIC";
+        case SQLITE_IOERR_DATA:               return "SQLITE_IOERR_DATA";
+        case SQLITE_IOERR_CORRUPTFS:          return "SQLITE_IOERR_CORRUPTFS";
+        case SQLITE_IOERR_IN_PAGE:            return "SQLITE_IOERR_IN_PAGE";
+        case SQLITE_IOERR_BADKEY:             return "SQLITE_IOERR_BADKEY";
+        case SQLITE_IOERR_CODEC:              return "SQLITE_IOERR_CODEC";
+        case SQLITE_LOCKED_SHAREDCACHE:       return "SQLITE_LOCKED_SHAREDCACHE";
+        case SQLITE_LOCKED_VTAB:              return "SQLITE_LOCKED_VTAB";
+        case SQLITE_BUSY_RECOVERY:            return "SQLITE_BUSY_RECOVERY";
+        case SQLITE_BUSY_SNAPSHOT:            return "SQLITE_BUSY_SNAPSHOT";
+        case SQLITE_BUSY_TIMEOUT:             return "SQLITE_BUSY_TIMEOUT";
+        case SQLITE_CANTOPEN_NOTEMPDIR:       return "SQLITE_CANTOPEN_NOTEMPDIR";
+        case SQLITE_CANTOPEN_ISDIR:           return "SQLITE_CANTOPEN_ISDIR";
+        case SQLITE_CANTOPEN_FULLPATH:        return "SQLITE_CANTOPEN_FULLPATH";
+        case SQLITE_CANTOPEN_CONVPATH:        return "SQLITE_CANTOPEN_CONVPATH";
+        case SQLITE_CANTOPEN_DIRTYWAL:        return "SQLITE_CANTOPEN_DIRTYWAL";
+        case SQLITE_CANTOPEN_SYMLINK:         return "SQLITE_CANTOPEN_SYMLINK";
+        case SQLITE_CORRUPT_VTAB:             return "SQLITE_CORRUPT_VTAB";
+        case SQLITE_CORRUPT_SEQUENCE:         return "SQLITE_CORRUPT_SEQUENCE";
+        case SQLITE_CORRUPT_INDEX:            return "SQLITE_CORRUPT_INDEX";
+        case SQLITE_READONLY_RECOVERY:        return "SQLITE_READONLY_RECOVERY";
+        case SQLITE_READONLY_CANTLOCK:        return "SQLITE_READONLY_CANTLOCK";
+        case SQLITE_READONLY_ROLLBACK:        return "SQLITE_READONLY_ROLLBACK";
+        case SQLITE_READONLY_DBMOVED:         return "SQLITE_READONLY_DBMOVED";
+        case SQLITE_READONLY_CANTINIT:        return "SQLITE_READONLY_CANTINIT";
+        case SQLITE_READONLY_DIRECTORY:       return "SQLITE_READONLY_DIRECTORY";
+        case SQLITE_ABORT_ROLLBACK:           return "SQLITE_ABORT_ROLLBACK";
+        case SQLITE_CONSTRAINT_CHECK:         return "SQLITE_CONSTRAINT_CHECK";
+        case SQLITE_CONSTRAINT_COMMITHOOK:   return "SQLITE_CONSTRAINT_COMMITHOOK";
+        case SQLITE_CONSTRAINT_FOREIGNKEY:    return "SQLITE_CONSTRAINT_FOREIGNKEY";
+        case SQLITE_CONSTRAINT_FUNCTION:      return "SQLITE_CONSTRAINT_FUNCTION";
+        case SQLITE_CONSTRAINT_NOTNULL:       return "SQLITE_CONSTRAINT_NOTNULL";
+        case SQLITE_CONSTRAINT_PRIMARYKEY:    return "SQLITE_CONSTRAINT_PRIMARYKEY";
+        case SQLITE_CONSTRAINT_TRIGGER:       return "SQLITE_CONSTRAINT_TRIGGER";
+        case SQLITE_CONSTRAINT_UNIQUE:        return "SQLITE_CONSTRAINT_UNIQUE";
+        case SQLITE_CONSTRAINT_VTAB:          return "SQLITE_CONSTRAINT_VTAB";
+        case SQLITE_CONSTRAINT_ROWID:         return "SQLITE_CONSTRAINT_ROWID";
+        case SQLITE_CONSTRAINT_PINNED:        return "SQLITE_CONSTRAINT_PINNED";
+        case SQLITE_CONSTRAINT_DATATYPE:      return "SQLITE_CONSTRAINT_DATATYPE";
+        case SQLITE_AUTH_USER:                return "SQLITE_AUTH_USER";
+        default: break;
+    }
+
+    const char* primary = sqlite_primary_code_string(code & 0xff);
+    if (primary != NULL) return std::string(primary);
+    return "SQLITE_UNKNOWN(" + std::to_string(code) + ")";
 }
 
 const char* sqlite_authorizer_string(int type) {

@@ -1,34 +1,34 @@
-import sqlite3 from '../lib/sqlite3.js';
-import assert from 'assert';
+import assert from 'node:assert';
+import { describe, it } from 'node:test';
 
-describe('tracing', function() {
-    it('Database tracing', function(done) {
-        let db = new sqlite3.Database(':memory:');
+import sqlite3 from '../lib/sqlite3.js';
+
+describe('tracing', function () {
+    it('Database tracing', function (_t, done) {
+        const db = new sqlite3.Database(':memory:');
         let create = false;
         let select = false;
 
-        db.on('trace', function(sql) {
+        db.on('trace', function (sql) {
             if (sql.match(/^SELECT/)) {
                 assert.ok(!select);
-                assert.equal(sql, "SELECT * FROM foo");
+                assert.equal(sql, 'SELECT * FROM foo');
                 select = true;
-            }
-            else if (sql.match(/^CREATE/)) {
+            } else if (sql.match(/^CREATE/)) {
                 assert.ok(!create);
-                assert.equal(sql, "CREATE TABLE foo (id int)");
+                assert.equal(sql, 'CREATE TABLE foo (id int)');
                 create = true;
-            }
-            else {
+            } else {
                 assert.ok(false);
             }
         });
 
-        db.serialize(function() {
-            db.run("CREATE TABLE foo (id int)");
-            db.run("SELECT * FROM foo");
+        db.serialize(function () {
+            db.run('CREATE TABLE foo (id int)');
+            db.run('SELECT * FROM foo');
         });
 
-        db.close(function(err) {
+        db.close(function (err) {
             if (err) throw err;
             assert.ok(create);
             assert.ok(select);
@@ -36,32 +36,34 @@ describe('tracing', function() {
         });
     });
 
+    it('test disabling tracing #1', function (_t, done) {
+        const db = new sqlite3.Database(':memory:');
 
-    it('test disabling tracing #1', function(done) {
-        let db = new sqlite3.Database(':memory:');
-
-        db.on('trace', function(sql) {});
+        db.on('trace', function (_sql) {
+            /* no-op listener */
+        });
         db.removeAllListeners('trace');
-        db._events['trace'] = function(sql) {
+        db._events['trace'] = function (_sql) {
             assert.ok(false);
         };
 
-        db.run("CREATE TABLE foo (id int)");
+        db.run('CREATE TABLE foo (id int)');
         db.close(done);
     });
 
+    it('test disabling tracing #2', function (_t, done) {
+        const db = new sqlite3.Database(':memory:');
 
-    it('test disabling tracing #2', function(done) {
-        let db = new sqlite3.Database(':memory:');
-
-        let trace = function(sql) {};
+        const trace = function (_sql) {
+            /* no-op listener */
+        };
         db.on('trace', trace);
         db.removeListener('trace', trace);
-        db._events['trace'] = function(sql) {
+        db._events['trace'] = function (_sql) {
             assert.ok(false);
         };
 
-        db.run("CREATE TABLE foo (id int)");
+        db.run('CREATE TABLE foo (id int)');
         db.close(done);
     });
 });

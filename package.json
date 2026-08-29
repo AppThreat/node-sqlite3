@@ -1,61 +1,87 @@
 {
-  "name": "@appthreat/sqlite3",
-  "description": "Asynchronous, non-blocking SQLite3 bindings. Modern rewrite of TryGhost/node-sqlite3",
-  "version": "9.0.0",
-  "homepage": "https://github.com/AppThreat/node-sqlite3",
-  "author": "Team AppThreat <cloud@appthreat.com>",
-  "binary": {
-    "napi_versions": [10]
-  },
-  "files": [
-    "binding.gyp",
-    "deps/",
-    "lib/*.js",
-    "lib/*.d.ts",
-    "src/",
-    "prebuilds/"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/AppThreat/node-sqlite3.git"
-  },
-  "dependencies": {
-    "node-addon-api": "^8.9.2",
-    "node-gyp-build": "^4.8.0"
-  },
-  "devDependencies": {
-    "eslint": "9.39.2",
-    "mocha": "11.7.5",
-    "prebuildify": "^6.0.1"
-  },
-  "peerDependencies": {
-    "node-gyp": "12.x"
-  },
-  "peerDependenciesMeta": {
-    "node-gyp": {
-      "optional": true
+    "name": "@appthreat/sqlite3",
+    "description": "Asynchronous, non-blocking SQLite3 bindings. Modern rewrite of TryGhost/node-sqlite3",
+    "version": "9.0.0",
+    "homepage": "https://github.com/AppThreat/node-sqlite3",
+    "author": "Team AppThreat <cloud@appthreat.com>",
+    "binary": {
+        "napi_versions": [
+            10
+        ]
+    },
+    "files": [
+        "binding.gyp",
+        "deps/",
+        "lib/*.js",
+        "lib/*.d.ts",
+        "src/",
+        "prebuilds/"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/AppThreat/node-sqlite3.git"
+    },
+    "dependencies": {
+        "node-addon-api": "^8.9.2",
+        "node-gyp-build": "^4.8.0"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "2.5.10",
+        "@electron/packager": "20.3.0",
+        "@types/node": "^24.13.3",
+        "electron": "43.4.1",
+        "prebuildify": "^6.0.1",
+        "semver": "^7.8.5",
+        "tsd": "^0.33.0",
+        "typescript": "~5.9.3"
+    },
+    "peerDependencies": {
+        "node-gyp": "13.x"
+    },
+    "peerDependenciesMeta": {
+        "node-gyp": {
+            "optional": true
+        }
+    },
+    "optionalDependencies": {
+        "node-gyp": "13.x"
+    },
+    "engines": {
+        "node": ">=24",
+        "pnpm": ">=11",
+        "electron": ">=35"
+    },
+    "packageManager": "pnpm@11.21.0",
+    "scripts": {
+        "install": "node-gyp-build",
+        "install:frozen": "pnpm install --config.strict-dep-builds=true --frozen-lockfile --package-import-method copy",
+        "prebuild": "prebuildify --napi --strip",
+        "rebuild": "node-gyp rebuild",
+        "lint": "biome check --write",
+        "lint:check": "biome check",
+        "lint:errors": "biome check --diagnostic-level=error",
+        "lint:jsdoc": "node contrib/check-jsdoc.js",
+        "test": "node test/support/createdb.js && node tools/check-no-only.js && node tools/run-tests.mjs",
+        "test:electron": "node test/support/createdb.js && node tools/check-no-only.js && node test/electron/run.mjs suite && node test/electron/run.mjs main",
+        "test:electron:asar": "node test/electron/asar.mjs",
+        "bench": "node --expose-gc bench/index.js",
+        "bench:compare": "node --expose-gc bench/index.js --compare --baseline bench/baseline.json",
+        "bench:update": "node --expose-gc bench/index.js --write-baseline",
+        "gen-types": "node tools/gen-types.js",
+        "test:types": "tsd && tsc --noEmit -p tsconfig.check.json",
+        "test:matrix": "node tools/test-matrix.mjs"
+    },
+    "license": "BSD-3-Clause",
+    "keywords": [
+        "sql",
+        "sqlite",
+        "sqlite3",
+        "database"
+    ],
+    "type": "module",
+    "main": "./lib/sqlite3.js",
+    "types": "./lib/sqlite3.d.ts",
+    "tsd": {
+        "directory": "types"
     }
-  },
-  "optionalDependencies": {
-    "node-gyp": "12.x"
-  },
-  "engines": {
-    "node": ">=24"
-  },
-  "scripts": {
-    "install": "node-gyp-build",
-    "prebuild": "prebuildify --napi --strip",
-    "rebuild": "node-gyp rebuild",
-    "test": "node test/support/createdb.js && mocha -R spec --timeout 480000"
-  },
-  "license": "BSD-3-Clause",
-  "keywords": [
-    "sql",
-    "sqlite",
-    "sqlite3",
-    "database"
-  ],
-  "type": "module",
-  "main": "./lib/sqlite3.js",
-  "types": "./lib/sqlite3.d.ts"
 }

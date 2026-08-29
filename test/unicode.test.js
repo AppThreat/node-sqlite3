@@ -1,16 +1,20 @@
+import assert from 'node:assert';
+import { after, before, describe, it } from 'node:test';
+
 import sqlite3 from '../lib/sqlite3.js';
-import assert from 'assert';
 
-describe('unicode', function() {
-    let first_values = [],
-        trailing_values = [],
-        chars = [],
-        subranges = new Array(2),
-        len = subranges.length,
-        db,
-        i;
+describe('unicode', function () {
+    const first_values = [];
+    const trailing_values = [];
+    const _chars = [];
+    const subranges = new Array(2);
+    const len = subranges.length;
+    let db;
+    let i;
 
-    before(function(done) { db = new sqlite3.Database(':memory:', done); });
+    before(function (_t, done) {
+        db = new sqlite3.Database(':memory:', done);
+    });
 
     for (i = 0x20; i < 0x80; i++) {
         first_values.push(i);
@@ -37,28 +41,47 @@ describe('unicode', function() {
     }
 
     function random_choice(arr) {
-        return arr[Math.random() * arr.length | 0];
+        return arr[(Math.random() * arr.length) | 0];
     }
 
     function random_utf8() {
-        let first = random_choice(first_values);
+        const first = random_choice(first_values);
 
         if (first < 0x80) {
             return String.fromCharCode(first);
-        } else if (first < 0xe0) {
-            return String.fromCharCode((first & 0x1f) << 0x6 | random_choice(trailing_values) & 0x3f);
-        } else if (first == 0xe0) {
-            return String.fromCharCode(((first & 0xf) << 0xc) | ((random_choice(subranges[0]) & 0x3f) << 6) | random_choice(trailing_values) & 0x3f);
-        } else if (first == 0xed) {
-            return String.fromCharCode(((first & 0xf) << 0xc) | ((random_choice(subranges[1]) & 0x3f) << 6) | random_choice(trailing_values) & 0x3f);
-        } else if (first < 0xf0) {
-            return String.fromCharCode(((first & 0xf) << 0xc) | ((random_choice(trailing_values) & 0x3f) << 6) | random_choice(trailing_values) & 0x3f);
+        }
+        if (first < 0xe0) {
+            return String.fromCharCode(
+                ((first & 0x1f) << 0x6) |
+                    (random_choice(trailing_values) & 0x3f),
+            );
+        }
+        if (first === 0xe0) {
+            return String.fromCharCode(
+                ((first & 0xf) << 0xc) |
+                    ((random_choice(subranges[0]) & 0x3f) << 6) |
+                    (random_choice(trailing_values) & 0x3f),
+            );
+        }
+        if (first === 0xed) {
+            return String.fromCharCode(
+                ((first & 0xf) << 0xc) |
+                    ((random_choice(subranges[1]) & 0x3f) << 6) |
+                    (random_choice(trailing_values) & 0x3f),
+            );
+        }
+        if (first < 0xf0) {
+            return String.fromCharCode(
+                ((first & 0xf) << 0xc) |
+                    ((random_choice(trailing_values) & 0x3f) << 6) |
+                    (random_choice(trailing_values) & 0x3f),
+            );
         }
     }
 
     function randomString() {
-        let str = '',
-            i;
+        let str = '';
+        let i;
 
         for (i = Math.random() * 300; i > 0; i--) {
             str += random_utf8();
@@ -67,10 +90,9 @@ describe('unicode', function() {
         return str;
     }
 
-
     // Generate random data.
-    let data = [];
-    let length = Math.floor(Math.random() * 1000) + 200;
+    const data = [];
+    const length = Math.floor(Math.random() * 1000) + 200;
     for (let i = 0; i < length; i++) {
         data.push(randomString());
     }
@@ -78,14 +100,14 @@ describe('unicode', function() {
     let inserted = 0;
     let retrieved = 0;
 
-    it('should create the table', function(done) {
-        db.run("CREATE TABLE foo (id int, txt text)", done);
+    it('should create the table', function (_t, done) {
+        db.run('CREATE TABLE foo (id int, txt text)', done);
     });
 
-    it('should insert all values', function(done) {
-        let stmt = db.prepare("INSERT INTO foo VALUES(?, ?)");
+    it('should insert all values', function (_t, done) {
+        const stmt = db.prepare('INSERT INTO foo VALUES(?, ?)');
         for (let i = 0; i < data.length; i++) {
-            stmt.run(i, data[i], function(err) {
+            stmt.run(i, data[i], function (err) {
                 if (err) throw err;
                 inserted++;
             });
@@ -93,8 +115,8 @@ describe('unicode', function() {
         stmt.finalize(done);
     });
 
-    it('should retrieve all values', function(done) {
-        db.all("SELECT txt FROM foo ORDER BY id", function(err, rows) {
+    it('should retrieve all values', function (_t, done) {
+        db.all('SELECT txt FROM foo ORDER BY id', function (err, rows) {
             if (err) throw err;
 
             for (let i = 0; i < rows.length; i++) {
@@ -105,10 +127,12 @@ describe('unicode', function() {
         });
     });
 
-    it('should have inserted and retrieved the correct amount', function() {
+    it('should have inserted and retrieved the correct amount', function () {
         assert.equal(inserted, length);
         assert.equal(retrieved, length);
     });
 
-    after(function(done) { db.close(done); });
+    after(function (_t, done) {
+        db.close(done);
+    });
 });

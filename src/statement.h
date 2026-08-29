@@ -10,6 +10,7 @@
 #include <napi.h>
 #include <uv.h>
 
+#include "convert.h"
 #include "database.h"
 #include "threading.h"
 
@@ -17,118 +18,69 @@ using namespace Napi;
 
 namespace node_sqlite3 {
 
-namespace Values {
-    struct Field {
-        inline Field(unsigned short _index, unsigned short _type = SQLITE_NULL) :
-            type(_type), index(_index) {}
-        inline Field(const char* _name, unsigned short _type = SQLITE_NULL) :
-            type(_type), index(0), name(_name) {}
-
-        unsigned short type;
-        unsigned short index;
-        std::string name;
-
-        virtual ~Field() = default;
-    };
-
-    struct Integer : Field {
-        template <class T> inline Integer(T _name, int64_t val) :
-            Field(_name, SQLITE_INTEGER), value(val) {}
-        int64_t value;
-        virtual ~Integer() override = default;
-    };
-
-    struct Float : Field {
-        template <class T> inline Float(T _name, double val) :
-            Field(_name, SQLITE_FLOAT), value(val) {}
-        double value;
-        virtual ~Float() override = default;
-    };
-
-    struct Text : Field {
-        template <class T> inline Text(T _name, size_t len, const char* val) :
-            Field(_name, SQLITE_TEXT), value(val, len) {}
-        std::string value;
-        virtual ~Text() override = default;
-    };
-
-    struct Blob : Field {
-        template <class T> inline Blob(T _name, size_t len, const void* val) :
-                Field(_name, SQLITE_BLOB), length(len) {
-            value = new char[len];
-            assert(value != nullptr);
-            memcpy(value, val, len);
-        }
-        inline virtual ~Blob() override {
-            delete[] value;
-        }
-        int length;
-        char* value;
-    };
-
-    typedef Field Null;
-}
-
-// A converted result cell: a flat value type instead of a per-cell heap
-// object. TEXT payload and BLOB bytes live in `str` (binary-safe).
-struct Cell {
-    unsigned short type = SQLITE_NULL;
-    int64_t integer = 0;
-    double real = 0.;
-    std::string str;
-
-    Cell() = default;
-    explicit Cell(unsigned short t) : type(t) {}
-    Cell(const Cell&) = default;
-    Cell(Cell&&) = default;
-    Cell& operator=(const Cell&) = default;
-    Cell& operator=(Cell&&) = default;
-};
-
-typedef std::vector<Cell> Row;
-typedef std::vector<Row> Rows;
-typedef std::vector<std::unique_ptr<Values::Field>> Parameters;
-
-// Result column names captured from a prepared statement, shared by every
-// row of one batch instead of being stored per cell.
-//
-// The shape is fixed for one execution: sqlite3_prepare_v2 may re-prepare
-// transparently behind sqlite3_step() when the schema changed, but it keeps
-// the original result columns. Capturing once per call therefore stays
-// correct without relying on the names surviving across calls.
-struct Columns {
-    std::vector<std::string> names;
-
-    // Populates the names on first use. Called on the thread that steps the
-    // statement, once per execution.
-    inline void EnsureLoaded(sqlite3_stmt* stmt) {
-        if (!names.empty()) return;
-        int cols = sqlite3_column_count(stmt);
-        names.reserve(cols);
-        for (int i = 0; i < cols; i++) {
-            const char* name = sqlite3_column_name(stmt, i);
-            names.emplace_back(name != NULL ? name : "");
-        }
-    }
-};
-
 
 
 class Statement : public Napi::ObjectWrap<Statement> {
 public:
+    // Row shape requested from the synchronous read paths. SYNC_ROW_OBJECT
+    // is the historical default (plain objects, result-column order,
+    // last-duplicate-wins); SYNC_ROW_ARRAY is the bulk-reader opt-in
+    // (`{ rowMode: 'array' }`), which skips the per-cell property stores
+    // entirely — napi_set_element on a pre-sized array has no shape to
+    // transition, which is what makes it the fastest row we can build.
+    enum SyncRowMode {
+        SYNC_ROW_OBJECT = 0,
+        SYNC_ROW_ARRAY = 1,
+    };
+
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
     static Napi::Value New(const Napi::CallbackInfo& info);
+
+    // Cross-class argument validation (e.g. "is this a Statement?"),
+    // against this env's constructor — see Database::HasInstanceIn.
+    static inline bool HasInstance(Napi::Value val) {
+        return Database::HasInstanceIn(val,
+            &Database::AddonData::statement_ctor);
+    }
+
+    friend class Database;
+
+    // Runs the finalize work of an original finalize baton (directly, or
+    // via the deferred wrappers below).
+    struct Baton;
+    static void FinishFinalizeBaton(Baton* baton);
 
     struct Baton {
         napi_async_work request = NULL;
         Statement* stmt;
         Napi::FunctionReference callback;
         Parameters parameters;
+        // True when the call site passed a bind argument at all (possibly
+        // an empty array/object). False means "re-step with the previous
+        // bindings", which must skip the parameter-count check.
+        bool bind_supplied = false;
 
         Baton(Statement* stmt_, Napi::Function cb_) : stmt(stmt_) {
             stmt->Ref();
             callback.Reset(cb_, 1);
         }
+
+        // Delivers `error` to whichever callback settles this call, used
+        // by CleanQueue when the statement is torn down with work still
+        // queued. Returns false when the call has no callback to settle,
+        // so the caller can fall back to an 'error' event. For most calls
+        // that callback is `callback`; each() overrides this, because
+        // there `callback` is the per-row callback and firing it would
+        // hand the caller a phantom row.
+        virtual bool Fail(Napi::Value error) {
+            Napi::Function cb = callback.Value();
+            if (cb.IsEmpty() || !cb.IsFunction()) return false;
+            Napi::Value argv[] = { error };
+            // A throwing callback still counts as settled: it ran.
+            TRY_CATCH_CALL(stmt->Value(), cb, 1, argv, true);
+            return true;
+        }
+
         virtual ~Baton() {
             parameters.clear();
             if (request) napi_delete_async_work(stmt->Env(), request);
@@ -161,6 +113,19 @@ public:
         virtual ~RowsBaton() override = default;
     };
 
+    // fetch(count, ...): like all(), but steps at most `count` rows so a
+    // pull-based iterator can apply backpressure. The statement is not
+    // reset between fetches; the cursor keeps its position.
+    struct FetchBaton : RowsBaton {
+        FetchBaton(Statement* stmt_, Napi::Function cb_) :
+            RowsBaton(stmt_, cb_), count(1), done(false) {}
+        int count;
+        // True when sqlite3_step returned SQLITE_DONE: the cursor is
+        // exhausted and only a rebind can produce more rows.
+        bool done;
+        virtual ~FetchBaton() override = default;
+    };
+
     struct Async;
 
     struct EachBaton : Baton {
@@ -169,6 +134,24 @@ public:
 
         EachBaton(Statement* stmt_, Napi::Function cb_) :
             Baton(stmt_, cb_) {}
+
+        // When each() was given a completion handler that handler settles
+        // the call, and takes (err, rowCount). Without one the per-row
+        // callback is the only thing the caller passed, so the error goes
+        // there instead — never to both, and never a row-shaped call with
+        // no error.
+        virtual bool Fail(Napi::Value error) override {
+            Napi::Function done = completed.Value();
+            if (!done.IsEmpty() && done.IsFunction()) {
+                Napi::Value argv[] = {
+                    error, Napi::Number::New(error.Env(), 0)
+                };
+                TRY_CATCH_CALL(stmt->Value(), done, 2, argv, true);
+                return true;
+            }
+            return Baton::Fail(error);
+        }
+
         virtual ~EachBaton() override {
             completed.Reset();
         }
@@ -183,7 +166,7 @@ public:
         }
         virtual ~PrepareBaton() override {
             stmt->Unref();
-            if (!db->IsOpen() && db->IsLocked()) {
+            if (db->IsClosed()) {
                 // The database handle was closed before the statement could be
                 // prepared.
                 stmt->Finalize_();
@@ -197,6 +180,26 @@ public:
         Call(Work_Callback cb_, Baton* baton_) : callback(cb_), baton(baton_) {};
         Work_Callback callback;
         Baton* baton;
+    };
+
+    // Deferral wrappers for the main-thread finalize paths (see
+    // Database::MayBlockOnWorkerRoundTrip): they carry the original work
+    // through the database's exclusive queue so the sqlite3_finalize runs
+    // on this thread only once no worker can hold the connection mutex.
+    struct DeferredFinalizeBaton : Database::Baton {
+        Statement::Baton* inner;
+        DeferredFinalizeBaton(Database* db_, Statement::Baton* inner_) :
+                Baton(db_, Napi::Function()), inner(inner_) {}
+        virtual ~DeferredFinalizeBaton() override {
+            delete inner;
+        }
+    };
+
+    struct HandleFinalizeBaton : Database::Baton {
+        sqlite3_stmt* handle;
+        HandleFinalizeBaton(Database* db_, sqlite3_stmt* handle_) :
+                Baton(db_, Napi::Function()), handle(handle_) {}
+        virtual ~HandleFinalizeBaton() override = default;
     };
 
     struct Async {
@@ -236,9 +239,11 @@ public:
 
     Statement(const Napi::CallbackInfo& info);
 
-    ~Statement() {
-        if (!finalized) Finalize_();
-    }
+    // Finalize-on-GC safety net: tears down a collected statement that
+    // was never finalized. Runs in the ObjectWrap finalizer, so it must
+    // not call into JS; see the definition in statement.cc for why each
+    // step is safe there.
+    ~Statement();
 
     WORK_DEFINITION(Bind)
     WORK_DEFINITION(Get)
@@ -246,6 +251,7 @@ public:
     WORK_DEFINITION(All)
     WORK_DEFINITION(Each)
     WORK_DEFINITION(Reset)
+    WORK_DEFINITION(Fetch)
 
     Napi::Value Finalize_(const Napi::CallbackInfo& info);
 
@@ -273,6 +279,57 @@ public:
     Napi::Value RunSync(const Napi::CallbackInfo& info);
     Napi::Value AllSync(const Napi::CallbackInfo& info);
 
+    // Mode-aware accessors for the result of the last run(). lastID throws
+    // a RangeError in 'number' mode when the rowid is not a safe integer;
+    // lastIDBigInt is exact in every mode. changes is always a safe number.
+    Napi::Value GetLastID(const Napi::CallbackInfo& info);
+    Napi::Value GetLastIDBigInt(const Napi::CallbackInfo& info);
+    Napi::Value GetChanges(const Napi::CallbackInfo& info);
+
+    // True once the statement has been finalized: explicitly, after a
+    // failed prepare, or by the GC safety net. Operations on a finalized
+    // statement fail with SQLITE_MISUSE.
+    Napi::Value FinalizedGetter(const Napi::CallbackInfo& info);
+
+    // --- Introspection (Deliverable 07). readonly/parameterCount/
+    // parameterNames/columns serve a snapshot taken once, under the
+    // connection mutex, so the accessors never touch the sqlite3_stmt*
+    // and cannot race a stepping worker or a round-tripping JS callback.
+    // The sqlite3_stmt result shape does not change across a transparent
+    // re-prepare, so the snapshot holds for the statement's lifetime.
+    // status() reads live counters and takes the mutex instead, refusing
+    // while a JS round trip could hold it.
+    //
+    // Taking the snapshot and publishing it are deliberately separate.
+    // The async prepare runs on a libuv worker, and the accessors run on
+    // the JS thread: had the worker written the accessor-visible fields
+    // directly, a getter called during the prepare window would walk a
+    // std::vector mid-push_back — a dangling read, not merely a stale
+    // one. So SnapshotMetadata() (preparing thread, mutex held) fills
+    // pending_meta, and PublishMetadata() (JS thread only) moves it into
+    // place. The napi async-work completion that calls PublishMetadata()
+    // is ordered after the worker, so the move needs no atomics.
+    struct ColumnMeta {
+        std::string name;
+        std::string decltype_;  // empty = none (expression/alias columns)
+        std::string database;   // SQLITE_ENABLE_COLUMN_METADATA only
+        std::string table;
+        std::string origin;
+    };
+    struct Metadata {
+        bool readonly = false;
+        int param_count = 0;
+        std::vector<std::string> param_names;  // "" entries: unnamed (?)
+        std::vector<ColumnMeta> columns;
+    };
+    void SnapshotMetadata();
+    void PublishMetadata();
+    Napi::Value ReadonlyGetter(const Napi::CallbackInfo& info);
+    Napi::Value ParameterCountGetter(const Napi::CallbackInfo& info);
+    Napi::Value ParameterNamesGetter(const Napi::CallbackInfo& info);
+    Napi::Value ColumnsGetter(const Napi::CallbackInfo& info);
+    Napi::Value Status(const Napi::CallbackInfo& info);
+
 protected:
     static void Work_BeginPrepare(Database::Baton* baton);
     static void Work_Prepare(napi_env env, void* data);
@@ -286,13 +343,105 @@ protected:
 
     template <class T> inline std::unique_ptr<Values::Field> BindParameter(const Napi::Value source, T pos);
     template <class T> T* Bind(const Napi::CallbackInfo& info, int start = 0, int end = -1);
-    bool Bind(Parameters&& parameters);
+    // The bind-argument shapes (one array / N positional / one named
+    // object), shared by Bind<T> (into a Baton, for the queued async
+    // paths) and called directly by the synchronous fast paths, which
+    // have no Baton to fill. Returns false with a pending exception on
+    // unsupported values or a malformed shape.
+    bool ParseBindArguments(const Napi::CallbackInfo& info, int start,
+        int last, Parameters* parameters);
+    bool Bind(Parameters&& parameters, bool supplied);
+
+    // The synchronous counterpart of ParseBindArguments + Bind: applies the
+    // call's bind arguments straight onto the statement, with no
+    // Parameters vector and no heap Values::Field per parameter.
+    //
+    // Accepts the same three argument shapes, performs the same arity and
+    // named-parameter checks, produces the same error text, and leaves the
+    // statement in the same state on failure. The asynchronous paths keep
+    // the Field route: they read the arguments on the JS thread and apply
+    // them on a worker, so there the materialisation is the hand-off.
+    bool BindArgumentsDirect(const Napi::CallbackInfo& info, int start,
+        int last, bool supplied);
 
     static void GetRow(Row* row, sqlite3_stmt* stmt, Columns* columns);
     // Rebuilds the rooted JS key strings if `columns` differs from the set
     // they were built from. Call once per batch, before RowToJS.
     void SyncColumnKeys(Napi::Env env, const Columns& columns);
     Napi::Value RowToJS(Napi::Env env, Row* row);
+
+    // The scopeless core of RowToJS, and the asynchronous counterpart of
+    // ConvertCurrentRow: converts one already-materialised Row into the
+    // caller's HandleScope. Returns false when the 'number'-mode RangeError
+    // left a pending exception. Callers must store `*out` into a rooted JS
+    // object before their scope closes.
+    bool ConvertCellRow(Napi::Env env, Row* row,
+        const std::vector<napi_value>& keys, napi_value* out);
+
+    // Converts a whole materialised result set into a JS array, resolving
+    // the column keys once and opening one HandleScope per batch of rows
+    // rather than one per row.
+    //
+    // This is the shared tail of every asynchronous read completion
+    // (all/fetch, and their promise forms). Those paths must materialise
+    // Cells — the rows are read on a worker thread and converted later on
+    // the JS thread — but the *conversion* is a plain synchronous pass and
+    // has no reason to cost more per row than the synchronous paths do.
+    //
+    // Returns false when a row raised the RangeError, leaving it pending
+    // for the caller to deliver to the callback.
+    bool CellRowsToJS(Napi::Env env, Rows& rows, const Columns& columns,
+        Napi::Array* out);
+    // The synchronous counterpart of RowToJS: builds the row object from
+    // the live statement, with no intermediate Row. Requires the column
+    // keys to have been synced for the current result shape. `row_mode`
+    // picks the row shape (object or array); the array shape never reads
+    // `keys`.
+    Napi::Value CurrentRowToJS(Napi::Env env,
+        const std::vector<napi_value>& keys, int row_mode = SYNC_ROW_OBJECT);
+
+    // The scopeless core of CurrentRowToJS: converts the current row into
+    // the caller's HandleScope and reports via the return value whether it
+    // completed (false = the 'number'-mode RangeError left a pending
+    // exception). Callers must store `*out` into a rooted JS object before
+    // their scope closes — which the synchronous paths do immediately,
+    // into the result array they are building.
+    bool ConvertCurrentRow(Napi::Env env, const std::vector<napi_value>& keys,
+        int row_mode, int cols, napi_value* out);
+    // Resolves the cached column-key references into raw napi_values once
+    // per call, so a multi-row read does not re-dereference them per cell.
+    void ResolveColumnKeys(std::vector<napi_value>* out);
+
+    // Returns the compiled row factory for the current result shape, or
+    // NULL when this build/realm/shape cannot use one (see
+    // AddonData::row_factory_generator, and kMaxFactoryColumns). Compiled
+    // on first use per shape and dropped whenever the column keys are
+    // rebuilt, so a mid-stream re-prepare cannot reuse a stale shape.
+    napi_value RowFactoryForShape(Napi::Env env, int row_mode);
+    // Drops the compiled factories. Called from the two places that
+    // invalidate the column keys.
+    void ResetRowFactories(Napi::Env env);
+
+    // Builds one row by calling the shape's factory with the cells as
+    // arguments — one napi_call_function instead of one V8 store per
+    // column. `cells` must already hold `cols` converted values.
+    bool CallRowFactory(Napi::Env env, napi_value factory,
+        const std::vector<napi_value>& cells, int cols, napi_value* out);
+
+    // Above this column count the generated function is not worth it (and
+    // approaches V8's parameter limit): those shapes keep the store loop.
+    static const int kMaxFactoryColumns = 256;
+
+    // Compiled factories for this statement's current result shape,
+    // indexed by SyncRowMode. NULL until first used for that mode.
+    napi_ref row_factory_[2] = { NULL, NULL };
+    // Converts an int64 cell/rowid according to the database's integer
+    // mode. Throws a RangeError in 'number' mode for unsafe values;
+    // callers must check env.IsExceptionPending() afterwards.
+    Napi::Value Int64ToJS(Napi::Env env, sqlite3_int64 value, const std::string& what);
+    // Stores the result of a completed run() for the lastID/lastIDBigInt/
+    // changes accessors.
+    void RecordRunResult(sqlite3_int64 id, int changes);
     void Schedule(Work_Callback callback, Baton* baton);
     void Process();
     void CleanQueue();
@@ -302,14 +451,21 @@ protected:
     // so sqlite can be driven from the main thread without racing the
     // worker pool or breaking FIFO ordering.
     bool IdleForInline();
+    // The synchronous methods' shared safety gate: not finalized, fully
+    // idle, no JavaScript collation or progress handler that would have to
+    // run on the thread blocked inside SQLite. Throws; false means the
+    // caller must return env.Null().
+    bool SyncGate(Napi::Env env);
     // Throws the pending status/message as a JS error with errno/code.
     void ThrowStatementError(Napi::Env env);
-    // Shared gate + argument extraction for the sync methods. Returns a
-    // prepared baton or NULL after throwing.
-    template <class T> T* BindSync(const Napi::CallbackInfo& info);
+
+    void FailQueue(Napi::Value error, bool emit_if_unhandled = true);
+
 
 protected:
-    Database* db;
+    // NULL when the constructor threw before validation completed; every
+    // destructor path gates on it.
+    Database* db = NULL;
 
     sqlite3_stmt* _handle = NULL;
     int status = SQLITE_OK;
@@ -317,9 +473,11 @@ protected:
     bool locked = true;
     bool finalized = false;
 
-    // Lazily-created persistent keys for the run() result properties.
-    Napi::Reference<Napi::String> key_last_id;
-    Napi::Reference<Napi::String> key_changes;
+    // Result of the most recent run(), exposed through the lastID,
+    // lastIDBigInt and changes accessors.
+    sqlite3_int64 last_insert_id = 0;
+    int last_changes = 0;
+    bool has_run_result = false;
 
     // Payloads of the currently SQLITE_STATIC-bound text/blob parameters.
     // Owned until the next rebind or finalize so sqlite never sees a
@@ -330,6 +488,25 @@ protected:
     // they were built from so a schema change can invalidate them.
     std::vector<std::string> column_keys_source;
     std::vector<Napi::Reference<Napi::String>> column_keys;
+
+    // Shape tracking for the synchronous read paths' key cache: a sync
+    // call re-reads the live column names only when the statement's shape
+    // has moved (transparent re-prepare counter or column count changed).
+    // One sqlite3_stmt_status call per call replaces the fresh heap
+    // vector<string> of names the old per-call Columns captured.
+    void SyncColumnKeysLive(Napi::Env env);
+    Columns sync_columns;
+    bool sync_keys_valid = false;
+    int sync_keys_reprepares = -1;
+    int sync_keys_cols = -1;
+
+    // Introspection snapshot. pending_meta is written by the preparing
+    // thread; meta and meta_valid are touched only by the JS thread, and
+    // meta_valid gates the accessors (the async prepare window leaves
+    // them undefined). See the note above PublishMetadata().
+    Metadata pending_meta;
+    Metadata meta;
+    bool meta_valid = false;
 
     std::queue<Call*> queue;
     std::string message;

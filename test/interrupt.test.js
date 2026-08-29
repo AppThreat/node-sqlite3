@@ -1,28 +1,31 @@
-import sqlite3 from '../lib/sqlite3.js';
-import assert from 'assert';
+import assert from 'node:assert';
+import { describe, it } from 'node:test';
 
-describe('interrupt', function() {
-    it('should interrupt queries', function(done) {
+import sqlite3 from '../lib/sqlite3.js';
+
+describe('interrupt', function () {
+    it('should interrupt queries', function (_t, done) {
         let interrupted = false;
         let saved = null;
 
-        let db = new sqlite3.Database(':memory:', function() {
+        const db = new sqlite3.Database(':memory:', function () {
             db.serialize();
 
             let setup = 'create table t (n int);';
             for (let i = 0; i < 8; i += 1) {
-                setup += 'insert into t values (' + i + ');';
+                setup += `insert into t values (${i});`;
             }
 
-            db.exec(setup, function(err) {
+            db.exec(setup, function (err) {
                 if (err) {
                     return done(err);
                 }
 
-                let query = 'select last.n ' +
-          'from t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t as last';
+                const query =
+                    'select last.n ' +
+                    'from t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t,t as last';
 
-                db.each(query, function(err) {
+                db.each(query, function (err) {
                     if (err) {
                         saved = err;
                     } else if (!interrupted) {
@@ -31,49 +34,56 @@ describe('interrupt', function() {
                     }
                 });
 
-                db.close(function() {
+                db.close(function () {
                     if (saved) {
-                        assert.equal(saved.message, 'SQLITE_INTERRUPT: interrupted');
+                        assert.equal(
+                            saved.message,
+                            'SQLITE_INTERRUPT: interrupted',
+                        );
                         assert.equal(saved.errno, sqlite3.INTERRUPT);
                         assert.equal(saved.code, 'SQLITE_INTERRUPT');
                         done();
                     } else {
-                        done(new Error('Completed query without error, but expected error'));
+                        done(
+                            new Error(
+                                'Completed query without error, but expected error',
+                            ),
+                        );
                     }
                 });
             });
         });
     });
 
-    it('should throw if interrupt is called before open', function(done) {
-        let db = new sqlite3.Database(':memory:');
+    it('should throw if interrupt is called before open', function (_t, done) {
+        const db = new sqlite3.Database(':memory:');
 
-        assert.throws(function() {
+        assert.throws(function () {
             db.interrupt();
-        }, (/Database is not open/));
+        }, /Database is not open/);
 
         db.close();
         done();
     });
 
-    it('should throw if interrupt is called after close', function(done) {
-        let db = new sqlite3.Database(':memory:');
+    it('should throw if interrupt is called after close', function (_t, done) {
+        const db = new sqlite3.Database(':memory:');
 
-        db.close(function() {
-            assert.throws(function() {
+        db.close(function () {
+            assert.throws(function () {
                 db.interrupt();
-            }, (/Database is not open/));
+            }, /Database is not open/);
 
             done();
         });
     });
 
-    it('should throw if interrupt is called during close', function(done) {
-        let db = new sqlite3.Database(':memory:', function() {
+    it('should throw if interrupt is called during close', function (_t, done) {
+        const db = new sqlite3.Database(':memory:', function () {
             db.close();
-            assert.throws(function() {
+            assert.throws(function () {
                 db.interrupt();
-            }, (/Database is closing/));
+            }, /Database is closing/);
             done();
         });
     });

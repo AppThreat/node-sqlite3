@@ -34,3 +34,6 @@ package-lock.json
 yarn.lock
 prebuilds
 somefile
+
+# types-gen: scratch declaration emit (gen-types copies into lib/)
+/types-gen/

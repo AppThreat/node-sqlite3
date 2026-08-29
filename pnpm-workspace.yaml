@@ -1,0 +1,37 @@
+blockExoticSubdeps: true
+lockfileIncludeTarballUrl: true
+minimumReleaseAge: '4320' # 3 days, in hours — supply-chain control
+minimumReleaseAgeExclude:
+  - '@appthreat/*'
+optimisticRepeatInstall: true
+preferSymlinkedExecutables: false
+strictDepBuilds: true
+# Enforce trust-evidence downgrades across the whole tree. The temporary
+# trustPolicyIgnoreAfter window that D15 added for mocha's chokidar went
+# away with mocha in Deliverable 12.
+trustPolicy: no-downgrade
+# Exact-version exceptions for tsd's (Deliverable 04) legacy jest-era
+# dependency chain: these four predate npm provenance and their publishers
+# never adopted it, so no-downgrade flags them forever. Pinned to
+# package@version — each is the latest release inside the range tsd
+# resolves, so any drift to a different version re-triggers the block
+# rather than being silently covered.
+trustPolicyExclude:
+  - 'read-pkg-up@7.0.1'
+  - 'read-pkg@5.2.0'
+  - 'normalize-package-data@2.5.0'
+  - 'semver@5.7.2'
+
+# pnpm 11 no longer reads the `pnpm` field in package.json; overrides and
+# built-dependency policy live here instead, even in a single-package repo.
+#
+# onlyBuiltDependencies names the dependencies whose install scripts may
+# run. electron (Deliverable 10, devDependency only) downloads its
+# platform binary in a postinstall — without this entry strictDepBuilds
+# fails the install. Pinned exactly in package.json, so the download is
+# reproducible. @biomejs/biome (Deliverable 12) ships its platform
+# binaries as plain optionalDependencies with no install script, so it
+# needs no entry here. strictDepBuilds fails the install and names
+# anything blocked, so a needed entry cannot be missed silently.
+onlyBuiltDependencies:
+  - electron

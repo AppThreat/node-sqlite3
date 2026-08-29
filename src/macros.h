@@ -1,16 +1,13 @@
 #ifndef NODE_SQLITE3_SRC_MACROS_H
 #define NODE_SQLITE3_SRC_MACROS_H
 
-const char* sqlite_code_string(int code);
+#include <string>
+
+std::string sqlite_code_string(int code);
 const char* sqlite_authorizer_string(int type);
 #include <vector>
 
-// TODO: better way to work around StringConcat?
 #include <napi.h>
-inline Napi::String StringConcat(Napi::Value str1, Napi::Value str2) {
-  return Napi::String::New(str1.Env(), str1.As<Napi::String>().Utf8Value() +
-                    str2.As<Napi::String>().Utf8Value() );
-}
 
 // A Napi substitute IsInt32()
 inline bool OtherIsInt(Napi::Number source) {
@@ -98,20 +95,19 @@ inline bool OtherIsInt(Napi::Number source) {
     Napi::PropertyDescriptor::Value(#name, Napi::String::New(env, constant),   \
         static_cast<napi_property_attributes>(napi_enumerable | napi_configurable)),
 
+// Builds the SqliteError value. `msg` is a UTF-8 const char*/std::string:
+// composing the message in C++ avoids the old three-pass UTF-8
+// round-trip through Napi::String (encode-decode-decode-encode) that
+// StringConcat used to force on every error construction.
 #define EXCEPTION(msg, errno, name)                                            \
     Napi::Value name = Napi::Error::New(env,                                   \
-        StringConcat(                                                          \
-            StringConcat(                                                      \
-                Napi::String::New(env, sqlite_code_string(errno)),             \
-                Napi::String::New(env, ": ")                                   \
-            ),                                                                 \
-            (msg)                                                              \
-        ).Utf8Value()                                                          \
-    ).Value();                                                                 \
+        std::string(sqlite_code_string(errno)) + ": " + (msg)).Value();        \
     Napi::Object name ##_obj = name.As<Napi::Object>();                        \
     (name ##_obj).Set( Napi::String::New(env, "errno"), Napi::Number::New(env, errno)); \
     (name ##_obj).Set( Napi::String::New(env, "code"),                         \
-        Napi::String::New(env, sqlite_code_string(errno)));
+        Napi::String::New(env, sqlite_code_string(errno)));                    \
+    (name ##_obj).Set( Napi::String::New(env, "primaryCode"),                  \
+        Napi::String::New(env, sqlite_code_string((errno) & 0xff)));
 
 
 #define EMIT_EVENT(obj, argc, argv)                                            \
@@ -202,12 +198,36 @@ inline bool OtherIsInt(Napi::Number source) {
     type* baton = static_cast<type*>(data);                                    \
     Backup* backup = baton->backup;
 
+// Declares the guard that performs the end-of-call bookkeeping on every
+// exit path from a Work_After* handler, including TRY_CATCH_CALL's early
+// return when a JS callback throws. See Backup::CallGuard. Declared at
+// the top of the handler, like STATEMENT_END().
 #define BACKUP_END()                                                           \
-    assert(backup->locked);                                                    \
-    assert(backup->db->pending);                                               \
-    backup->locked = false;                                                    \
-    backup->db->pending--;                                                     \
-    backup->Process();                                                         \
-    backup->db->Process();
+    Backup::CallGuard backup_call_guard__(backup);
+
+// Async-completion teardown guard (Deliverable 09). A terminated worker
+// has its remaining async-work completions delivered while the isolate
+// unwinds; there every JS-entering napi call — including
+// node-addon-api's checked error path — is fatal. Reference management
+// (delete/unref) still succeeds, so the baton is destroyed normally by
+// the unique_ptr this macro returns through; only the JS delivery is
+// skipped. `false` because an async completion enters with no exception
+// pending on a healthy env, so a refused probe here means the isolate is
+// terminating (see Database::EnvCannotRunJs). Placed after the baton's
+// unique_ptr so the early return still frees it.
+//
+// This is an entry check, so it does not cover a termination that lands
+// *inside* a handler — a completion already converting rows can still
+// take the process down. Measured, five runs each way: one query in
+// flight at terminate() aborts with 134 without this guard and exits 0
+// with it; several queued completions still abort, exactly as they did
+// before the guard existed. Closing that residue needs status-checked
+// napi calls throughout the handlers rather than node-addon-api's
+// checked helpers, whose failure path is itself a JS call — which is why
+// the failure escalates to FATAL instead of raising an exception.
+#define AFTER_WORK_TEARDOWN_GUARD(baton)                                       \
+    if (Database::EnvCannotRunJs(e, false)) {                                  \
+        return;                                                                \
+    }
 
 #endif
