@@ -1,0 +1,19 @@
+types/consumer.check.ts
+  s_53c53caf6953a3::t_7cff51bb99a059 61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d5ac9db510a3b676785269fc2a7189c2b960610f",
+  "prompts": {},
+  "sessions": {
+    "s_53c53caf6953a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8b52fd60-c91d-49a2-8b79-83a28e32f39f",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
