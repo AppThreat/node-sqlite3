@@ -1,5 +1,6 @@
 // Consumer-side compile checks under strict + node16 resolution,
-// complementing the tsd assertions: `await using` disposal, async
+// complementing the type-identity assertions in sqlite3.check.ts:
+// `await using` disposal, async
 // iteration, generic propagation, and the negatives the marshalling
 // rules promise (unsupported bind types, invalid configure literals).
 // Any line marked @ts-expect-error MUST fail; the file fails to compile

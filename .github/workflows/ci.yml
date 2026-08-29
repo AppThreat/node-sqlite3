@@ -36,10 +36,10 @@ jobs:
       - name: JSDoc completeness (hard fail)
         run: pnpm run lint:jsdoc
 
-  # Type declarations: tsd assertions plus a strict/node16 consumer
-  # compile, then a regeneration diff proving the committed .d.ts files
-  # match the JSDoc and the hand-written declarations. No native build
-  # is involved — gen-types only typechecks lib/*.js.
+  # Type declarations: type-identity assertions plus a strict/node16
+  # consumer compile, then a regeneration diff proving the committed .d.ts
+  # files match the JSDoc and the hand-written declarations. No native
+  # build is involved — gen-types only typechecks lib/*.js.
   types:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
@@ -53,7 +53,7 @@ jobs:
           scope: '@appthreat'
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Type tests (tsd + strict/node16 consumer)
+      - name: Type tests (type-identity + strict/node16 consumer)
         run: pnpm run test:types
       - name: Regenerated declarations must match the committed ones
         run: |
