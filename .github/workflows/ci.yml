@@ -58,7 +58,7 @@ jobs:
       - name: Regenerated declarations must match the committed ones
         run: |
           pnpm run gen-types
-          git diff --exit-code -- lib/sqlite3.d.ts lib/promises.d.ts lib/trace.d.ts
+          git diff --exit-code -- lib/sqlite3.d.ts lib/promises.d.ts lib/trace.d.ts lib/pool.d.ts
 
 
   # Fast test feedback via a dev rebuild instead of a full prebuild.
