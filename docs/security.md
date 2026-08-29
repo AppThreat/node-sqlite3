@@ -30,15 +30,15 @@ Node 24 and 26 it exists only under `--permission`; there is no
 `isEnabled()` method), every open path checks the target against the
 process's allowances before the native open is scheduled:
 
-| Path | Checks |
-|---|---|
-| Read-only open (`OPEN_READONLY`) | `fs.read` for the file |
-| Writable open (anything else) | `fs.read` + `fs.write` for the file, **and** `fs.write` for its directory — SQLite creates the `-journal`, `-wal` and `-shm` files beside the database, so a writable open that cannot write the directory cannot work. Grant it with `--allow-fs-write="<dir>/*"`, which covers the file and its sidecars. |
-| `''` (private temporary database) | `fs.write` for the temp directory — `''` is a real on-disk database under `os.tmpdir()`, not a special in-memory name. |
-| `ATTACH 'x' AS y` (SQL) | A native authorizer gate denies `SQLITE_ATTACH` unless the target is allowlisted via `configure('attachPaths', [...])`. `VACUUM INTO 'x'` fires the same internal `ATTACH` action, so one gate covers both SQL-level paths to the filesystem. |
-| `db.backup('x')` | The destination (or source, in the full form) is opened natively; it is checked like a writable open. |
-| `db.loadExtension(x)` | Refused unless allowlisted — see below. |
-| `:memory:` | No filesystem; no checks. (The URI memory spellings count as in-memory only on a connection opened with `sqlite3.OPEN_URI`; without that flag SQLite reads `file:…` as an ordinary filename.) |
+| Path                              | Checks                                                                                                                                                                                                                                                                                                      |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read-only open (`OPEN_READONLY`)  | `fs.read` for the file                                                                                                                                                                                                                                                                                      |
+| Writable open (anything else)     | `fs.read` + `fs.write` for the file, **and** `fs.write` for its directory — SQLite creates the `-journal`, `-wal` and `-shm` files beside the database, so a writable open that cannot write the directory cannot work. Grant it with `--allow-fs-write="<dir>/*"`, which covers the file and its sidecars. |
+| `''` (private temporary database) | `fs.write` for the temp directory — `''` is a real on-disk database under `os.tmpdir()`, not a special in-memory name.                                                                                                                                                                                      |
+| `ATTACH 'x' AS y` (SQL)           | A native authorizer gate denies `SQLITE_ATTACH` unless the target is allowlisted via `configure('attachPaths', [...])`. `VACUUM INTO 'x'` fires the same internal `ATTACH` action, so one gate covers both SQL-level paths to the filesystem.                                                               |
+| `db.backup('x')`                  | The destination (or source, in the full form) is opened natively; it is checked like a writable open.                                                                                                                                                                                                       |
+| `db.loadExtension(x)`             | Refused unless allowlisted — see below.                                                                                                                                                                                                                                                                     |
+| `:memory:`                        | No filesystem; no checks. (The URI memory spellings count as in-memory only on a connection opened with `sqlite3.OPEN_URI`; without that flag SQLite reads `file:…` as an ordinary filename.)                                                                                                               |
 
 A refusal is an `ERR_ACCESS_DENIED`-shaped error (`code`, `permission`,
 `resource`) whose message names the path, the scope and a flag that
@@ -94,8 +94,8 @@ same class of operation `--allow-addons` gates. Under the permission
 model it is refused unless the exact path was declared:
 
 ```js
-db.configure('extensionPolicy', { allow: ['/abs/path/ext.so'] });
-await db.loadExtension('/abs/path/ext.so');
+db.configure("extensionPolicy", { allow: ["/abs/path/ext.so"] });
+await db.loadExtension("/abs/path/ext.so");
 ```
 
 Every allowlisted path must be `fs.read`-permitted. Without the
@@ -142,24 +142,24 @@ SQLite's file parsing have existed. The one-option recipe:
 
 ```js
 const db = await sqlite3.open(path, {
-    mode: sqlite3.OPEN_READONLY,
-    untrusted: true,
+  mode: sqlite3.OPEN_READONLY,
+  untrusted: true,
 });
 ```
 
 applies:
 
-| Switch | Value | Why |
-|---|---|---|
-| `SQLITE_DBCONFIG_DEFENSIVE` | on | SQLite refuses out-of-band mutations (direct `sqlite_master` writes and similar). |
-| `SQLITE_DBCONFIG_TRUSTED_SCHEMA` | off | Schema objects are treated as untrusted: dangerous constructs in a hostile schema are not honoured. |
-| `SQLITE_DBCONFIG_WRITABLE_SCHEMA` | off | `PRAGMA writable_schema` becomes a no-op; the classic tamper (`UPDATE sqlite_master …`) hits SQLite's hard protection. On a plain connection that tamper succeeds — verified by probe; that contrast is the point of the option. |
-| extension loading | permanently disabled | `loadExtension` refuses; `configure('extensionPolicy', …)` throws. |
-| `SQLITE_LIMIT_LENGTH` | 64 MiB | bounds one hostile record/blob (default 1 GiB). |
-| `SQLITE_LIMIT_SQL_LENGTH` | 1 MiB | bounds compiled SQL (default 1 GiB). |
-| `SQLITE_LIMIT_EXPR_DEPTH` | 100 | bounds parser recursion (default 1000). |
-| `SQLITE_LIMIT_VDBE_OP` | 25 000 | bounds one statement's program (default 250 M). |
-| `SQLITE_LIMIT_ATTACHED` | 0 | no ATTACH at all, behind the deny-all authorizer gate. |
+| Switch                            | Value                | Why                                                                                                                                                                                                                              |
+| --------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SQLITE_DBCONFIG_DEFENSIVE`       | on                   | SQLite refuses out-of-band mutations (direct `sqlite_master` writes and similar).                                                                                                                                                |
+| `SQLITE_DBCONFIG_TRUSTED_SCHEMA`  | off                  | Schema objects are treated as untrusted: dangerous constructs in a hostile schema are not honoured.                                                                                                                              |
+| `SQLITE_DBCONFIG_WRITABLE_SCHEMA` | off                  | `PRAGMA writable_schema` becomes a no-op; the classic tamper (`UPDATE sqlite_master …`) hits SQLite's hard protection. On a plain connection that tamper succeeds — verified by probe; that contrast is the point of the option. |
+| extension loading                 | permanently disabled | `loadExtension` refuses; `configure('extensionPolicy', …)` throws.                                                                                                                                                               |
+| `SQLITE_LIMIT_LENGTH`             | 64 MiB               | bounds one hostile record/blob (default 1 GiB).                                                                                                                                                                                  |
+| `SQLITE_LIMIT_SQL_LENGTH`         | 1 MiB                | bounds compiled SQL (default 1 GiB).                                                                                                                                                                                             |
+| `SQLITE_LIMIT_EXPR_DEPTH`         | 100                  | bounds parser recursion (default 1000).                                                                                                                                                                                          |
+| `SQLITE_LIMIT_VDBE_OP`            | 25 000               | bounds one statement's program (default 250 M).                                                                                                                                                                                  |
+| `SQLITE_LIMIT_ATTACHED`           | 0                    | no ATTACH at all, behind the deny-all authorizer gate.                                                                                                                                                                           |
 
 This is one option standing in for a page of SQLite hardening lore;
 it is still **not** a sandbox for hostile SQL you run deliberately —
@@ -221,7 +221,7 @@ npm install @appthreat/sqlite3 --build-from-source
 ```
 
 `GYP_DEFINES` rather than `--sqlite=…` on the command line: node-gyp 13
-forwards everything after `--` to gyp as build-*file* names, so the flag
+forwards everything after `--` to gyp as build-_file_ names, so the flag
 form fails configure with `gyp: --sqlite=/usr not found`.
 
 Confirm it really is SQLCipher — a wrong key must fail:

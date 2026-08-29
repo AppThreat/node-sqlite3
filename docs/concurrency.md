@@ -10,7 +10,7 @@ looks concurrent, and which tool to reach for. Everything here is about
 opposite. It makes the connection's **queue strictly FIFO**: while it is
 in effect, every call through the database queue (statements' prepares,
 `exec`, `close`, hook registrations…) waits for everything queued before
-it. Under `serialize()` *every* queued call is treated as exclusive, so
+it. Under `serialize()` _every_ queued call is treated as exclusive, so
 it is full serialization of the queue, not merely an ordering of starts.
 
 `db.parallelize()` (the default) lets non-exclusive work overlap:
@@ -25,7 +25,7 @@ Two things bypass the database queue entirely:
   you hold) never pass through the database queue — they run as soon as
   the statement itself is free. This is why `db.serialize()` disables
   the statement-cache fast path (`db.run/get/all/…` fall back to fresh
-  prepares, which *do* go through the queue): a cached statement would
+  prepares, which _do_ go through the queue): a cached statement would
   overtake the serialization you asked for.
 - **The synchronous methods** (`getSync`/`runSync`/`allSync`) run on the
   JS thread and refuse to run unless the connection is fully idle — they
@@ -61,7 +61,7 @@ A single `Database` object already gives you concurrency between SQLite
 and your JS: queries step on worker threads while your code runs. For
 most services — one process, mixed read/write, no long queries — one
 connection is the right answer, and `db.transaction()` gives you
-atomicity. Long-running queries will still delay the *connection*,
+atomicity. Long-running queries will still delay the _connection_,
 because SQLite serializes work per connection.
 
 ### Several connections to one file
@@ -83,9 +83,9 @@ of these can cross a `worker_threads` boundary. What crosses cheaply is
 **the path**:
 
 ```js
-const { Worker } = require('node:worker_threads');
-const w = new Worker('./db-worker.js', {
-    workerData: { filename: 'app.db', mode: sqlite3.OPEN_READONLY },
+const { Worker } = require("node:worker_threads");
+const w = new Worker("./db-worker.js", {
+  workerData: { filename: "app.db", mode: sqlite3.OPEN_READONLY },
 });
 ```
 
@@ -107,10 +107,10 @@ const movable = bytes.slice().buffer; // plain ArrayBuffer copy
 w.postMessage({ bytes: movable }, [movable]); // transfer: zero further copies
 
 // worker
-const { workerData } = require('node:worker_threads');
+const { workerData } = require("node:worker_threads");
 const db = await sqlite3.deserializeFromBytes(
-    new Uint8Array(workerData.bytes),
-    { resizable: true },
+  new Uint8Array(workerData.bytes),
+  { resizable: true },
 );
 ```
 
@@ -130,20 +130,20 @@ query aborts with `SQLITE_INTERRUPT`.
 ### The pool
 
 ```js
-const pool = await sqlite3.pool('app.db', {
-    readers: 4,          // read-only worker connections
-    walMode: true,       // PRAGMA journal_mode = WAL (default)
-    busyTimeout: 5000,   // per connection (default)
+const pool = await sqlite3.pool("app.db", {
+  readers: 4, // read-only worker connections
+  walMode: true, // PRAGMA journal_mode = WAL (default)
+  busyTimeout: 5000, // per connection (default)
 });
 
-const rows = await pool.read('SELECT * FROM t WHERE a = ?', [1]);
-const user = await pool.get('SELECT * FROM t WHERE a = ?', [1]);
-await pool.write('INSERT INTO t (a) VALUES (?)', [1]);
+const rows = await pool.read("SELECT * FROM t WHERE a = ?", [1]);
+const user = await pool.get("SELECT * FROM t WHERE a = ?", [1]);
+await pool.write("INSERT INTO t (a) VALUES (?)", [1]);
 
 await pool.transaction(async (tx) => {
-    // pinned to the writer; tx.get sees uncommitted writes
-    const row = await tx.get('SELECT a FROM t');
-    await tx.write('UPDATE t SET a = ?', [row.a + 1]);
+  // pinned to the writer; tx.get sees uncommitted writes
+  const row = await tx.get("SELECT a FROM t");
+  await tx.write("UPDATE t SET a = ?", [row.a + 1]);
 });
 
 await pool.close(); // drains, closes, terminates — no worker survives

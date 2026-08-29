@@ -20,14 +20,14 @@ One binary per platform, built against Node-API (`napi_versions: [10]`), so a
 single binary covers every supported Node version. Linux builds carry both
 libc flavours side by side, tagged `.glibc.node` / `.musl.node`.
 
-| Platform | Files in `prebuilds/`                  |
-|----------|----------------------------------------|
-| `darwin-arm64` | `@appthreat+sqlite3.node`         |
-| `darwin-x64`   | `@appthreat+sqlite3.node`         |
+| Platform       | Files in `prebuilds/`                                           |
+| -------------- | --------------------------------------------------------------- |
+| `darwin-arm64` | `@appthreat+sqlite3.node`                                       |
+| `darwin-x64`   | `@appthreat+sqlite3.node`                                       |
 | `linux-arm64`  | `@appthreat+sqlite3.glibc.node`, `@appthreat+sqlite3.musl.node` |
 | `linux-x64`    | `@appthreat+sqlite3.glibc.node`, `@appthreat+sqlite3.musl.node` |
-| `win32-arm64`  | `@appthreat+sqlite3.node`         |
-| `win32-x64`    | `@appthreat+sqlite3.node`         |
+| `win32-arm64`  | `@appthreat+sqlite3.node`                                       |
+| `win32-x64`    | `@appthreat+sqlite3.node`                                       |
 
 The binding is resolved at **runtime**, not install time:
 `lib/sqlite3-binding.js` calls `node-gyp-build(rootDir)` on first import,
@@ -52,7 +52,7 @@ exists and runtime resolution never needs the install script.
 
 **No `onlyBuiltDependencies` entry is needed** — we ship prebuilds.
 
-The one case where you *do* need to allow the script is a **source build**:
+The one case where you _do_ need to allow the script is a **source build**:
 no prebuild for your platform, or `--build-from-source`, `--sqlite=`,
 SQLCipher, or a custom `sqlite_magic`. (Electron needs none of this: the
 Node-API prebuild loads as-is on Electron >= 35 — see
@@ -61,7 +61,7 @@ Node-API prebuild loads as-is on Electron >= 35 — see
 
 ```yaml
 onlyBuiltDependencies:
-  - '@appthreat/sqlite3'
+  - "@appthreat/sqlite3"
 ```
 
 (or run `pnpm approve-builds` and select `@appthreat/sqlite3`), then trigger
@@ -150,7 +150,7 @@ Error: No native build was found for platform=linux arch=arm64 runtime=node ...
    binding loader refuses with an error naming the floors rather than
    crashing. On Electron the default prebuild needs no rebuild at all; only
    a source build against Electron headers uses `--runtime=electron
-   --target=<version> --dist-url=https://electronjs.org/headers` (see
+--target=<version> --dist-url=https://electronjs.org/headers` (see
    [electron.md](electron.md)).
 
 ## Development
@@ -169,7 +169,7 @@ pnpm pack                             # tarball includes prebuilds/ — smoke-te
 Notes:
 
 - **Never bare `pnpm rebuild`** in this repo — that is pnpm's builtin for
-  rebuilding *dependencies*; it silently does not run this repo's `rebuild`
+  rebuilding _dependencies_; it silently does not run this repo's `rebuild`
   script. The same class of collision is why CI and docs use
   `pnpm run <script>` everywhere.
 - `pnpm-workspace.yaml` (not a `pnpm` field in `package.json` — pnpm 11 no

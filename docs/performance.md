@@ -66,13 +66,13 @@ identical connections, the `calibration/cached get (A)`/`(B)` pair) and
 prints their relative difference. That is the run's noise floor. Every
 A-vs-B ratio the harness prints is checked against it: a ratio smaller
 than the floor is marked `~ within noise floor — not a result`. In the
-runs below the floor was 0.2–4.3% on macOS; a *filtered* run without the
+runs below the floor was 0.2–4.3% on macOS; a _filtered_ run without the
 calibration pair reports no floor and suppresses all ratios, because they
 cannot be validated.
 
 The baseline comparison applies the same guard: a FAIL needs a regression
 larger than `max(10%, 2× the run's noise floor)`, so a noisy run cannot
-manufacture a regression verdict. The floor is a *within-process*
+manufacture a regression verdict. The floor is a _within-process_
 measurement, though, and cannot see whole-machine drift between two runs
 — that is corrected separately, using the same calibration pair as a
 control; see [Cross-run drift](#cross-run-drift).
@@ -91,17 +91,17 @@ how much the absolutes move.
 Both sides using the statement cache, batch of N sequential operations,
 per-op medians:
 
-| Case | async | sync | sync advantage |
-|---|---|---|---|
-| `get`, batch of 1 | 10.25 µs/op | 870 ns/op | **11.8×** |
-| `get`, batch of 10 | 10.05 µs/op | 926 ns/op | **10.9×** |
-| `get`, batch of 100 | 9.91 µs/op | 933 ns/op | **10.6×** |
-| `get`, batch of 10,000 | 9.93 µs/op | 952 ns/op | **10.4×** |
-| `run`, batch of 1 | 11.69 µs/op | 1.43 µs/op | **8.2×** |
-| `run`, batch of 10 | 10.38 µs/op | 943 ns/op | **11.0×** |
-| `run`, batch of 100 | 10.64 µs/op | 929 ns/op | **11.5×** |
-| `run`, batch of 10,000 | 10.71 µs/op | 934 ns/op | **11.5×** |
-| `all`, 20,000 rows × 4 cols | 562 ns/row | 565 ns/row | parity (within the 1.2% floor) |
+| Case                        | async       | sync       | sync advantage                 |
+| --------------------------- | ----------- | ---------- | ------------------------------ |
+| `get`, batch of 1           | 10.25 µs/op | 870 ns/op  | **11.8×**                      |
+| `get`, batch of 10          | 10.05 µs/op | 926 ns/op  | **10.9×**                      |
+| `get`, batch of 100         | 9.91 µs/op  | 933 ns/op  | **10.6×**                      |
+| `get`, batch of 10,000      | 9.93 µs/op  | 952 ns/op  | **10.4×**                      |
+| `run`, batch of 1           | 11.69 µs/op | 1.43 µs/op | **8.2×**                       |
+| `run`, batch of 10          | 10.38 µs/op | 943 ns/op  | **11.0×**                      |
+| `run`, batch of 100         | 10.64 µs/op | 929 ns/op  | **11.5×**                      |
+| `run`, batch of 10,000      | 10.71 µs/op | 934 ns/op  | **11.5×**                      |
+| `all`, 20,000 rows × 4 cols | 562 ns/row  | 565 ns/row | parity (within the 1.2% floor) |
 
 Case RMEs were 0.5–3.3%. The claim is: **8–12× for single-row
 interactive lookups and writes, flat from 1 to 10,000 operations, and
@@ -124,23 +124,23 @@ to use the synchronous calls.
 
 ### Reads (per row)
 
-| Case | median | RME |
-|---|---|---|
-| `all`: 1,000 rows × 1 col | 211 ns | 0.4% |
-| `all`: 20,000 rows × 1 col | 184 ns | 0.5% |
-| `all`: 200,000 rows × 1 col | 179 ns | 0.7% |
-| `all`: 1,000 rows × 4 cols | 603 ns | 0.8% |
-| `all`: 20,000 rows × 4 cols | 562 ns | 1.1% |
-| `all`: 200,000 rows × 4 cols | 600 ns | 0.8% |
-| `all`: 1,000 rows × 16 cols | 831 ns | 0.3% |
-| `all`: 20,000 rows × 16 cols | 803 ns | 0.9% |
-| `all`: 200,000 rows × 16 cols | 832 ns | 1.6% |
-| `all`: 20,000 × 8 cols **wide text** (~100 chars) | REJECTED | — |
-| `all`: 20,000 × 8 cols **mostly NULL** | 319 ns | 0.6% |
-| `each`: 20,000 × 4 | 464 ns | 3.5% |
-| `iterate` (`for await`): 20,000 × 4 | 658 ns | 1.0% |
-| `map`: 20,000 × 4 | 200 ns | 0.7% |
-| `get` single row (prepared statement) | 8.87 µs | 1.1% |
+| Case                                              | median   | RME  |
+| ------------------------------------------------- | -------- | ---- |
+| `all`: 1,000 rows × 1 col                         | 211 ns   | 0.4% |
+| `all`: 20,000 rows × 1 col                        | 184 ns   | 0.5% |
+| `all`: 200,000 rows × 1 col                       | 179 ns   | 0.7% |
+| `all`: 1,000 rows × 4 cols                        | 603 ns   | 0.8% |
+| `all`: 20,000 rows × 4 cols                       | 562 ns   | 1.1% |
+| `all`: 200,000 rows × 4 cols                      | 600 ns   | 0.8% |
+| `all`: 1,000 rows × 16 cols                       | 831 ns   | 0.3% |
+| `all`: 20,000 rows × 16 cols                      | 803 ns   | 0.9% |
+| `all`: 200,000 rows × 16 cols                     | 832 ns   | 1.6% |
+| `all`: 20,000 × 8 cols **wide text** (~100 chars) | REJECTED | —    |
+| `all`: 20,000 × 8 cols **mostly NULL**            | 319 ns   | 0.6% |
+| `each`: 20,000 × 4                                | 464 ns   | 3.5% |
+| `iterate` (`for await`): 20,000 × 4               | 658 ns   | 1.0% |
+| `map`: 20,000 × 4                                 | 200 ns   | 0.7% |
+| `get` single row (prepared statement)             | 8.87 µs  | 1.1% |
 
 Notes: per-row cost is flat from 20k to 200k rows (no hidden
 super-linear term). `each` beats `all` per row (no result array);
@@ -150,29 +150,29 @@ like with like.
 
 ### Marshalling (single column, 20,000 rows, `allSync`)
 
-| Value type | median/row | RME |
-|---|---|---|
-| INTEGER (mode `number`) | 162 ns | 1.1% |
-| INTEGER (mode `mixed`) | 160 ns | 0.7% |
-| INTEGER (mode `bigint`) | 168 ns | 0.5% |
-| REAL | 163 ns | 0.4% |
-| TEXT short | 188 ns | 0.8% |
-| TEXT 4 KiB | 1.01 µs | 4.6% |
-| TEXT unicode | 289 ns | 0.7% |
-| NULL | 150 ns | 0.5% |
-| BLOB 64 B | 424 ns | 2.2% |
-| BLOB 4,095 B (copy side of the boundary) | 973 ns | 1.3% |
-| BLOB 4 KiB (zero-copy side) | 988 ns | 1.7% |
-| BLOB 64 KiB × 4,096 | 5.02 µs | 0.6% |
-| BLOB 1 MiB × 256 | 52.60 µs | 0.8% |
-| blob round-trip 2,000 × 256 KiB | 96.37 µs | 0.8% |
-| blob stream 100 MiB round trip | 26.15 ms | 1.9% |
+| Value type                               | median/row | RME  |
+| ---------------------------------------- | ---------- | ---- |
+| INTEGER (mode `number`)                  | 162 ns     | 1.1% |
+| INTEGER (mode `mixed`)                   | 160 ns     | 0.7% |
+| INTEGER (mode `bigint`)                  | 168 ns     | 0.5% |
+| REAL                                     | 163 ns     | 0.4% |
+| TEXT short                               | 188 ns     | 0.8% |
+| TEXT 4 KiB                               | 1.01 µs    | 4.6% |
+| TEXT unicode                             | 289 ns     | 0.7% |
+| NULL                                     | 150 ns     | 0.5% |
+| BLOB 64 B                                | 424 ns     | 2.2% |
+| BLOB 4,095 B (copy side of the boundary) | 973 ns     | 1.3% |
+| BLOB 4 KiB (zero-copy side)              | 988 ns     | 1.7% |
+| BLOB 64 KiB × 4,096                      | 5.02 µs    | 0.6% |
+| BLOB 1 MiB × 256                         | 52.60 µs   | 0.8% |
+| blob round-trip 2,000 × 256 KiB          | 96.37 µs   | 0.8% |
+| blob stream 100 MiB round trip           | 26.15 ms   | 1.9% |
 
 The 4,095/4,096 pair straddles the zero-copy boundary in `CellToJS`
 (`src/convert.cc`): at ≥ 4096 bytes the payload moves into an external
 Buffer instead of being copied. The medians are within noise of each
 other (the copy of 4 KiB is cheap relative to the read), but the
-*stability* differs — 0.4% RME on the zero-copy side vs 3.6% on the copy
+_stability_ differs — 0.4% RME on the zero-copy side vs 3.6% on the copy
 side — and the allocation counters separate them decisively (see
 [allocation](#allocation-per-operation)). The 64 KiB and 1 MiB blob
 cases are honestly rejected: their per-sample cost is dominated by
@@ -180,17 +180,17 @@ allocator and GC behaviour that is genuinely bimodal.
 
 ### Writes
 
-| Case | median | RME |
-|---|---|---|
-| prepared `run` insert | 9.60 µs | 1.1% |
-| `db.run` prepare-per-call | 19.72 µs | 1.3% |
-| `db.run` with statement cache | 10.54 µs | 0.9% |
-| `exec` 100-statement script | 944 ns/stmt | 0.6% |
-| **1,000 inserts in one transaction (file db)** | **9.21 µs** | 0.5% |
-| 1,000 inserts autocommit (file db) | REJECTED (RME 81%; observed 175 µs–1.95 ms) | — |
+| Case                                           | median                                      | RME  |
+| ---------------------------------------------- | ------------------------------------------- | ---- |
+| prepared `run` insert                          | 9.60 µs                                     | 1.1% |
+| `db.run` prepare-per-call                      | 19.72 µs                                    | 1.3% |
+| `db.run` with statement cache                  | 10.54 µs                                    | 0.9% |
+| `exec` 100-statement script                    | 944 ns/stmt                                 | 0.6% |
+| **1,000 inserts in one transaction (file db)** | **9.21 µs**                                 | 0.5% |
+| 1,000 inserts autocommit (file db)             | REJECTED (RME 81%; observed 175 µs–1.95 ms) | —    |
 
 The transaction lever is the one case where the harness refuses to print
-the headline number, and the refusal *is* the finding: batched inserts
+the headline number, and the refusal _is_ the finding: batched inserts
 cost a stable ~9.2 µs each on a journal-backed file, while autocommit
 inserts ranged from 175 µs to 1.95 ms — **at least 23× slower at the
 fast end of its own observed range, and up to ~260× at the slow end**.
@@ -202,29 +202,29 @@ against a real file.
 
 ### Overhead
 
-| Case | median | RME |
-|---|---|---|
-| `stmt.get` × 1,000 (callback) | 7.77 µs | 0.4% |
-| `stmt.get` × 1,000 (promise) | 6.36 µs | 0.6% |
-| `db.run` cached × 1,000 (baseline) | 9.77 µs | 0.4% |
-| … + `trace` listener | 9.76 µs | 1.0% (within noise of baseline) |
-| … + `profile` listener | 9.00 µs | 1.2% (within noise of baseline) |
-| … + `commit` listener | 10.3 µs | 0.7% (1.05×, clears the floor) |
-| … + `change`+`commit` listeners | 9.91 µs | 0.6% (within noise) |
-| … after listener removal | 9.70 µs | 0.4% (structural zero confirmed) |
-| `stmt.get` × 10,000 with cancellation token | 6.11 µs | 0.2% (1.24× vs plain `get`) |
-| `get` statement-cache hit | 7.17 µs | 2.3% |
-| `get` statement-cache miss (unique SQL) | 18.8 µs | 0.8% (**2.6× slower**) |
-| `get` cache disabled (prepare per call) | 17.6 µs | 1.1% (**2.4× slower**) |
-| filter 20k rows: in SQL | 46 ns/row | 0.3% |
-| filter 20k rows: JS function per row | 18.9 µs/row | 0.9% (**~410× slower than SQL**) |
-| filter 20k rows: JS after `all()` | 224 ns/row | 0.6% |
-| JS round trip (minimal scalar) | 19.6 µs/call | 0.5% |
-| JS aggregate step | 19.0 µs/step | 0.6% |
-| JS collation | 141 µs/sorted row | 0.5% |
-| `db.transaction` wrapper (empty body) | 16.1 µs/body | 0.3% |
-| raw `BEGIN`+`COMMIT` | 13.5 µs/pair | 0.5% |
-| open+close `:memory:` connection | 21.8 µs | 0.3% |
+| Case                                        | median            | RME                              |
+| ------------------------------------------- | ----------------- | -------------------------------- |
+| `stmt.get` × 1,000 (callback)               | 7.77 µs           | 0.4%                             |
+| `stmt.get` × 1,000 (promise)                | 6.36 µs           | 0.6%                             |
+| `db.run` cached × 1,000 (baseline)          | 9.77 µs           | 0.4%                             |
+| … + `trace` listener                        | 9.76 µs           | 1.0% (within noise of baseline)  |
+| … + `profile` listener                      | 9.00 µs           | 1.2% (within noise of baseline)  |
+| … + `commit` listener                       | 10.3 µs           | 0.7% (1.05×, clears the floor)   |
+| … + `change`+`commit` listeners             | 9.91 µs           | 0.6% (within noise)              |
+| … after listener removal                    | 9.70 µs           | 0.4% (structural zero confirmed) |
+| `stmt.get` × 10,000 with cancellation token | 6.11 µs           | 0.2% (1.24× vs plain `get`)      |
+| `get` statement-cache hit                   | 7.17 µs           | 2.3%                             |
+| `get` statement-cache miss (unique SQL)     | 18.8 µs           | 0.8% (**2.6× slower**)           |
+| `get` cache disabled (prepare per call)     | 17.6 µs           | 1.1% (**2.4× slower**)           |
+| filter 20k rows: in SQL                     | 46 ns/row         | 0.3%                             |
+| filter 20k rows: JS function per row        | 18.9 µs/row       | 0.9% (**~410× slower than SQL**) |
+| filter 20k rows: JS after `all()`           | 224 ns/row        | 0.6%                             |
+| JS round trip (minimal scalar)              | 19.6 µs/call      | 0.5%                             |
+| JS aggregate step                           | 19.0 µs/step      | 0.6%                             |
+| JS collation                                | 141 µs/sorted row | 0.5%                             |
+| `db.transaction` wrapper (empty body)       | 16.1 µs/body      | 0.3%                             |
+| raw `BEGIN`+`COMMIT`                        | 13.5 µs/pair      | 0.5%                             |
+| open+close `:memory:` connection            | 21.8 µs           | 0.3%                             |
 
 The JS-function numbers are the reason a JS UDF is the wrong tool for
 row-wise work: each invocation pays a cross-thread round trip (the query
@@ -235,16 +235,16 @@ compared to what it buys.
 
 ### Concurrency
 
-| Case | median | RME |
-|---|---|---|
-| 50 concurrent queries, `parallelize()` | 232 µs/query | 0.9% |
-| 50 concurrent queries, `serialize()` | 257 µs/query | 1.0% (0.90× — within/near noise) |
-| `pool.read` round trip | 21.4 µs | 0.3% |
-| `pool.get` round trip | 20.9 µs | 0.3% |
-| `pool.write` round trip | 50.0 µs | 0.8% |
-| `pool.all` 20,000 rows (postMessage transfer) | 1.46 µs/row | 0.4% (**1.7× slower per row than local `all`**) |
-| 200 concurrent reads, pool (4 readers) | 335 µs/query | 2.0% |
-| 200 concurrent reads, single connection | 471 µs/query | 0.4% (**pool 1.4× faster under contention**) |
+| Case                                          | median       | RME                                             |
+| --------------------------------------------- | ------------ | ----------------------------------------------- |
+| 50 concurrent queries, `parallelize()`        | 232 µs/query | 0.9%                                            |
+| 50 concurrent queries, `serialize()`          | 257 µs/query | 1.0% (0.90× — within/near noise)                |
+| `pool.read` round trip                        | 21.4 µs      | 0.3%                                            |
+| `pool.get` round trip                         | 20.9 µs      | 0.3%                                            |
+| `pool.write` round trip                       | 50.0 µs      | 0.8%                                            |
+| `pool.all` 20,000 rows (postMessage transfer) | 1.46 µs/row  | 0.4% (**1.7× slower per row than local `all`**) |
+| 200 concurrent reads, pool (4 readers)        | 335 µs/query | 2.0%                                            |
+| 200 concurrent reads, single connection       | 471 µs/query | 0.4% (**pool 1.4× faster under contention**)    |
 
 `parallelize()` vs `serialize()` on one connection is nearly a wash for
 reads — a single connection serialises at the SQLite mutex anyway; the
@@ -262,20 +262,20 @@ OOM the container). Noise floor 7.2% (vs 0.2–4.3% bare-metal macOS):
 containers are noisier, and 12 cases were rejected by the RME gate
 accordingly.
 
-| Figure | arm64 macOS | arm64 Linux container | transferred? |
-|---|---|---|---|
-| `read/all` 20,000 × 1 | 225 ns/row | 223 ns/row | absolute parity (accidental) |
-| `read/all` 20,000 × 4 | 844 ns/row | 851 ns/row | absolute parity (accidental) |
-| `getSync` (cached) | 1.27 µs | 1.30 µs | sync path cost transfers |
-| async `get` (cached) | 10.0 µs | 29.7 µs | **does not**: threadpool round trip is 3× pricier in the container |
-| **sync-vs-async ratio** | **7–8×** | **22–31×** | direction yes, magnitude **no** |
-| `allSync` vs `all` (20,000 × 4) | 1.04×, within noise | 1.05×, within noise | **held** — the crossover is universal |
-| statement cache miss vs hit | 2.6× slower | miss rejected (RME 7%); disabled-vs-hit **2.3× slower** | held (via the disabled case) |
-| transaction vs autocommit (file) | ≥23× (autocommit rejected, range 175 µs–1.95 ms) | **53.5×** (autocommit stable here: 2.29 ms/insert, RME 1.3%) | direction yes, magnitude platform-dependent — real `fsync` makes the lever bigger |
-| JS round trip | 19.6 µs | 28.5 µs | direction held, absolute differs |
-| pool `all` postMessage cost | 1.7× slower/row | 1.69× slower/row | **held almost exactly** |
-| 200 concurrent reads: pool vs single | pool 1.4× faster | pool 1.47× faster | **held** |
-| node:sqlite insert advantage | 2.2× | 2.9× | roughly held |
+| Figure                               | arm64 macOS                                      | arm64 Linux container                                        | transferred?                                                                      |
+| ------------------------------------ | ------------------------------------------------ | ------------------------------------------------------------ | --------------------------------------------------------------------------------- |
+| `read/all` 20,000 × 1                | 225 ns/row                                       | 223 ns/row                                                   | absolute parity (accidental)                                                      |
+| `read/all` 20,000 × 4                | 844 ns/row                                       | 851 ns/row                                                   | absolute parity (accidental)                                                      |
+| `getSync` (cached)                   | 1.27 µs                                          | 1.30 µs                                                      | sync path cost transfers                                                          |
+| async `get` (cached)                 | 10.0 µs                                          | 29.7 µs                                                      | **does not**: threadpool round trip is 3× pricier in the container                |
+| **sync-vs-async ratio**              | **7–8×**                                         | **22–31×**                                                   | direction yes, magnitude **no**                                                   |
+| `allSync` vs `all` (20,000 × 4)      | 1.04×, within noise                              | 1.05×, within noise                                          | **held** — the crossover is universal                                             |
+| statement cache miss vs hit          | 2.6× slower                                      | miss rejected (RME 7%); disabled-vs-hit **2.3× slower**      | held (via the disabled case)                                                      |
+| transaction vs autocommit (file)     | ≥23× (autocommit rejected, range 175 µs–1.95 ms) | **53.5×** (autocommit stable here: 2.29 ms/insert, RME 1.3%) | direction yes, magnitude platform-dependent — real `fsync` makes the lever bigger |
+| JS round trip                        | 19.6 µs                                          | 28.5 µs                                                      | direction held, absolute differs                                                  |
+| pool `all` postMessage cost          | 1.7× slower/row                                  | 1.69× slower/row                                             | **held almost exactly**                                                           |
+| 200 concurrent reads: pool vs single | pool 1.4× faster                                 | pool 1.47× faster                                            | **held**                                                                          |
+| node:sqlite insert advantage         | 2.2×                                             | 2.9×                                                         | roughly held                                                                      |
 
 The lesson is exactly the one the suite was built to enforce: **ratios
 of like-against-like within one run transfer; absolute costs and
@@ -301,7 +301,7 @@ README quotes both.
   one-shot async calls (19.7 µs to 10.5 µs), because an uncached
   `db.run` prepares on the threadpool and then runs on it — two round
   trips. First call of each SQL string pays the prepare. This is the
-  opt-in cache for the *asynchronous* calls only — the synchronous ones
+  opt-in cache for the _asynchronous_ calls only — the synchronous ones
   always cache (above). The
   cache is bypassed under `serialize()` and while an exclusive operation
   (`exec`/`close`/`wait`/`loadExtension`) is queued, so cached-call
@@ -334,14 +334,14 @@ one filtered run of the suite (Node v26.7.0, darwin/arm64, same
 process, noise floor 2.0%), so every ratio is a validated same-process
 comparison. The fixture is `(INTEGER, REAL, TEXT, BLOB)` on both sides.
 
-| Case | `@appthreat/sqlite3` | `node:sqlite` | ratio |
-|---|---|---|---|
-| `get` single row (prepared) | 847 ns | 826 ns | 1.03× slower |
-| `all` 20,000 × 4 (objects) | 565 ns/row | 485 ns/row | 1.17× slower |
-| `all` 20,000 × 4 (arrays: `rowMode`/`returnArrays`) | 572 ns/row | 379 ns/row | 1.51× slower |
-| insert, `Database`-level | 934 ns | 839 ns | 1.11× slower |
-| insert, prepared statement | 723 ns | 781 ns | **1.08× faster** |
-| `exec` 100-statement script | 944 ns/stmt | 1.02 µs/stmt | **1.08× faster** |
+| Case                                                | `@appthreat/sqlite3` | `node:sqlite` | ratio            |
+| --------------------------------------------------- | -------------------- | ------------- | ---------------- |
+| `get` single row (prepared)                         | 847 ns               | 826 ns        | 1.03× slower     |
+| `all` 20,000 × 4 (objects)                          | 565 ns/row           | 485 ns/row    | 1.17× slower     |
+| `all` 20,000 × 4 (arrays: `rowMode`/`returnArrays`) | 572 ns/row           | 379 ns/row    | 1.51× slower     |
+| insert, `Database`-level                            | 934 ns               | 839 ns        | 1.11× slower     |
+| insert, prepared statement                          | 723 ns               | 781 ns        | **1.08× faster** |
+| `exec` 100-statement script                         | 944 ns/stmt          | 1.02 µs/stmt  | **1.08× faster** |
 
 The two insert rows measure different things. `node:sqlite` has only the
 prepared-statement form, and against that this package is ahead. The
@@ -350,7 +350,7 @@ up in its cache and reads `lastID` and `changes` back — see
 [Statement preparation](#statement-preparation).
 
 The read gap is almost entirely one column type. The fixture above is
-`(INTEGER, REAL, TEXT, BLOB)`; on the same four-column row *without* a
+`(INTEGER, REAL, TEXT, BLOB)`; on the same four-column row _without_ a
 BLOB this package is at parity or ahead — 0.98× on
 `(INTEGER, REAL, TEXT, TEXT)`, 0.95× on four integers — and blobs cost
 1.29×, for the reason in [BLOB columns](#blob-columns) below.
@@ -376,11 +376,11 @@ Widening the projection over one fixed query plan separates the costs
 (apsw builds SQLite 3.53.3, this package 3.53.4 — a patch-level
 confound that is small but not zero):
 
-| projection | `@appthreat/sqlite3` | apsw | ratio |
-|---|---|---|---|
-| `count(*)` (no rows built) | 1.91 ms | 1.86 ms | **1.02×** |
-| 1 column | 9.67 ms | 7.14 ms | 1.35× |
-| 6 columns | 23.73 ms | 19.78 ms | 1.20× |
+| projection                 | `@appthreat/sqlite3` | apsw     | ratio     |
+| -------------------------- | -------------------- | -------- | --------- |
+| `count(*)` (no rows built) | 1.91 ms              | 1.86 ms  | **1.02×** |
+| 1 column                   | 9.67 ms              | 7.14 ms  | 1.35×     |
+| 6 columns                  | 23.73 ms             | 19.78 ms | 1.20×     |
 
 The `count(*)` rung walks the identical index and returns one row per
 call. At **1.02× it is parity**, which rules out query execution,
@@ -392,7 +392,7 @@ ladder's slope from its intercept gives **+50 ns per row** fixed and
 cost is the gap.
 
 That cost is structural rather than a missed optimisation. CPython's C
-API lets an extension build the result object *in C*: `PyTuple_New`
+API lets an extension build the result object _in C_: `PyTuple_New`
 followed by `PyTuple_SET_ITEM` per column, which is a pointer write into
 the tuple's inline slots with no call into Python at any point. Node-API
 offers no equivalent bulk constructor, which is why rows here are built
@@ -414,7 +414,7 @@ Two consequences for calling code:
   (−1.0%, +1.6%, +2.4% across three row-heavy queries, straddling zero),
   because both shapes go through the same generated builder.
 
-Against a *different language's* driver the async API is a separate
+Against a _different language's_ driver the async API is a separate
 matter: over eight concurrent connections this package recovered 2.1×,
 while Python threads running the same work went ~5× slower on the GIL.
 Row marshalling is where a C extension is ahead; concurrency is where it
@@ -451,12 +451,12 @@ and their promise forms — which additionally open one handle scope per
 
 Measured, same process, integer columns:
 
-| | 4 columns | 16 columns |
-|---|---|---|
-| `node:sqlite` (objects) | 273 ns/row | 845 ns/row |
+|                                | 4 columns  | 16 columns |
+| ------------------------------ | ---------- | ---------- |
+| `node:sqlite` (objects)        | 273 ns/row | 845 ns/row |
 | `@appthreat/sqlite3` (objects) | 251 ns/row | 583 ns/row |
 
-Per *cell* this package converts at ~30 ns against `node:sqlite`'s
+Per _cell_ this package converts at ~30 ns against `node:sqlite`'s
 ~46–54 ns. Because the object shape now costs what the array shape
 costs, `{ rowMode: 'array' }` is no longer meaningfully faster than the
 default (557 vs 563 ns/row above, inside the noise floor); choose it
@@ -518,11 +518,11 @@ same error text through both.
 
 The same statement, four parameters, `runSync`:
 
-| shape | per call |
-| --- | --- |
-| positional — `stmt.runSync(a, b, c, d)` | 696 ns |
-| array — `stmt.runSync([a, b, c, d])` | 837 ns |
-| named — `stmt.runSync({ $a: a, … })` | 1.31 µs |
+| shape                                   | per call |
+| --------------------------------------- | -------- |
+| positional — `stmt.runSync(a, b, c, d)` | 696 ns   |
+| array — `stmt.runSync([a, b, c, d])`    | 837 ns   |
+| named — `stmt.runSync({ $a: a, … })`    | 1.31 µs  |
 
 Named binding costs about 1.9× positional, and the difference is mostly
 fixed per call rather than per parameter. It is not waste: the object's
@@ -559,7 +559,7 @@ entries, LRU), so the `Database`-level convenience forms do not prepare
 and finalize a statement per call — that costs ~5.6 µs against ~0.75 µs
 for the same query through a prepared statement. It is automatic and
 independent of `cacheStatements()`, which remains opt-in and governs
-the *asynchronous* calls only. Both caches are emptied by `close()` and
+the _asynchronous_ calls only. Both caches are emptied by `close()` and
 by every user-function registration, since a prepared statement keeps
 invoking the implementation it was compiled against.
 
@@ -576,7 +576,7 @@ more than the prepared form for reasons that are Node-API's floor rather
 than ours: reading `lastID` and `changes` back is two accessor
 crossings, and a Node-API accessor costs ~50 ns even when it returns a
 bare boolean. Collapsing them into a single native call that builds the
-result object in C++ measures *slower*, because the property stores cost
+result object in C++ measures _slower_, because the property stores cost
 more than the crossing they save.
 
 ### BLOB columns
@@ -615,7 +615,7 @@ Measured via `process.memoryUsage()` deltas around a forced GC
 (`--expose-gc`). **Counters, and what lives in them:**
 
 - `heapUsed`: JS-heap objects — row objects, strings, boxed values.
-  External buffers are *not* here.
+  External buffers are _not_ here.
 - `external`: C++ memory registered with V8, including this package's
   zero-copy blob payloads (`napi_create_external_buffer`) **and**
   copied Buffer/ArrayBuffer backing stores.
@@ -628,24 +628,24 @@ Measured via `process.memoryUsage()` deltas around a forced GC
   other counter sees. Consistently too noisy to trust (RME 69–382% in
   these runs) and published as rejected.
 
-The delta is a *retained* measurement: each case keeps exactly one
+The delta is a _retained_ measurement: each case keeps exactly one
 iteration's output reachable (dropped and GC'd before each sample), so
 the delta is what one iteration allocates, divided by its op count.
 Sample medians with RME, same treatment as time:
 
-| Case (per row/op) | heapUsed | external | arrayBuffers |
-|---|---|---|---|
-| `all` 20,000 × 1 (int) | +64 B | 0 | 0 |
-| `all` 20,000 × 4 | +312 B | +64 B | +64 B |
-| `all` 20,000 × 8 wide text | +1.1 KB | 0 | 0 |
-| `all` 20,000 × 8 mostly NULL | +128 B | 0 | 0 |
-| INTEGER `bigint` mode | +88 B | 0 | 0 |
-| REAL | +80 B | 0 | 0 |
-| TEXT 4 KiB | +4.1 KB | 0 | 0 |
-| BLOB 64 B | +264 B | +64 B | +64 B |
-| BLOB 4,095 B (**copy**) | +264 B | +4.0 KB | **+4.0 KB** |
-| BLOB 4 KiB (**zero-copy**) | +304 B | +4.0 KB | **0** |
-| BLOB 1 MiB | +306 B | +1.0 MB | 0 |
+| Case (per row/op)            | heapUsed | external | arrayBuffers |
+| ---------------------------- | -------- | -------- | ------------ |
+| `all` 20,000 × 1 (int)       | +64 B    | 0        | 0            |
+| `all` 20,000 × 4             | +312 B   | +64 B    | +64 B        |
+| `all` 20,000 × 8 wide text   | +1.1 KB  | 0        | 0            |
+| `all` 20,000 × 8 mostly NULL | +128 B   | 0        | 0            |
+| INTEGER `bigint` mode        | +88 B    | 0        | 0            |
+| REAL                         | +80 B    | 0        | 0            |
+| TEXT 4 KiB                   | +4.1 KB  | 0        | 0            |
+| BLOB 64 B                    | +264 B   | +64 B    | +64 B        |
+| BLOB 4,095 B (**copy**)      | +264 B   | +4.0 KB  | **+4.0 KB**  |
+| BLOB 4 KiB (**zero-copy**)   | +304 B   | +4.0 KB  | **0**        |
+| BLOB 1 MiB                   | +306 B   | +1.0 MB  | 0            |
 
 Readings worth keeping: the `bigint` integer mode costs +24 B/row over
 `number`/`mixed` (both 64 B — the row object dominates; `mixed` only
@@ -678,7 +678,7 @@ the artifact, promote, commit).
 ### Cross-run drift
 
 **A calibration fact learned the hard way**: comparing two quiet runs of
-the *identical binary* on the same machine moved two
+the _identical binary_ on the same machine moved two
 threadpool-dominated cases by +11–16%, while each run's own A/A noise
 floor was 0.2–4.3%. Within one process, ratios are extremely reliable;
 across processes, individual round-trip-shaped cases can move by more
@@ -689,7 +689,7 @@ The sharper lesson is about the baseline, not the method. A full
 `bench:compare` of the **unmodified** tree that produced the first
 committed baseline reported **38 FAIL / 37 WARN out of 85**. That looked
 like proof the comparison was unusable — but comparing two ordinary runs
-against *each other* gives p50 1.0% / p95 5.0% on the median across all
+against _each other_ gives p50 1.0% / p95 5.0% on the median across all
 85 cases, so the measurement reproduces fine. (`min` was tested as a
 more robust statistic and is worse: p95 8.7%. The median stays.)
 
@@ -723,7 +723,7 @@ information (either the machine drifted or your change reaches the read
 path), not something to divide away.
 
 So the advice above still stands: a single `FAIL` at the 10–15% margin
-warrants a rerun, and a *pattern* of related cases regressing together
+warrants a rerun, and a _pattern_ of related cases regressing together
 while an unrelated case stays flat (as in the deliberate-regression
 check, where the integer cases rose and the float case did not) is what
 distinguishes a real regression from run-to-run variance.

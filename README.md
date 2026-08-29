@@ -4,7 +4,7 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
 
 ![NPM Downloads](https://img.shields.io/npm/dm/%40appthreat%2Fsqlite3)
 [![Latest release](https://img.shields.io/github/release/AppThreat/node-sqlite3.svg)](https://www.npmjs.com/package/@appthreat/sqlite3)
-![Node-API v9 Badge](https://github.com/nodejs/abi-stable-node/blob/doc/assets/Node-API%20v9%20Badge.svg)
+![Node-API v9 Badge](https://github.com/nodejs/abi-stable-node/blob/doc/assets/Node-API%20v10%20Badge.svg)
 
 # Features
 
@@ -37,24 +37,24 @@ relying on a ❌ below.
 
 ## What only this package has
 
-| Capability | `@appthreat/sqlite3` | `node:sqlite` |
-|---|---|---|
-| Asynchronous API (event loop stays free) | ✅ callbacks + promises | ❌ synchronous only |
-| `async` iteration (`for await`), streams | ✅ `iterate`, `stream` | ❌ (sync `iterate` only) |
-| Worker-thread connection pool | ✅ `pool()` | ❌ |
-| Transaction helper with savepoints | ✅ `transaction()` | ❌ hand-rolled `BEGIN`/`COMMIT` |
-| Statement cache | ✅ `cacheStatements()`, implicit on sync | ❌ prepare per call |
-| Custom collations | ✅ `collation()` / `removeCollation()` | ❌ |
-| Incremental blob I/O | ✅ `openBlob()` | ❌ read/write whole values |
-| Update / commit / rollback / preupdate hooks | ✅ EventEmitter | ❌ |
-| Progress handler | ✅ `progress()` | ❌ |
-| Query cancellation | ✅ `cancellationToken()`, connection-wide | ❌ |
-| WAL checkpoint control | ✅ `checkpoint()` | ❌ |
-| Schema introspection | ✅ `tableInfo()`, `columns()`, `parameterNames` | ⚠️ `columns()` only |
-| Changeset utilities | ✅ concat / invert / iterate | ⚠️ apply + create only |
-| Backup control | ✅ handle you step yourself (`remaining`, `idle`, retry policy) | ⚠️ one-shot promise (`rate`, `progress`) |
-| Integer read modes | ✅ `number` / `mixed` / `bigint`, per connection | ⚠️ `setReadBigInts()` per statement |
-| Electron support | ✅ tested in CI, main + utility process | ⚠️ works, untested by us |
+| Capability                                   | `@appthreat/sqlite3`                                            | `node:sqlite`                            |
+| -------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------- |
+| Asynchronous API (event loop stays free)     | ✅ callbacks + promises                                         | ❌ synchronous only                      |
+| `async` iteration (`for await`), streams     | ✅ `iterate`, `stream`                                          | ❌ (sync `iterate` only)                 |
+| Worker-thread connection pool                | ✅ `pool()`                                                     | ❌                                       |
+| Transaction helper with savepoints           | ✅ `transaction()`                                              | ❌ hand-rolled `BEGIN`/`COMMIT`          |
+| Statement cache                              | ✅ `cacheStatements()`, implicit on sync                        | ❌ prepare per call                      |
+| Custom collations                            | ✅ `collation()` / `removeCollation()`                          | ❌                                       |
+| Incremental blob I/O                         | ✅ `openBlob()`                                                 | ❌ read/write whole values               |
+| Update / commit / rollback / preupdate hooks | ✅ EventEmitter                                                 | ❌                                       |
+| Progress handler                             | ✅ `progress()`                                                 | ❌                                       |
+| Query cancellation                           | ✅ `cancellationToken()`, connection-wide                       | ❌                                       |
+| WAL checkpoint control                       | ✅ `checkpoint()`                                               | ❌                                       |
+| Schema introspection                         | ✅ `tableInfo()`, `columns()`, `parameterNames`                 | ⚠️ `columns()` only                      |
+| Changeset utilities                          | ✅ concat / invert / iterate                                    | ⚠️ apply + create only                   |
+| Backup control                               | ✅ handle you step yourself (`remaining`, `idle`, retry policy) | ⚠️ one-shot promise (`rate`, `progress`) |
+| Integer read modes                           | ✅ `number` / `mixed` / `bigint`, per connection                | ⚠️ `setReadBigInts()` per statement      |
+| Electron support                             | ✅ tested in CI, main + utility process                         | ⚠️ works, untested by us                 |
 
 ## What both have
 
@@ -69,18 +69,18 @@ how you opt into `BigInt`.
 
 ## What only `node:sqlite` has
 
-| Capability | Why it matters |
-|---|---|
-| **Zero install** — built in, no compiler, no prebuild, no supply chain | Usually the deciding factor |
-| **UDFs callable from synchronous queries** | See below — a real architectural difference, not an oversight |
-| Tagged-template queries (`createTagStore`) | Ergonomic SQL literals |
-| `enableDefensive()` | Hardening for untrusted SQL |
+| Capability                                                             | Why it matters                                                |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **Zero install** — built in, no compiler, no prebuild, no supply chain | Usually the deciding factor                                   |
+| **UDFs callable from synchronous queries**                             | See below — a real architectural difference, not an oversight |
+| Tagged-template queries (`createTagStore`)                             | Ergonomic SQL literals                                        |
+| `enableDefensive()`                                                    | Hardening for untrusted SQL                                   |
 
 The UDF difference is worth understanding before choosing. `node:sqlite`
 runs SQLite on the main thread, so a JavaScript callback can run inline
 while a query is stepping. This package runs asynchronous queries on a
 worker, and a JS callback fires safely there — but calling a UDF from
-the *synchronous* fast path would mean SQLite blocking the JS thread
+the _synchronous_ fast path would mean SQLite blocking the JS thread
 that has to run the callback, which deadlocks. It refuses instead, with
 an error saying so. So: **UDFs, aggregates and window functions work on
 the async API here, not on `getSync`/`allSync`/`runSync`.** If you need
@@ -194,7 +194,7 @@ rows; `exec`/`close`/`wait` resolve `undefined`. Errors carry the v9
 `code`/`errno`/`primaryCode` triple.
 
 ```js
-const db = await sqlite3.open(":memory:");          // promise-native open
+const db = await sqlite3.open(":memory:"); // promise-native open
 await db.exec("CREATE TABLE lorem (info TEXT)");
 const { lastID } = await db.run("INSERT INTO lorem VALUES (?)", "Ipsum 1");
 const row = await db.get("SELECT * FROM lorem WHERE rowid = ?", lastID);
@@ -211,17 +211,18 @@ db.stream("SELECT * FROM big").pipe(someTransform);   // object-mode Readable
 Transactions, cancellation and `await using` disposal:
 
 ```js
-await db.transaction(async (tx) => {       // ROLLBACK on throw, nested savepoints
+await db.transaction(async (tx) => {
+  // ROLLBACK on throw, nested savepoints
   await tx.run("INSERT INTO lorem VALUES (?)", "Ipsum 2");
 });
 
-const rows = await db.all("SELECT * FROM big", { signal });  // AbortSignal:
+const rows = await db.all("SELECT * FROM big", { signal }); // AbortSignal:
 // an already-aborted signal rejects before scheduling; aborting in flight
 // interrupts the whole connection (a SQLite constraint) and rejects with
 // the signal's reason.
 
-await using db2 = await sqlite3.open("app.db");  // closed however the block exits
-await using stmt = db2.prepare("SELECT 1");      // finalized the same way
+await using db2 = await sqlite3.open("app.db"); // closed however the block exits
+await using stmt = db2.prepare("SELECT 1"); // finalized the same way
 ```
 
 `each()` stays callback-only — the async iterator is its promise-based
@@ -236,7 +237,7 @@ costs. Both keep the default asynchronous behaviour untouched.
 ### Statement cache
 
 ```js
-db.cacheStatements();        // or db.cacheStatements(16) to cap the LRU size
+db.cacheStatements(); // or db.cacheStatements(16) to cap the LRU size
 ```
 
 `run/get/all/each/map` then reuse prepared statements (LRU, keyed on the SQL
@@ -253,10 +254,10 @@ stays resident while that entry lives in the cache.
 
 ```js
 db.cacheStatements();
-const row = db.getSync("SELECT * FROM t WHERE rowid = ?", 42);   // row | undefined
-const info = db.runSync("INSERT INTO t (a) VALUES (?)", 42);     // { lastID, changes }
+const row = db.getSync("SELECT * FROM t WHERE rowid = ?", 42); // row | undefined
+const info = db.runSync("INSERT INTO t (a) VALUES (?)", 42); // { lastID, changes }
 const rows = db.allSync("SELECT * FROM t");
-const stmt = db.prepareSync("SELECT ? AS v");                    // statement-level variants
+const stmt = db.prepareSync("SELECT ? AS v"); // statement-level variants
 // Bulk-reader row shape: one array per row, values in result-column order.
 const flat = db.allSync("SELECT * FROM t", { rowMode: "array" });
 ```
@@ -308,20 +309,20 @@ something has had to wait.
 ### Integer modes
 
 ```js
-db.getSync("SELECT COUNT(*) AS n FROM t").n;   // number (default)
-db.configure("integerMode", "mixed");          // or 'number' | 'bigint'
-db.integerMode;                                // 'mixed'
+db.getSync("SELECT COUNT(*) AS n FROM t").n; // number (default)
+db.configure("integerMode", "mixed"); // or 'number' | 'bigint'
+db.integerMode; // 'mixed'
 ```
 
 Integers are stored as true 64-bit values on both the bind and the read
 path, and `BigInt` parameters bind exactly. Reads follow the configured
 mode:
 
-| Mode | INTEGER columns and `lastID` |
-|---|---|
+| Mode                 | INTEGER columns and `lastID`                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------ |
 | `'number'` (default) | `number` when safely representable, otherwise a `RangeError` — never a silently truncated double |
-| `'bigint'` | always `BigInt` |
-| `'mixed'` | `number` when safe, `BigInt` otherwise — recommended for anything touching `rowid`s |
+| `'bigint'`           | always `BigInt`                                                                                  |
+| `'mixed'`            | `number` when safe, `BigInt` otherwise — recommended for anything touching `rowid`s              |
 
 `Statement#lastIDBigInt` returns the last insert rowid as a `BigInt` in
 every mode, so `'number'`-mode code can still read a large rowid without
@@ -359,28 +360,32 @@ open flags `OPEN_NOMUTEX`, `OPEN_MEMORY` and `OPEN_EXRESCODE`.
 
 ```js
 // Scalar functions — this makes WHERE x REGEXP ? work:
-db.function('regexp', { deterministic: true },
-    (pattern, value) => new RegExp(pattern).test(value) ? 1 : 0);
+db.function("regexp", { deterministic: true }, (pattern, value) =>
+  new RegExp(pattern).test(value) ? 1 : 0,
+);
 
 // Aggregates: start() builds an accumulator, step() folds a row into it,
 // result() produces the value. Providing inverse makes it a window
 // function usable with OVER (...).
-db.aggregate('median', {
-    start: () => [],
-    step: (acc, v) => { acc.push(v); return acc; },
-    result: (acc) => {
-        acc.sort((a, b) => a - b);
-        return acc.length ? acc[acc.length >> 1] : null;
-    },
+db.aggregate("median", {
+  start: () => [],
+  step: (acc, v) => {
+    acc.push(v);
+    return acc;
+  },
+  result: (acc) => {
+    acc.sort((a, b) => a - b);
+    return acc.length ? acc[acc.length >> 1] : null;
+  },
 });
-await db.get('SELECT median(salary) AS m FROM employees');
+await db.get("SELECT median(salary) AS m FROM employees");
 
 // Collations — ORDER BY, indexes, COLLATE:
-db.collation('german', (a, b) => a.localeCompare(b, 'de'));
-await db.all('SELECT name FROM t ORDER BY name COLLATE german');
+db.collation("german", (a, b) => a.localeCompare(b, "de"));
+await db.all("SELECT name FROM t ORDER BY name COLLATE german");
 
-db.removeFunction('regexp');
-db.removeCollation('german');
+db.removeFunction("regexp");
+db.removeCollation("german");
 ```
 
 Arguments and return values use exactly the bind-marshalling rules above
@@ -407,16 +412,16 @@ while the JS thread runs your function and posts the result back.
 Measured cost (`pnpm run bench`, Apple Silicon, Node 26): **~18 µs per
 call**. Consequences, with one decimal of honesty:
 
-| Filtering 100,000 rows | Time |
-|---|---|
-| the predicate in SQL | 5 ms |
-| the predicate in JS after `all()` | 25 ms |
+| Filtering 100,000 rows                 | Time     |
+| -------------------------------------- | -------- |
+| the predicate in SQL                   | 5 ms     |
+| the predicate in JS after `all()`      | 25 ms    |
 | the predicate in a JS function per row | 1,830 ms |
 
 A JS function called per row is the wrong tool for bulk filtering —
 fetch and filter in JS (or write the predicate in SQL). A JS collation is
 even sharper: sorting 100k rows costs O(N log N) round trips (~17 s).
-Where they shine is pushing *logic* into a query — a regexp, a domain
+Where they shine is pushing _logic_ into a query — a regexp, a domain
 checksum, a custom aggregate over a bounded group.
 
 Two deliberate restrictions follow from the threading model:
@@ -446,12 +451,20 @@ the old implementation is handed back.
 // makes the pair useful for cache invalidation. The hooks are
 // observational: the commit (or rollback) has already happened when the
 // listener runs, and no return value can veto it.
-db.on('change', (type, database, table, rowid) => { /* ... */ });
-db.on('commit', () => { /* ... */ });
-db.on('rollback', () => { /* ... */ });
+db.on("change", (type, database, table, rowid) => {
+  /* ... */
+});
+db.on("commit", () => {
+  /* ... */
+});
+db.on("rollback", () => {
+  /* ... */
+});
 
 // WAL hook: fires after a commit appends frames to the WAL.
-db.on('wal', (database, pages) => { /* ... */ });
+db.on("wal", (database, pages) => {
+  /* ... */
+});
 ```
 
 A hook's native sqlite callback exists only while at least one listener
@@ -459,19 +472,17 @@ is registered — an installed-but-unused hook costs nothing. In WAL mode,
 `db.checkpoint()` is the lever for keeping the WAL bounded:
 
 ```js
-const { busy, logFrames, checkpointedFrames } =
-    await db.checkpoint({ mode: 'truncate' });
+const { busy, logFrames, checkpointedFrames } = await db.checkpoint({
+  mode: "truncate",
+});
 ```
 
 ### Sandboxing SQL with the authorizer
 
 ```js
 db.authorizer({
-    default: 'deny',
-    allow: [
-        { action: sqlite3.SELECT },
-        { action: sqlite3.READ, table: 'users' },
-    ],
+  default: "deny",
+  allow: [{ action: sqlite3.SELECT }, { action: sqlite3.READ, table: "users" }],
 });
 db.authorizer(null); // remove
 ```
@@ -518,18 +529,18 @@ service it). The token form has no such restriction.
 ### Statement and connection introspection
 
 ```js
-const stmt = await db.prepare('SELECT name AS who FROM users WHERE id = ?');
-stmt.readonly;        // true — sqlite3_stmt_readonly
-stmt.parameterCount;  // 1
-stmt.parameterNames;  // ['?1'] (null entries for positional `?`)
-stmt.columns;         // [{ name: 'who', declaredType: 'TEXT',
-                      //    database: 'main', table: 'users', origin: 'name' }]
+const stmt = await db.prepare("SELECT name AS who FROM users WHERE id = ?");
+stmt.readonly; // true — sqlite3_stmt_readonly
+stmt.parameterCount; // 1
+stmt.parameterNames; // ['?1'] (null entries for positional `?`)
+stmt.columns; // [{ name: 'who', declaredType: 'TEXT',
+//    database: 'main', table: 'users', origin: 'name' }]
 stmt.status(sqlite3.STMTSTATUS_FULLSCAN_STEP); // >0: the query scanned
-                                              // without an index
+// without an index
 
-db.changes;           // rows changed by the most recent statement (64-bit)
-db.totalChanges;      // every change since open (64-bit)
-await db.tableInfo('users');   // column metadata incl. collation, defaults
+db.changes; // rows changed by the most recent statement (64-bit)
+db.totalChanges; // every change since open (64-bit)
+await db.tableInfo("users"); // column metadata incl. collation, defaults
 await db.dbConfig(sqlite3.DBCONFIG_DEFENSIVE, true); // safe db_config switches
 ```
 
@@ -549,24 +560,24 @@ them as a changeset — a `Uint8Array` you can store, ship, or apply to
 another connection:
 
 ```js
-const session = db.session({ table: 'users' });   // or every table
-await db.run('UPDATE users SET name = ? WHERE id = ?', 'x', 1);
-const changeset = await session.changeset();      // Uint8Array
-const patchset = await session.patchset();        // new rows only, smaller
+const session = db.session({ table: "users" }); // or every table
+await db.run("UPDATE users SET name = ? WHERE id = ?", "x", 1);
+const changeset = await session.changeset(); // Uint8Array
+const patchset = await session.patchset(); // new rows only, smaller
 await session.close();
 
-await target.applyChangeset(changeset, { conflict: 'replace' });
+await target.applyChangeset(changeset, { conflict: "replace" });
 await target.applyChangeset(changeset, {
-    // the fully general form — runs per conflict:
-    conflict: (info) => (info.conflict === 'notFound' ? 'omit' : 'replace'),
-    filter: (table) => table !== 'audit',
+  // the fully general form — runs per conflict:
+  conflict: (info) => (info.conflict === "notFound" ? "omit" : "replace"),
+  filter: (table) => table !== "audit",
 });
 
 for (const op of sqlite3.iterateChangeset(changeset)) {
-    console.log(op.op, op.table, op.oldRow, op.newRow);
+  console.log(op.op, op.table, op.oldRow, op.newRow);
 }
 const inverse = sqlite3.invertChangeset(changeset); // undoes the apply
-const both = sqlite3.concatChangeset(a, b);         // a then b
+const both = sqlite3.concatChangeset(a, b); // a then b
 ```
 
 `applyChangeset` wraps the apply in one savepoint: either every change
@@ -581,8 +592,8 @@ The `'preupdate'` event fires for every write with the row's before and
 after values — the old values `change` events cannot give you:
 
 ```js
-db.on('preupdate', ({ op, table, rowid, oldRowid, oldRow, newRow }) => {
-    audit.log(op, table, oldRow, newRow);
+db.on("preupdate", ({ op, table, rowid, oldRowid, oldRow, newRow }) => {
+  audit.log(op, table, oldRow, newRow);
 });
 ```
 
@@ -598,10 +609,10 @@ The whole database as bytes — snapshotting, shipping a prebuilt
 database, fast fixtures, moving a database between threads:
 
 ```js
-const bytes = await db.serializeToBytes();        // Uint8Array snapshot
+const bytes = await db.serializeToBytes(); // Uint8Array snapshot
 const copy = await sqlite3.deserializeFromBytes(bytes, {
-    readonly: false,
-    resizable: true,
+  readonly: false,
+  resizable: true,
 });
 ```
 
@@ -619,11 +630,11 @@ Reading a 500 MB blob as one value materialises it as a single buffer;
 `openBlob` gives you a handle that streams it instead:
 
 ```js
-const blob = await db.openBlob({ table: 'files', column: 'data', rowid: 1 });
+const blob = await db.openBlob({ table: "files", column: "data", rowid: 1 });
 const chunk = new Uint8Array(65536);
-const n = await blob.read(chunk, 0);       // n bytes at blob offset 0
-await blob.write(source, 4096);            // write at an offset
-blob.size;                                 // sqlite3_blob_bytes
+const n = await blob.read(chunk, 0); // n bytes at blob offset 0
+await blob.write(source, 4096); // write at an offset
+blob.size; // sqlite3_blob_bytes
 
 await pipeline(blob.createReadStream(), fs.createWriteSink(path));
 await pipeline(fs.createReadStream(path), blob.createWriteStream());
@@ -634,7 +645,7 @@ Streams read and write in chunks (default 64 KiB), so memory stays flat
 regardless of the blob's size. Any write to the row invalidates open
 handles with `SQLITE_ABORT` (and a message saying so); an aborted handle
 cannot be reopened — close and open a fresh one — while `blob.reopen(
-rowid)` cheaply re-aims a *healthy* handle at another row. The blob
+rowid)` cheaply re-aims a _healthy_ handle at another row. The blob
 cannot grow through the handle: size the column first (e.g.
 `UPDATE ... SET data = zeroblob(n)`) and then stream into it. Writing
 through a blob handle surfaces as a `'preupdate'` delete event (the new
@@ -651,8 +662,8 @@ included version:
 (WAL mode gives real read concurrency):
 
 ```js
-const w = new Worker('./db-worker.js', {
-    workerData: { filename: 'app.db' },
+const w = new Worker("./db-worker.js", {
+  workerData: { filename: "app.db" },
 });
 ```
 
@@ -661,7 +672,7 @@ copy (`serializeToBytes()` → transfer → `deserializeFromBytes()`):
 
 ```js
 const bytes = await db.serializeToBytes();
-const movable = bytes.slice().buffer;      // plain ArrayBuffer copy
+const movable = bytes.slice().buffer; // plain ArrayBuffer copy
 w.postMessage({ bytes: movable }, [movable]);
 // worker: await sqlite3.deserializeFromBytes(new Uint8Array(bytes))
 ```
@@ -670,18 +681,18 @@ w.postMessage({ bytes: movable }, [movable]);
 its own worker; writes queue instead of racing to `SQLITE_BUSY`:
 
 ```js
-const pool = await sqlite3.pool('app.db', { readers: 4 });
+const pool = await sqlite3.pool("app.db", { readers: 4 });
 
-const rows = await pool.read('SELECT * FROM t WHERE a = ?', [1]);
-const one  = await pool.get('SELECT b FROM t WHERE a = ?', [1]);
-await pool.write('INSERT INTO t (b) VALUES (?)', ['hi']);
+const rows = await pool.read("SELECT * FROM t WHERE a = ?", [1]);
+const one = await pool.get("SELECT b FROM t WHERE a = ?", [1]);
+await pool.write("INSERT INTO t (b) VALUES (?)", ["hi"]);
 
 await pool.transaction(async (tx) => {
-    const row = await tx.get('SELECT a FROM t');   // pinned to the writer
-    await tx.write('UPDATE t SET a = ?', [row.a + 1]);
+  const row = await tx.get("SELECT a FROM t"); // pinned to the writer
+  await tx.write("UPDATE t SET a = ?", [row.a + 1]);
 });
 
-await pool.close();   // drains, closes every connection, no worker survives
+await pool.close(); // drains, closes every connection, no worker survives
 ```
 
 Queries accept `{ signal }` (cancellation crosses the thread boundary
@@ -807,7 +818,7 @@ ignoring your local `node_modules/`, `build/`, `prebuilds/` and `test/tmp/`,
 so a result does not depend on working-tree leftovers.
 
 Always use `pnpm run rebuild`, never bare `pnpm rebuild` — the latter is a
-pnpm builtin that rebuilds *dependencies*, not this repo's `rebuild` script.
+pnpm builtin that rebuilds _dependencies_, not this repo's `rebuild` script.
 See [docs/install.md](docs/install.md#development) for the full guide,
 including the stale-`prebuilds/` trap when iterating on C++.
 

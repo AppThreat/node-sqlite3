@@ -82,7 +82,7 @@ behavioural notes worth knowing up front:
   or rollback has already happened when the listener runs, and a return
   value cannot veto it. (A vetoing hook would have to block the
   committing worker thread on the JS thread.)
-- Registering the same event twice used to silently *uninstall* the
+- Registering the same event twice used to silently _uninstall_ the
   native hook (the old code toggled on every `addListener`); a second
   `db.on('change', …)` now keeps the hook installed, and removing one
   listener of several no longer stops the others from firing. The
@@ -106,7 +106,7 @@ throws instead:
 
 ```js
 db.get("SELECT some_big_rowid FROM t", (err, row) => {
-    // v9: err instanceof RangeError, message names the column and value
+  // v9: err instanceof RangeError, message names the column and value
 });
 ```
 
@@ -146,7 +146,9 @@ treated as named-parameter maps). In v9 these throw a `TypeError`
 naming the parameter index and constructor:
 
 ```js
-db.run("INSERT INTO t VALUES (?)", { a: 1 }, (err) => { /* v8: stored "[object Object]" */ });
+db.run("INSERT INTO t VALUES (?)", { a: 1 }, (err) => {
+  /* v8: stored "[object Object]" */
+});
 db.runSync("INSERT INTO t VALUES (?)", [{ a: 1 }]);
 // v9 TypeError: Cannot bind parameter 1: unsupported type Object.
 //        Serialize it explicitly (e.g. JSON.stringify) before binding.
@@ -202,7 +204,7 @@ The internal scheduling state is now exposed read-only from the native
 side and the JS-side mirrors are gone:
 
 - `db.state` is a frozen snapshot `{ open, closing, locked, serialized,
-  pending, queued }`, computed on read; the same fields are also
+pending, queued }`, computed on read; the same fields are also
   individual read-only accessors (`db.serialized`, `db.closing`, ...).
 - `db._serialized` and `db._closing` (undocumented JS-side mirrors,
   maintained by monkey-patching `serialize`/`parallelize`) **no longer
@@ -224,7 +226,7 @@ side and the JS-side mirrors are gone:
 ## Concurrent `transaction()` calls now fail loudly
 
 Nesting used to be tracked with a connection-wide counter, so a second
-transaction started *concurrently* (not nested inside the first's body)
+transaction started _concurrently_ (not nested inside the first's body)
 silently rode inside the first as a savepoint: its "commit" was a
 `RELEASE` the first transaction's rollback would have undone, and its
 work only persisted if the unrelated first transaction committed.
@@ -286,18 +288,18 @@ Everything here is additive; no v8 behaviour changed to make room.
 
 - `db.session(options?)` records changes and harvests them as
   `session.changeset()`/`patchset()` (`Uint8Array`); `db.applyChangeset(
-  bytes, { conflict, filter })` replays them inside one savepoint, and
+bytes, { conflict, filter })` replays them inside one savepoint, and
   `sqlite3.invertChangeset`/`concatChangeset`/`iterateChangeset` work on
   any changeset bytes. A session and a `'preupdate'` listener cannot
   coexist on one connection (SQLite has one preupdate hook); both
   directions fail loudly.
 - The `'preupdate'` event carries `{ op, database, table, rowid,
-  oldRowid, oldRow, newRow }` — the old row values the `'change'` event
+oldRowid, oldRow, newRow }` — the old row values the `'change'` event
   has never been able to give you.
 - `db.serializeToBytes(dbName?)` is a `Uint8Array` snapshot of the
   database. The name is deliberate: `db.serialize()` still means "run
   these statements in FIFO order". `sqlite3.deserializeFromBytes(bytes,
-  { readonly, resizable })` builds a fresh connection from bytes
+{ readonly, resizable })` builds a fresh connection from bytes
   (copied; corrupt input rejects with `SQLITE_NOTADB`).
 - `db.openBlob({ table, column, rowid, readOnly? })` returns a handle
   with `read`/`write` at offsets, `size`, `reopen(rowid)`,
@@ -333,9 +335,8 @@ surfaces as an uncaught exception exactly as before.
 The Node-API 10 prebuild loads in Electron **without any rebuild**
 (Node-API is ABI-stable across runtimes); the verified minimum is
 **Electron 35** (`engines.electron >= 35`, the first major whose
-bundled Node exposes Node-API 10). On older Electron (32–34, Node-API
-9) the load does not throw — it segfaults inside module registration —
-so `lib/sqlite3-binding.js` now checks `process.versions.napi` *before*
+bundled Node exposes Node-API 10). On older Electron (32–34, Node-API 9) the load does not throw — it segfaults inside module registration —
+so `lib/sqlite3-binding.js` now checks `process.versions.napi` _before_
 loading and throws an error naming the floors. Binding load failures
 everywhere now name the resolved package root and, when the package
 sits inside an `app.asar` archive, the `asarUnpack` configuration that

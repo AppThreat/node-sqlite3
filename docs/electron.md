@@ -11,7 +11,7 @@ rebuild, no `electron-rebuild`, no `--runtime=electron` flags.**
   a table**: the shipping prebuild was loaded in Electron 35.7.5 and 44.0.0 and
   queried in both. On Electron 34 the load does not fail cleanly — the process
   segfaults inside module registration — which is why the binding loader checks
-  `process.versions.napi` *before* the dlopen and throws an error naming the
+  `process.versions.napi` _before_ the dlopen and throws an error naming the
   floors instead.
 - Rebuilds are only ever needed for a **source build** — SQLCipher via
   `--sqlite=<prefix> --sqlite_libname=sqlcipher`, or a custom `sqlite_magic`
@@ -21,10 +21,10 @@ rebuild, no `electron-rebuild`, no `--runtime=electron` flags.**
 
 ```js
 // ESM main process (Electron >= 28)
-import { app } from 'electron';
-import sqlite3 from '@appthreat/sqlite3';
+import { app } from "electron";
+import sqlite3 from "@appthreat/sqlite3";
 
-const db = new sqlite3.Database(`${app.getPath('userData')}/app.db`);
+const db = new sqlite3.Database(`${app.getPath("userData")}/app.db`);
 ```
 
 From a CommonJS main process, use dynamic import — the package is ESM-only and
@@ -32,7 +32,7 @@ dual-publishing an ESM/CJS native module invites the dual-package hazard, so the
 is deliberately no CJS entry:
 
 ```js
-const sqlite3 = (await import('@appthreat/sqlite3')).default;
+const sqlite3 = (await import("@appthreat/sqlite3")).default;
 ```
 
 Note for ESM main processes: module evaluation is asynchronous relative to app
@@ -55,43 +55,52 @@ event loop.
 
 ```js
 // main process: db-service-parent.mjs
-import { utilityProcess } from 'electron';
+import { utilityProcess } from "electron";
 
-const child = utilityProcess.fork(new URL('./db-service.mjs', import.meta.url).pathname);
-child.on('message', (msg) => { /* replies */ });
+const child = utilityProcess.fork(
+  new URL("./db-service.mjs", import.meta.url).pathname,
+);
+child.on("message", (msg) => {
+  /* replies */
+});
 
 function query(sql, ...params) {
-    return new Promise((resolve) => {
-        const id = nextId();
-        const onMessage = (msg) => {
-            if (msg.id === id) { child.off('message', onMessage); resolve(msg); }
-        };
-        child.on('message', onMessage);
-        child.postMessage({ id, sql, params });
-    });
+  return new Promise((resolve) => {
+    const id = nextId();
+    const onMessage = (msg) => {
+      if (msg.id === id) {
+        child.off("message", onMessage);
+        resolve(msg);
+      }
+    };
+    child.on("message", onMessage);
+    child.postMessage({ id, sql, params });
+  });
 }
 ```
 
 ```js
 // utility process: db-service.mjs
-import { app } from 'electron';
-import { join } from 'node:path';
-import sqlite3 from '@appthreat/sqlite3';
+import { app } from "electron";
+import { join } from "node:path";
+import sqlite3 from "@appthreat/sqlite3";
 
-const db = new sqlite3.Database(join(app.getPath('userData'), 'app.db'));
+const db = new sqlite3.Database(join(app.getPath("userData"), "app.db"));
 const parent = process.parentPort;
 
-parent.on('message', ({ data }) => {
-    if (data.op === 'quit') return db.close(() => process.exit(0));
-    db.get(data.sql, ...data.params, (err, row) => {
-        // structured clone strips error properties; re-send the essentials
-        parent.postMessage({
-            id: data.id,
-            ok: !err,
-            row: row ?? null,
-            err: err ? { code: err.code, errno: err.errno, message: err.message } : null,
-        });
+parent.on("message", ({ data }) => {
+  if (data.op === "quit") return db.close(() => process.exit(0));
+  db.get(data.sql, ...data.params, (err, row) => {
+    // structured clone strips error properties; re-send the essentials
+    parent.postMessage({
+      id: data.id,
+      ok: !err,
+      row: row ?? null,
+      err: err
+        ? { code: err.code, errno: err.errno, message: err.message }
+        : null,
     });
+  });
 });
 ```
 
@@ -102,7 +111,7 @@ service, run in CI.
 (`sqlite3.pool()`, see [docs/concurrency.md](concurrency.md)) is the same idea —
 many connections, each off the main thread — without any Electron API. Use the
 pool inside any single process (main, utility, or plain Node); use a utility
-process when you want *process-level* isolation (a native crash cannot take down
+process when you want _process-level_ isolation (a native crash cannot take down
 your windows) or the database work owned by a service with its own lifecycle.
 
 ### Main process — fine
@@ -138,9 +147,9 @@ Configure unpacking explicitly with electron-builder:
 
 ```json
 {
-    "build": {
-        "asarUnpack": ["**/node_modules/@appthreat/sqlite3/prebuilds/**"]
-    }
+  "build": {
+    "asarUnpack": ["**/node_modules/@appthreat/sqlite3/prebuilds/**"]
+  }
 }
 ```
 
@@ -148,7 +157,11 @@ and with `@electron/packager` / electron-forge's packager config:
 
 ```js
 // forge.packagerConfig
-{ asar: { unpack: '**/node_modules/@appthreat/sqlite3/prebuilds/**' } }
+{
+  asar: {
+    unpack: "**/node_modules/@appthreat/sqlite3/prebuilds/**";
+  }
+}
 ```
 
 Two footguns:
@@ -197,13 +210,13 @@ Never write next to the app bundle (read-only on macOS; `Program Files` on
 Windows). The correct location is the per-user data directory:
 
 ```js
-import { app } from 'electron';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { app } from "electron";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 
-const dir = app.getPath('userData');
-mkdirSync(dir, { recursive: true });          // not guaranteed to exist yet
-const db = new sqlite3.Database(join(dir, 'app.db'));
+const dir = app.getPath("userData");
+mkdirSync(dir, { recursive: true }); // not guaranteed to exist yet
+const db = new sqlite3.Database(join(dir, "app.db"));
 ```
 
 In a utility process, `app.getPath('userData')` resolves to the same directory
@@ -249,6 +262,6 @@ tarball) with `@electron/packager` both ways and asserts where the binary
 loaded from — slow, macOS/Linux/Windows-local, and ubuntu-only in CI.
 
 `test/electron/exit-no-close.mjs` is a teardown probe: it opens connections in
-the main process *and* a worker, uses the API, and exits without closing
+the main process _and_ a worker, uses the API, and exits without closing
 anything — expecting exit status 0 (a teardown segfault reports 139 and is
 invisible to in-process assertions).
