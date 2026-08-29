@@ -736,38 +736,13 @@ pnpm builtin that rebuilds *dependencies*, not this repo's `rebuild` script.
 See [docs/install.md](docs/install.md#development) for the full guide,
 including the stale-`prebuilds/` trap when iterating on C++.
 
-# Contributors
-
-- [Daniel Lockyer](https://github.com/daniellockyer)
-- [Konstantin Käfer](https://github.com/kkaefer)
-- [Dane Springmeyer](https://github.com/springmeyer)
-- [Will White](https://github.com/willwhite)
-- [Orlando Vazquez](https://github.com/orlandov)
-- [Artem Kustikov](https://github.com/artiz)
-- [Eric Fredricksen](https://github.com/grumdrig)
-- [John Wright](https://github.com/mrjjwright)
-- [Ryan Dahl](https://github.com/ry)
-- [Tom MacWright](https://github.com/tmcw)
-- [Carter Thaxton](https://github.com/carter-thaxton)
-- [Audrius Kažukauskas](https://github.com/audriusk)
-- [Johannes Schauer](https://github.com/pyneo)
-- [Mithgol](https://github.com/Mithgol)
-- [Kewde](https://github.com/kewde)
-
-# Acknowledgments
-
-Thanks to [Orlando Vazquez](https://github.com/orlandov),
-[Eric Fredricksen](https://github.com/grumdrig) and
-[Ryan Dahl](https://github.com/ry) for their SQLite bindings for node, and to mraleph on Freenode's #v8 for answering questions.
-
-This module was originally created by [Mapbox](https://mapbox.com/) & is now maintained by [Ghost](https://ghost.org).
-
-# Changelog
-
-We use [GitHub releases](https://github.com/AppThreat/node-sqlite3/releases) for notes on the latest versions. See [CHANGELOG.md](https://github.com/AppThreat/node-sqlite3/blob/b05f4594cf8b0de64743561fcd2cfe6f4571754d/CHANGELOG.md) in git history for details on older versions.
-
 # Copyright & license
 
 Copyright (c) 2013-2025 Mapbox & Ghost Foundation
+Copyright (c) 2025-2026 Team AppThreat
 
-`@appthreat/sqlite3` is [BSD licensed](https://github.com/AppThreat/node-sqlite3/raw/master/LICENSE).
+`@appthreat/sqlite3` is a fork of node-sqlite3 and is
+[BSD-3-Clause licensed](https://github.com/AppThreat/node-sqlite3/raw/master/LICENSE),
+the same terms as the original. The vendored SQLite amalgamation is public
+domain. See [LICENSE](LICENSE) for the full text and the attribution of prior
+work.
