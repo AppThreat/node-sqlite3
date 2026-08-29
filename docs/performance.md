@@ -3,7 +3,11 @@
 This document explains what the benchmark suite measures, how to
 reproduce every figure in it, and — just as important — where this
 package is slower than the alternatives. Every number below was produced
-by `pnpm run bench`; nothing is hand-timed.
+by `pnpm run bench`; nothing is hand-timed. The single exception is
+[Against a C-extension driver](#against-a-c-extension-driver-in-another-language),
+which comes from an external project measuring this package against
+CPython's apsw over a private dataset; it is labelled as such there and
+in [Limits of these numbers](#limits-of-these-numbers).
 
 - [Method](#method)
 - [The noise floor](#the-noise-floor)
@@ -12,6 +16,7 @@ by `pnpm run bench`; nothing is hand-timed.
 - [Linux (arm64, Debian container)](#linux-arm64-debian-container)
 - [When to use which API](#when-to-use-which-api)
 - [Where this package loses](#where-this-package-loses)
+  - [Against a C-extension driver](#against-a-c-extension-driver-in-another-language)
   - [How rows are built](#how-rows-are-built)
   - [How parameters are bound](#how-parameters-are-bound)
   - [Statement preparation](#statement-preparation)
@@ -357,6 +362,64 @@ non-blocking surface (the event loop stays free), the worker pool,
 transactions-with-savepoints, hooks, sessions/blob I/O and
 per-connection configuration — none of which `node:sqlite` has.
 
+### Against a C-extension driver in another language
+
+The comparison above is Node-against-Node. A second, independent
+measurement ran this package against **apsw** — the thin CPython C
+wrapper around SQLite — over a real 13 GB store (6.9 M rows), warm
+cache, same SQL text, same parameters, same pragmas, same query plans,
+with row-for-row output agreement verified before any timing. It is a
+useful outside check because apsw is a very direct binding: it is close
+to the floor of what a C extension can do.
+
+Widening the projection over one fixed query plan separates the costs
+(apsw builds SQLite 3.53.3, this package 3.53.4 — a patch-level
+confound that is small but not zero):
+
+| projection | `@appthreat/sqlite3` | apsw | ratio |
+|---|---|---|---|
+| `count(*)` (no rows built) | 1.91 ms | 1.86 ms | **1.02×** |
+| 1 column | 9.67 ms | 7.14 ms | 1.35× |
+| 6 columns | 23.73 ms | 19.78 ms | 1.20× |
+
+The `count(*)` rung walks the identical index and returns one row per
+call. At **1.02× it is parity**, which rules out query execution,
+parameter binding and per-call overhead in a single measurement — the
+entire difference appears only when rows are materialised. Splitting the
+ladder's slope from its intercept gives **+50 ns per row** fixed and
+**+6.5 ns per value** (V8 string creation against CPython's
+`PyUnicode_FromStringAndSize`). Per-value is near parity; the per-row
+cost is the gap.
+
+That cost is structural rather than a missed optimisation. CPython's C
+API lets an extension build the result object *in C*: `PyTuple_New`
+followed by `PyTuple_SET_ITEM` per column, which is a pointer write into
+the tuple's inline slots with no call into Python at any point. Node-API
+offers no equivalent bulk constructor, which is why rows here are built
+by a generated JS function (next section) — one `napi_call_function`
+per row instead of N property stores. That trade is a large win against
+the store loop, but it is still a C++→JS boundary crossing per row, and
+a CPython extension crosses no boundary at all. Calling the same
+generated builder from JS with six arguments costs ~7 ns/row, so almost
+all of the per-row cost is the crossing, not the object.
+
+Two consequences for calling code:
+
+- **Projecting fewer columns is the lever that works.** The cost scales
+  with values materialised, so `SELECT` lists that name the columns
+  actually used are worth more here than in a CPython driver. Aggregates
+  and existence checks are already at parity.
+- **Row mode is not a lever.** Re-running the same queries with
+  `{ rowMode: 'array' }` — the shape apsw returns — moves nothing
+  (−1.0%, +1.6%, +2.4% across three row-heavy queries, straddling zero),
+  because both shapes go through the same generated builder.
+
+Against a *different language's* driver the async API is a separate
+matter: over eight concurrent connections this package recovered 2.1×,
+while Python threads running the same work went ~5× slower on the GIL.
+Row marshalling is where a C extension is ahead; concurrency is where it
+is not.
+
 ### How rows are built
 
 A row is not assembled column by column from C++. Storing each column
@@ -689,3 +752,12 @@ distinguishes a real regression from run-to-run variance.
   a loaded machine reports its own, higher floor — and its ratios are
   suppressed accordingly. That is the harness refusing to over-claim,
   not a malfunction.
+- The apsw comparison in
+  [Against a C-extension driver](#against-a-c-extension-driver-in-another-language) does
+  **not** come from `pnpm run bench`. It was measured by a separate
+  project against a private 13 GB dataset, so it is not reproducible
+  from this repository, and it carries its own caveats: warm page cache
+  only, a 3.53.3-vs-3.53.4 SQLite mismatch, and a single machine. It is
+  quoted here for the mechanism it establishes — per-row cost is a
+  boundary crossing, per-value cost is near parity — which the column
+  ladder pins down independently of the absolute times.

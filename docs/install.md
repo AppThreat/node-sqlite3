@@ -124,7 +124,7 @@ npm install @appthreat/sqlite3 --build-from-source --sqlite_libname=sqlcipher --
 ```
 
 For the full SQLCipher/Electron flag set see the
-[README](../README.md#building-for-sqlcipher).
+[README](../README.md#sqlcipher-encrypted-databases).
 
 ## Troubleshooting: "No native build was found"
 

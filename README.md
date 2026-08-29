@@ -64,7 +64,7 @@ requirements and the pnpm specifics for source builds.
 
 It is also possible to make your own build of `sqlite3` from its source instead of its npm package ([See below.](#source-install)).
 
-SQLite's [SQLCipher extension](https://github.com/sqlcipher/sqlcipher) is also supported. [(See below.)](#building-for-sqlcipher)
+SQLite's [SQLCipher extension](https://github.com/sqlcipher/sqlcipher) is also supported. [(See below.)](#sqlcipher-encrypted-databases)
 
 ## Electron
 
