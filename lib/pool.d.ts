@@ -8,7 +8,7 @@ export type PoolOptions = {
      * with writes — the right shape for a write-heavy file or a
      * `:memory:` database.
      */
-    readers?: number | undefined;
+    readers?: number;
     /**
      * set `PRAGMA journal_mode = WAL` on the
      * writer before readers connect (default true). WAL is what lets
@@ -16,19 +16,19 @@ export type PoolOptions = {
      * filesystem that refuses WAL) readers can block on the writer and
      * rely on `busyTimeout`.
      */
-    walMode?: boolean | undefined;
+    walMode?: boolean;
     /**
      * `PRAGMA busy_timeout` in milliseconds
      * for every connection (default 5000).
      */
-    busyTimeout?: number | undefined;
+    busyTimeout?: number;
     /**
      * the integer
      * conversion mode for every connection (see
      * `configure('integerMode', …)`); the driver default (`'number'`)
      * applies when omitted.
      */
-    integerMode?: "number" | "bigint" | "mixed" | undefined;
+    integerMode?: 'number' | 'bigint' | 'mixed';
 };
 /**
  * Options for a pool query.
@@ -41,7 +41,7 @@ export type PoolQueryOptions = {
      * single-connection API, an abort that loses the race with a
      * completing query still rejects and drops the result.
      */
-    signal?: AbortSignal | undefined;
+    signal?: AbortSignal;
 };
 /**
  * The query surface inside {@link SqlitePool#transaction}, pinned to the
@@ -52,49 +52,20 @@ export type PoolTransaction = {
     /**
      *   runs a query on the writer, resolving every row.
      */
-    read: (sql: string, params?: import("./native.js").BindParams) => Promise<import("./native.js").Row[]>;
+    read: (sql: string, params?: import('./native.js').BindParams) => Promise<import('./native.js').Row[]>;
     /**
      *   runs a query on the writer, resolving the first row (or undefined).
      */
-    get: (sql: string, params?: import("./native.js").BindParams) => Promise<import("./native.js").Row | undefined>;
+    get: (sql: string, params?: import('./native.js').BindParams) => Promise<import('./native.js').Row | undefined>;
     /**
      *   runs a statement inside the transaction, resolving `{lastID, changes, lastIDBigInt}`.
      */
-    write: (sql: string, params?: import("./native.js").BindParams) => Promise<import("./promises.js").PromiseRunResult>;
+    write: (sql: string, params?: import('./native.js').BindParams) => Promise<import('./promises.js').PromiseRunResult>;
     /**
      *   runs raw SQL (DDL, pragmas) inside the transaction.
      */
     exec: (sql: string) => Promise<void>;
 };
-/**
- * Creates a worker-thread pool over a database file: one writer
- * connection plus `options.readers` read-only connections (default 4),
- * each on its own worker. Writes serialize on the writer; reads fan out
- * to the readers. All SQLite work happens off the calling thread.
- *
- * Requires a real file (or a `file:` URI): each connection is separate,
- * so a plain `:memory:` database cannot be shared across the pool's
- * workers — move in-memory data with `db.serializeToBytes()` +
- * {@link sqlite3.deserializeFromBytes} in a worker instead (see
- * docs/concurrency.md). With `readers: 0` a `:memory:` pool is fine:
- * everything runs on the single writer.
- *
- * @param {string} filename the database file.
- * @param {PoolOptions} [options] the pool options.
- * @returns {Promise<SqlitePool>} the opened pool.
- * @throws {TypeError} when the filename is missing or malformed, or an
- *   option is unknown/invalid.
- * @since 9.0.0
- * @example
- * const pool = await sqlite3.pool('app.db', {
- *     readers: 4,
- *     busyTimeout: 5000,
- * });
- * const rows = await pool.read('SELECT * FROM t WHERE a = ?', [1]);
- * await pool.write('INSERT INTO t (a) VALUES (?)', [2]);
- * await pool.close();
- */
-export function pool(filename: string, options?: PoolOptions): Promise<SqlitePool>;
 /**
  * A worker-thread pool over one database file: a single writer
  * connection plus read-only reader connections, each on its own worker.
@@ -111,7 +82,20 @@ export function pool(filename: string, options?: PoolOptions): Promise<SqlitePoo
  *
  * @since 9.0.0
  */
-export class SqlitePool {
+declare class SqlitePool {
+    #private;
+    /**
+     * @param {string} filename the database file.
+     * @param {{ readers: number, walMode: boolean, busyTimeout: number,
+     *     integerMode: ('number' | 'bigint' | 'mixed') | undefined }} options
+     *   validated options.
+     */
+    constructor(filename: string, options: {
+        readers: number;
+        walMode: boolean;
+        busyTimeout: number;
+        integerMode: ('number' | 'bigint' | 'mixed') | undefined;
+    });
     /**
      * Spawns the workers and opens every connection.
      *
@@ -130,20 +114,8 @@ export class SqlitePool {
         readers: number;
         walMode: boolean;
         busyTimeout: number;
-        integerMode: ("number" | "bigint" | "mixed") | undefined;
+        integerMode: ('number' | 'bigint' | 'mixed') | undefined;
     }): Promise<SqlitePool>;
-    /**
-     * @param {string} filename the database file.
-     * @param {{ readers: number, walMode: boolean, busyTimeout: number,
-     *     integerMode: ('number' | 'bigint' | 'mixed') | undefined }} options
-     *   validated options.
-     */
-    constructor(filename: string, options: {
-        readers: number;
-        walMode: boolean;
-        busyTimeout: number;
-        integerMode: ("number" | "bigint" | "mixed") | undefined;
-    });
     /**
      * The database filename the pool was created with.
      *
@@ -184,7 +156,7 @@ export class SqlitePool {
      * @example
      * const rows = await pool.read('SELECT id FROM users WHERE name = ?', ['alice']);
      */
-    read(...args: any[]): Promise<import("./native.js").Row[]>;
+    read(...args: any[]): Promise<import('./native.js').Row[]>;
     /**
      * Runs a query on a reader connection, resolving the first row (or
      * `undefined`). Same routing and visibility rules as
@@ -200,7 +172,7 @@ export class SqlitePool {
      * @example
      * const user = await pool.get('SELECT id FROM users WHERE name = ?', ['alice']);
      */
-    get(...args: any[]): Promise<import("./native.js").Row | undefined>;
+    get(...args: any[]): Promise<import('./native.js').Row | undefined>;
     /**
      * Runs a statement on the writer connection, resolving
      * `{lastID, changes, lastIDBigInt}`. Writes serialize: concurrent
@@ -217,7 +189,7 @@ export class SqlitePool {
      * @example
      * const result = await pool.write('INSERT INTO users (name) VALUES (?)', ['alice']);
      */
-    write(...args: any[]): Promise<import("./promises.js").PromiseRunResult>;
+    write(...args: any[]): Promise<import('./promises.js').PromiseRunResult>;
     /**
      * Runs raw SQL on the writer connection: DDL, pragmas,
      * multi-statement scripts. Resolves once every statement has run.
@@ -261,7 +233,7 @@ export class SqlitePool {
      * });
      */
     transaction<T>(fn: (tx: PoolTransaction) => T | Promise<T>, options?: {
-        mode?: "deferred" | "immediate" | "exclusive";
+        mode?: 'deferred' | 'immediate' | 'exclusive';
     }): Promise<T>;
     /**
      * Closes the pool: refuses new work, waits for every in-flight
@@ -285,5 +257,34 @@ export class SqlitePool {
      * @since 9.0.0
      */
     [Symbol.asyncDispose](): Promise<void>;
-    #private;
 }
+/**
+ * Creates a worker-thread pool over a database file: one writer
+ * connection plus `options.readers` read-only connections (default 4),
+ * each on its own worker. Writes serialize on the writer; reads fan out
+ * to the readers. All SQLite work happens off the calling thread.
+ *
+ * Requires a real file (or a `file:` URI): each connection is separate,
+ * so a plain `:memory:` database cannot be shared across the pool's
+ * workers — move in-memory data with `db.serializeToBytes()` +
+ * {@link sqlite3.deserializeFromBytes} in a worker instead (see
+ * docs/concurrency.md). With `readers: 0` a `:memory:` pool is fine:
+ * everything runs on the single writer.
+ *
+ * @param {string} filename the database file.
+ * @param {PoolOptions} [options] the pool options.
+ * @returns {Promise<SqlitePool>} the opened pool.
+ * @throws {TypeError} when the filename is missing or malformed, or an
+ *   option is unknown/invalid.
+ * @since 9.0.0
+ * @example
+ * const pool = await sqlite3.pool('app.db', {
+ *     readers: 4,
+ *     busyTimeout: 5000,
+ * });
+ * const rows = await pool.read('SELECT * FROM t WHERE a = ?', [1]);
+ * await pool.write('INSERT INTO t (a) VALUES (?)', [2]);
+ * await pool.close();
+ */
+declare function pool(filename: string, options?: PoolOptions): Promise<SqlitePool>;
+export { pool, SqlitePool };

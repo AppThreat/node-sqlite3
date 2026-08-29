@@ -22,11 +22,12 @@ export type Traceable = (this: unknown, ...args: unknown[]) => unknown;
  * @param {number} [pos=-1] position of the callback argument.
  * @returns {void}
  */
-export function extendTrace(object: Record<string, Traceable>, property: string, pos?: number): void;
+declare function extendTrace(object: Record<string, Traceable>, property: string, pos?: number): void;
 /**
  * Drops this file's own frames from a stack string.
  *
  * @param {string | undefined} stackStr the stack to filter.
  * @returns {string[]} the surviving frames.
  */
-export function filter(stackStr: string | undefined): string[];
+declare function filter(stackStr: string | undefined): string[];
+export { extendTrace, filter };

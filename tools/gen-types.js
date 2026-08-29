@@ -5,8 +5,17 @@
 // Runs `tsc -p tsconfig.types.json`, which typechecks lib/*.js (checkJs)
 // against the hand-written native declarations in lib/native.d.ts and
 // emits declarations into the gitignored types-gen/ scratch directory.
-// This script then copies them into lib/, post-processing the package's
-// `types` entry (lib/sqlite3.d.ts) in three deterministic steps:
+// This script then normalizes the emit with two deterministic steps
+// before post-processing the package's `types` entry (lib/sqlite3.d.ts):
+//
+//   1. strip the raw `@typedef` blocks the JS emit copies verbatim,
+//   2. re-attach each @typedef's summary text from its lib/*.js source
+//      to the rendered `export type` it produced. TS 5.9 attached this
+//      summary itself; TS 7 drops it (and, in lib/promises.js and
+//      lib/pool.js, drops the raw block too), which would silently
+//      strip every type summary from the shipped docs.
+//
+// The entry is then post-processed in three deterministic steps:
 //
 //   1. prepend the GENERATED header,
 //   2. append `import './augment.js'` so consumers of the package load
@@ -24,7 +33,7 @@
 // The result is committed; CI regenerates and fails on any diff, so a
 // declaration can neither drift from the JSDoc nor be silently dropped.
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -47,14 +56,72 @@ const entry = path.join(root, 'lib', 'sqlite3.d.ts');
 
 // tsc's JS emit attaches the original JSDoc verbatim, so a rendered
 // `export type X` can be followed by a second, raw copy of its @typedef
-// block. Drop those: the rendered declaration carries the same docs.
+// block. Drop those: the rendered declaration carries the same docs
+// once the summaries below are re-attached.
 function stripRawTypedefComments(text) {
     return text.replace(/\/\*\*(?:[^*]|\*(?!\/))*?@typedef[\s\S]*?\*\/\n/g, '');
 }
 
-const emitted = stripRawTypedefComments(
-    readFileSync(path.join(emitDir, 'sqlite3.d.ts'), 'utf8'),
-);
+// The summary text of every `@typedef` in a source file: the comment
+// lines before the first @tag (the @property/@since tags are rendered
+// or dropped by tsc itself). Blocks without a summary — e.g.
+// ExtensionPolicy, documented only through its @property tags — are
+// skipped; there is nothing to re-attach for them.
+function typedefSummaries(source) {
+    const summaries = new Map();
+    for (const match of source.matchAll(/\/\*\*[\s\S]*?\*\//g)) {
+        const name = match[0].match(
+            /@typedef\s*\{[\s\S]*?\}\s*([A-Za-z_$][\w$]*)/,
+        )?.[1];
+        if (!name || summaries.has(name)) continue;
+        const summary = [];
+        for (const line of match[0].split('\n').slice(1, -1)) {
+            const text = line.replace(/^\s*\/?\*+\s?/, '').replace(/\*\/$/, '');
+            if (/^@\w/.test(text.trim())) break;
+            summary.push(text.trimEnd());
+        }
+        while (summary.length && !summary.at(-1).trim()) summary.pop();
+        if (summary.some((line) => line.trim())) summaries.set(name, summary);
+    }
+    return summaries;
+}
+
+// Prepend each typedef's summary to the rendered `export type` it
+// produced, unless the emit already documents that declaration (TS 7
+// keeps docs on functions and classes; only the rendered type aliases
+// come out bare).
+function attachTypedefSummaries(text, summaries) {
+    const out = [];
+    for (const line of text.split('\n')) {
+        const name = line.match(/^export type ([A-Za-z_$][\w$]*)\b/)?.[1];
+        const summary = name === undefined ? undefined : summaries.get(name);
+        if (summary && out.at(-1) !== ' */') {
+            out.push('/**');
+            for (const text of summary) out.push(` * ${text}`.trimEnd());
+            out.push(' */');
+        }
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+// The lib/*.js source each emitted declaration file is generated from.
+const summarySources = {
+    'sqlite3.d.ts': 'sqlite3.js',
+    'promises.d.ts': 'promises.js',
+    'trace.d.ts': 'trace.js',
+    'pool.d.ts': 'pool.js',
+};
+
+const emitted = {};
+for (const [declaration, source] of Object.entries(summarySources)) {
+    let text = readFileSync(path.join(emitDir, declaration), 'utf8');
+    if (declaration === 'sqlite3.d.ts') text = stripRawTypedefComments(text);
+    emitted[declaration] = attachTypedefSummaries(
+        text,
+        typedefSummaries(readFileSync(path.join(root, 'lib', source), 'utf8')),
+    );
+}
 
 // Every `export type X` / `export interface X` in the hand-written
 // island, keys sorted for a stable diff. Classes are re-exported by the
@@ -102,24 +169,18 @@ const header = `// GENERATED FILE — DO NOT EDIT.
 
 writeFileSync(
     entry,
-    `${header}${emitted}${augmentImport}\n` +
+    `${header}${emitted['sqlite3.d.ts']}${augmentImport}\n` +
         block('promises.js', promisesPublicTypes) +
         block('pool.js', poolPublicTypes) +
         block('native.js', nativeTypes),
 );
 
-copyFileSync(
-    path.join(emitDir, 'promises.d.ts'),
+writeFileSync(
     path.join(root, 'lib', 'promises.d.ts'),
+    emitted['promises.d.ts'],
 );
-copyFileSync(
-    path.join(emitDir, 'trace.d.ts'),
-    path.join(root, 'lib', 'trace.d.ts'),
-);
-copyFileSync(
-    path.join(emitDir, 'pool.d.ts'),
-    path.join(root, 'lib', 'pool.d.ts'),
-);
+writeFileSync(path.join(root, 'lib', 'trace.d.ts'), emitted['trace.d.ts']);
+writeFileSync(path.join(root, 'lib', 'pool.d.ts'), emitted['pool.d.ts']);
 
 console.log(
     'gen-types: lib/sqlite3.d.ts, lib/promises.d.ts, lib/trace.d.ts, lib/pool.d.ts regenerated.',

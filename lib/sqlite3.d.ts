@@ -6,8 +6,6 @@
 //      lib/promises.d.ts and lib/trace.d.ts.
 // The three shipped .d.ts files together form the public types.
 
-export default sqlite3;
-export { DatabaseClass as Database };
 /**
  * A native class (Database, Statement or Backup) before the EventEmitter
  * prototype is copied onto it.
@@ -23,11 +21,11 @@ export type CachedRegistry = {
     /**
      * Open (or reuse) a connection, optionally with a callback.
      */
-    Database: (filename: string, callback?: (this: import("./sqlite3-binding.js").Database, err: Error | null) => void) => import("./sqlite3-binding.js").Database;
+    Database: (filename: string, callback?: (this: import('./sqlite3-binding.js').Database, err: Error | null) => void) => import('./sqlite3-binding.js').Database;
     /**
      * The registry itself, keyed by resolved path.
      */
-    objects: Record<string, import("./sqlite3-binding.js").Database>;
+    objects: Record<string, import('./sqlite3-binding.js').Database>;
 };
 /**
  * The constructor type of the v9 `Database` wrapper: every pre-v9
@@ -36,7 +34,7 @@ export type CachedRegistry = {
  * below does not reference the module it lives in — that self-reference
  * is a type-resolution cycle.
  */
-export type DatabaseConstructor = new (filename: string, a?: number | OpenOptions | ((this: import("./sqlite3-binding.js").Database, err: import("./native.js").SqliteError | null) => void), b?: ((this: import("./sqlite3-binding.js").Database, err: import("./native.js").SqliteError | null) => void) | OpenOptions) => import("./sqlite3-binding.js").Database;
+export type DatabaseConstructor = new (filename: string, a?: number | OpenOptions | ((this: import('./sqlite3-binding.js').Database, err: import('./native.js').SqliteError | null) => void), b?: ((this: import('./sqlite3-binding.js').Database, err: import('./native.js').SqliteError | null) => void) | OpenOptions) => import('./sqlite3-binding.js').Database;
 /**
  * The public `sqlite3` namespace object the package exports as its
  * default: the native binding (the five classes and every SQLite
@@ -46,14 +44,16 @@ export type DatabaseConstructor = new (filename: string, a?: number | OpenOption
  * {@link OpenOptions} constructor forms typecheck; instances satisfy the
  * native type everywhere.
  */
-export type sqlite3 = import("./sqlite3-binding.js").NativeBinding & {
+export type sqlite3 = import('./sqlite3-binding.js').NativeBinding & {
     Database: DatabaseConstructor;
     verbose: () => sqlite3;
     cached: CachedRegistry;
-    open: import("./promises.js").OpenFunction;
-    deserializeFromBytes: (bytes: Uint8Array | ArrayBuffer | DataView, options?: import("./native.js").DeserializeOptions) => Promise<import("./sqlite3-binding.js").Database>;
-    pool: typeof import("./pool.js").pool;
+    open: import('./promises.js').OpenFunction;
+    deserializeFromBytes: (bytes: Uint8Array | ArrayBuffer | DataView, options?: import('./native.js').DeserializeOptions) => Promise<import('./sqlite3-binding.js').Database>;
+    pool: typeof import('./pool.js').pool;
 };
+declare const sqlite3: sqlite3;
+declare const NativeDatabase: typeof import("./native.js").Database & DatabaseConstructor;
 export type ExtensionPolicy = {
     /**
      * the connection was opened `{ untrusted: true }`.
@@ -82,7 +82,7 @@ export type OpenOptions = {
     /**
      * open flags, e.g. `sqlite3.OPEN_READWRITE`.
      */
-    mode?: number | undefined;
+    mode?: number;
     /**
      * harden the connection for an
      * attacker-supplied database file: defensive mode, untrusted schema,
@@ -90,10 +90,8 @@ export type OpenOptions = {
      * conservative run-time limits and a deny-all ATTACH gate. See
      * docs/security.md#untrusted-database-files.
      */
-    untrusted?: boolean | undefined;
+    untrusted?: boolean;
 };
-declare const sqlite3: sqlite3;
-declare const DatabaseClass_base: typeof import("./native.js").Database & DatabaseConstructor;
 /**
  * A connection to a SQLite database — the v9 wrapper around the native
  * class. Adds the permission-model checks on every open path, the
@@ -102,10 +100,9 @@ declare const DatabaseClass_base: typeof import("./native.js").Database & Databa
  * else, including all pre-v9 positional constructor forms, behaves
  * exactly as before.
  *
- * @extends {NativeDatabase}
  * @since 9.0.0
  */
-declare class DatabaseClass extends DatabaseClass_base {
+declare class DatabaseClass extends NativeDatabase {
     /**
      * Opens a database connection. The open itself is asynchronous; the
      * callback fires (or the `'open'` event emits) once it completes.
@@ -127,9 +124,11 @@ declare class DatabaseClass extends DatabaseClass_base {
      *   the target is not permitted, naming the path and the remedy.
      * @throws {TypeError} when the arguments are malformed.
      */
-    constructor(filename: string, a?: number | OpenOptions | ((this: import("./sqlite3-binding.js").Database, err: import("./native.js").SqliteError | null) => void), b?: ((this: import("./sqlite3-binding.js").Database, err: import("./native.js").SqliteError | null) => void) | OpenOptions);
+    constructor(filename: string, a?: number | OpenOptions | ((this: import('./sqlite3-binding.js').Database, err: import('./native.js').SqliteError | null) => void), b?: ((this: import('./sqlite3-binding.js').Database, err: import('./native.js').SqliteError | null) => void) | OpenOptions);
 }
-export { Backup, Blob, Session, Statement } from "./sqlite3-binding.js";
+export default sqlite3;
+export { Backup, Blob, Session, Statement } from './sqlite3-binding.js';
+export { DatabaseClass as Database };
 import './augment.js';
 export type {
     FetchCallback,
