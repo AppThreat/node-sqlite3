@@ -1,7 +1,7 @@
 {
     "name": "@appthreat/sqlite3",
     "description": "Asynchronous, non-blocking SQLite3 bindings. Modern rewrite of TryGhost/node-sqlite3",
-    "version": "9.0.0",
+    "version": "9.0.1",
     "homepage": "https://github.com/AppThreat/node-sqlite3",
     "author": "Team AppThreat <cloud@appthreat.com>",
     "binary": {
@@ -32,7 +32,6 @@
         "electron": "43.4.1",
         "prebuildify": "^6.0.1",
         "semver": "^7.8.5",
-        "tsd": "^0.33.0",
         "typescript": "~5.9.3"
     },
     "peerDependencies": {
@@ -68,7 +67,7 @@
         "bench:compare": "node --expose-gc bench/index.js --compare --baseline bench/baseline.json",
         "bench:update": "node --expose-gc bench/index.js --write-baseline",
         "gen-types": "node tools/gen-types.js",
-        "test:types": "tsd && tsc --noEmit -p tsconfig.check.json",
+        "test:types": "tsc --noEmit -p tsconfig.check.json",
         "test:matrix": "node tools/test-matrix.mjs"
     },
     "license": "BSD-3-Clause",
@@ -80,8 +79,5 @@
     ],
     "type": "module",
     "main": "./lib/sqlite3.js",
-    "types": "./lib/sqlite3.d.ts",
-    "tsd": {
-        "directory": "types"
-    }
+    "types": "./lib/sqlite3.d.ts"
 }

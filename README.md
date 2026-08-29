@@ -24,7 +24,7 @@ your workload is synchronous and fits `node:sqlite`, use `node:sqlite`**
 — nothing needs installing and nothing needs compiling. This package
 exists for the parts it does not cover.
 
-Verified against `@appthreat/sqlite3` 9.0.0 on **Node v24.18.0 and
+Verified against `@appthreat/sqlite3` 9.0.1 on **Node v24.18.0 and
 v26.7.0**, which expose an identical `node:sqlite` surface and behave
 identically on every point below — so this table holds across the whole
 range this package supports. `node:sqlite` did grow quickly during 24.x
