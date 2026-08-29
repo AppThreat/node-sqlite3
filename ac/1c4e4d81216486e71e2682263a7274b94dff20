@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_50e5352afab927::t_90250a315f3fba 61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ac1c4e4d81216486e71e2682263a7274b94dff20",
+  "prompts": {},
+  "sessions": {
+    "s_50e5352afab927": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "369bc4c8-aa22-4474-8c3e-4f0ad6888686",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
