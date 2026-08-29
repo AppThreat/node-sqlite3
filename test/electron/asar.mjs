@@ -58,9 +58,11 @@ function buildFixture() {
         stdio: 'pipe',
     });
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    // pnpm pack flattens the scope, keeping it: @appthreat/sqlite3 ->
+    // appthreat-sqlite3-<version>.tgz
     const tarball = join(
         work,
-        `${pkg.name.replace(/^@[^/]+\//, '')}-${pkg.version}.tgz`,
+        `${pkg.name.replace(/^@/, '').replace('/', '-')}-${pkg.version}.tgz`,
     );
     if (!existsSync(tarball)) {
         throw new Error(`pnpm pack did not produce ${tarball}`);
