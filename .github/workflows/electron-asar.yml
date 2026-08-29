@@ -33,10 +33,21 @@ jobs:
         with:
           node-version: 24
           scope: '@appthreat'
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.12
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+      # Mirrors the ci.yml build job's Linux flags and --tag-libc so the
+      # prebuild this packs is laid out and built the same way as the
+      # artifact the release-branch job consumes.
+      - name: Add Linux env vars
+        run: |
+          echo "CFLAGS=${CFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
+          echo "CXXFLAGS=${CXXFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
       - name: Build the shipped prebuild
-        run: pnpm run prebuild
+        run: pnpm run prebuild --tag-libc
       - name: Install xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Packaged-ASAR tests (unpacked + sealed-in-archive)
