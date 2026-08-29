@@ -17,6 +17,81 @@ Asynchronous, non-blocking [SQLite3](https://sqlite.org/) bindings for [Node.js]
 - Written in modern C++ and tested for memory leaks
 - Bundles SQLite v3.53.4, or you can build using a local SQLite [amalgamation](https://www.sqlite.org/amalgamation.html)
 
+# Compared with `node:sqlite`
+
+Node ships a built-in SQLite module. It has grown a lot and now covers
+most of what a synchronous driver needs, so the honest summary is: **if
+your workload is synchronous and fits `node:sqlite`, use `node:sqlite`**
+— nothing needs installing and nothing needs compiling. This package
+exists for the parts it does not cover.
+
+Verified against `@appthreat/sqlite3` 9.0.0 on **Node v24.18.0 and
+v26.7.0**, which expose an identical `node:sqlite` surface and behave
+identically on every point below — so this table holds across the whole
+range this package supports. `node:sqlite` did grow quickly during 24.x
+(`backup` and `createTagStore` among the later additions) and is still
+gaining features, so on an older 24.x patch release, or a newer Node
+than the two above, check
+[the `node:sqlite` docs](https://nodejs.org/api/sqlite.html) before
+relying on a ❌ below.
+
+## What only this package has
+
+| Capability | `@appthreat/sqlite3` | `node:sqlite` |
+|---|---|---|
+| Asynchronous API (event loop stays free) | ✅ callbacks + promises | ❌ synchronous only |
+| `async` iteration (`for await`), streams | ✅ `iterate`, `stream` | ❌ (sync `iterate` only) |
+| Worker-thread connection pool | ✅ `pool()` | ❌ |
+| Transaction helper with savepoints | ✅ `transaction()` | ❌ hand-rolled `BEGIN`/`COMMIT` |
+| Statement cache | ✅ `cacheStatements()`, implicit on sync | ❌ prepare per call |
+| Custom collations | ✅ `collation()` / `removeCollation()` | ❌ |
+| Incremental blob I/O | ✅ `openBlob()` | ❌ read/write whole values |
+| Update / commit / rollback / preupdate hooks | ✅ EventEmitter | ❌ |
+| Progress handler | ✅ `progress()` | ❌ |
+| Query cancellation | ✅ `cancellationToken()`, connection-wide | ❌ |
+| WAL checkpoint control | ✅ `checkpoint()` | ❌ |
+| Schema introspection | ✅ `tableInfo()`, `columns()`, `parameterNames` | ⚠️ `columns()` only |
+| Changeset utilities | ✅ concat / invert / iterate | ⚠️ apply + create only |
+| Backup control | ✅ handle you step yourself (`remaining`, `idle`, retry policy) | ⚠️ one-shot promise (`rate`, `progress`) |
+| Integer read modes | ✅ `number` / `mixed` / `bigint`, per connection | ⚠️ `setReadBigInts()` per statement |
+| Electron support | ✅ tested in CI, main + utility process | ⚠️ works, untested by us |
+
+## What both have
+
+User-defined functions and aggregates (including window functions via
+`inverse`), sessions and changesets, the authorizer, extension loading,
+`serialize`/`deserialize`, incremental online backup with progress
+reporting, `readOnly` and busy-timeout connection options, array row
+mode, bare and unknown named-parameter control, and extended result
+codes on errors. Both also **refuse to truncate** an INTEGER outside the
+safe range rather than silently losing precision — they differ only in
+how you opt into `BigInt`.
+
+## What only `node:sqlite` has
+
+| Capability | Why it matters |
+|---|---|
+| **Zero install** — built in, no compiler, no prebuild, no supply chain | Usually the deciding factor |
+| **UDFs callable from synchronous queries** | See below — a real architectural difference, not an oversight |
+| Tagged-template queries (`createTagStore`) | Ergonomic SQL literals |
+| `enableDefensive()` | Hardening for untrusted SQL |
+
+The UDF difference is worth understanding before choosing. `node:sqlite`
+runs SQLite on the main thread, so a JavaScript callback can run inline
+while a query is stepping. This package runs asynchronous queries on a
+worker, and a JS callback fires safely there — but calling a UDF from
+the *synchronous* fast path would mean SQLite blocking the JS thread
+that has to run the callback, which deadlocks. It refuses instead, with
+an error saying so. So: **UDFs, aggregates and window functions work on
+the async API here, not on `getSync`/`allSync`/`runSync`.** If you need
+custom functions inside otherwise-synchronous code, `node:sqlite` is the
+better fit.
+
+Migrating from `node:sqlite` is mostly mechanical — `DatabaseSync` maps
+to `Database` plus the `*Sync` methods. See
+[MIGRATING-TO-V9.md](MIGRATING-TO-V9.md) for the value-marshalling
+differences, which are where the surprises live.
+
 # Installing
 
 Use whichever package manager you like:
