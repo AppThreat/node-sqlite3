@@ -42,7 +42,7 @@ dependent allowlists it. This package declares `"install": "node-gyp-build"`,
 so pnpm prints a notice like:
 
 ```
-[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @appthreat/sqlite3@9.0.0
+[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @appthreat/sqlite3@9.0.1
 ```
 
 **You can ignore that notice.** Verified empirically (pnpm 11.23.0, macOS,
