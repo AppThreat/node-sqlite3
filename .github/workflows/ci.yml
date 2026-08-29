@@ -315,7 +315,8 @@ jobs:
 
   # The packaged-ASAR cases: slow (packages Electron twice from a real
   # packed-tarball install), so ubuntu-only and not on every push —
-  # post-merge on release/v9 and on demand.
+  # post-merge on release/v9 and on demand. PRs touching test/electron/**
+  # get the same suite from electron-asar.yml instead.
   electron-asar:
     needs: build
     # Tags included: publish depends on this job, so it has to actually
