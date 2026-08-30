@@ -121,10 +121,17 @@ expectTypeOf(
         expectTypeOf(e).toEqualTypeOf<SqliteError | null>();
     }),
 ).toEqualTypeOf<Database>();
-expectTypeOf(db.prepare('SELECT 1')).toEqualTypeOf<Statement>();
+// The no-callback form is the statement AND a promise of it: awaiting
+// gates on the native prepare completing (9.0.2).
+expectTypeOf(db.prepare('SELECT 1')).toEqualTypeOf<
+    Statement & Promise<Statement>
+>();
 expectTypeOf(
     db.prepare('SELECT ?', 1, () => undefined),
 ).toEqualTypeOf<Statement>();
+expectTypeOf(db.prepare('SELECT ?', 1)).toEqualTypeOf<
+    Statement & Promise<Statement>
+>();
 
 // --- Database: promise mode with bound parameters (D03 follow-up) --------
 

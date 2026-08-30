@@ -324,7 +324,76 @@ README quotes both.
   autocommit writes. Removing a listener returns exactly to baseline.
 - **JS functions/aggregates/collations**: ~19 µs per invocation, O(n log
   n) comparisons for a collation sort. Use them for glue, never per row
-  over large scans.
+  over large scans — the next section is the full picture.
+
+## JavaScript functions: the crossover to fetch-and-filter
+
+A scalar UDF registered with `db.function()` pays one blocking
+cross-thread round trip per invocation: the query steps on a libuv
+worker, and each call marshals its arguments to the JS thread, waits for
+your function, and carries the result back — **~19 µs per call** on
+Apple Silicon (19.6 µs measured; ~28 µs in the Linux container), against
+~0.5 µs for the same work as a SQL expression.
+
+That cost is invisible when the function filters a bounded candidate
+set and decisive when it filters a large scan. The crossover is easy to
+estimate: a UDF predicate wins while
+
+```
+rows × 19 µs  <  (rows × per-row read cost) + (your filtering in JS)
+```
+
+— with a ~0.5 µs/row read, **fetch-and-filter overtakes the UDF at a
+few thousand candidate rows**. A real integration (a version-comparison
+predicate over a 16,046-row candidate set) measured the two shapes
+end to end:
+
+| strategy                                            | time    | result             |
+| --------------------------------------------------- | ------- | ------------------ |
+| the predicate as a JS UDF inside SQL                 | 331 ms  | identical hit set  |
+| narrow projection over the candidates, filter in JS  | 5.5 ms  | identical hit set  |
+
+— ~60× apart for identical results. The UDF shape is *correct*, just
+slow, which is what makes it dangerous: nothing fails, the query simply
+costs one thread-park per row.
+
+Rules of thumb:
+
+- **Push logic, not filtering.** A UDF shines when SQL needs your
+  domain logic on a *bounded* set — a regexp over candidate rows, a
+  checksum on a handful of values, a custom aggregate over a grouped
+  result. Marking the function `deterministic` lets SQLite use indexes;
+  `directOnly` (the default) keeps it out of attacker-reachable schema
+  SQL.
+- **Bulk filtering belongs in SQL or after `all()`.** Write the
+  predicate in SQL, or fetch a narrow projection and filter in JS. Both
+  are shown in the table above; filtering in JS after `all()` costs
+  ~1.25 µs/row in the README's 100k-row example, against ~19 µs/row for
+  the per-row UDF.
+- **There is no batched UDF.** SQLite invokes a scalar function per row
+  at step time and needs each result before the next row is read, so
+  calls cannot be coalesced into one array-in/array-out round trip
+  without changing results. The per-call cost is structural, which is
+  why the crossover above is the tool to reason with.
+
+The same arithmetic applies to aggregates (`step` is one round trip per
+row) and collations (O(n log n) round trips for a sort — sorting in JS
+after `all()` is faster for anything but small or one-off sorts).
+
+### Future direction: UDFs on the synchronous fast path
+
+The refusal of JS functions on the sync methods is policy, not the
+structural limit above. On `getSync`/`runSync`/`allSync` the JS thread
+is already the one executing SQL, so a callback could be invoked
+re-entrantly — a direct call with no cross-thread round trip, the way
+`node:sqlite` runs UDFs inline — and unlike collations, a function has
+an error channel (`sqlite3_result_error`), so failures are reportable
+mid-query. The current build refuses instead with an explicit error
+(`src/function.cc`, `SyncRefusalMessage`). Landing inline sync-path
+invocation would make the natural `... AND vers_compare(?, vers)`
+shape genuinely fast, closing the gap the README's comparison table
+attributes to `node:sqlite`. Deliberate follow-up work, out of scope
+for this release.
 
 ## Where this package loses
 

@@ -1252,6 +1252,19 @@ void Database::Work_BeginSerializeToBytes(Baton* baton) {
 void Database::Work_SerializeToBytes(napi_env e, void* data) {
     auto* baton = static_cast<SerializeBaton*>(data);
 
+    // sqlite3_serialize copies every page through the pager, and the
+    // pager reads through the WAL, so the snapshot carries every
+    // committed transaction whether or not its frames have been
+    // checkpointed into the main file. The one thing it cannot carry is
+    // the WAL format itself: a WAL database's header (bytes 18/19 =
+    // 0x02) demands WAL recovery on open, and a deserialized copy has no
+    // -wal file, so sqlite3_deserialize fails it with SQLITE_CANTOPEN at
+    // first use. Flip the image's file-format versions to 0x01 (rollback
+    // journal) — the workaround the sqlite3_deserialize documentation
+    // itself names. Only the copy is touched: with no NOCOPY flag sqlite
+    // never reads this buffer again, and the live database's journal
+    // mode is unaffected.
+
     sqlite3_int64 size = 0;
     unsigned char* bytes = sqlite3_serialize(baton->db->_handle,
         baton->database.c_str(), &size, 0);
@@ -1264,6 +1277,17 @@ void Database::Work_SerializeToBytes(napi_env e, void* data) {
         baton->message = std::string(sqlite3_errmsg(baton->db->_handle));
     }
     else {
+        // A WAL-mode image carries header bytes 18/19 = 0x02, which demands
+        // WAL recovery on open. A deserialized copy has no -wal file, so
+        // sqlite3_deserialize rejects it with SQLITE_CANTOPEN at first use;
+        // its documentation names this exact workaround: flip the image's
+        // file-format versions to 0x01 (rollback journal). Only a copy is
+        // touched — with no NOCOPY flag sqlite never reads this buffer
+        // again, and the live database's journal mode is unaffected.
+        if (size >= 20 && bytes[18] == 0x02 && bytes[19] == 0x02) {
+            bytes[18] = 0x01;
+            bytes[19] = 0x01;
+        }
         baton->data = bytes;
         baton->size = size;
     }

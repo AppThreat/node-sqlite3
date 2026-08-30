@@ -4,9 +4,19 @@
 // readonly/resizable options, and the naming discipline (serialize means
 // FIFO ordering, the byte form is serializeToBytes).
 import assert from 'node:assert';
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import sqlite3 from '../lib/sqlite3.js';
+import { TMP_DIR } from './support/db.js';
+
+/** Removes a database file and its journal/WAL siblings. */
+function removeDb(file) {
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+        rmSync(`${file}${suffix}`, { force: true });
+    }
+}
 
 describe('serializeToBytes / deserializeFromBytes', function () {
     it('round-trips a database with every value shape', async function () {
@@ -225,6 +235,87 @@ describe('serializeToBytes / deserializeFromBytes', function () {
         // serializeToBytes is the byte snapshot, returning bytes.
         const bytes = await db.serializeToBytes();
         assert.ok(bytes instanceof Uint8Array);
+        await db.close();
+    });
+
+    // 9.0.2: a WAL snapshot used to carry a WAL-format header (bytes
+    // 18/19 = 0x02), which demands WAL recovery a deserialized copy
+    // cannot perform — it has no -wal file — so the open failed with
+    // SQLITE_CANTOPEN at the far end. The serialization itself already
+    // includes every committed frame (sqlite3_serialize copies pages
+    // through the pager, and the pager reads through the WAL); the fix
+    // is purely the header rewrite. The reader-snapshot scenario below
+    // pins the frame-inclusion claim independently: a checkpoint could
+    // not copy the held frame even if serializeToBytes tried one.
+    it('round-trips a WAL database, rewriting the image to rollback-journal format', async function () {
+        const file = join(TMP_DIR, 'serialize-wal-round-trip.db');
+        removeDb(file);
+        const db = await sqlite3.open(file);
+        let reader;
+        try {
+            await db.exec('PRAGMA journal_mode = WAL');
+            await db.exec('CREATE TABLE t (a); INSERT INTO t VALUES (1)');
+
+            // Hold a reader snapshot open on a second connection, then
+            // commit another row on the writer: that frame sits beyond
+            // any checkpoint the reader prevents, and the snapshot below
+            // must still carry it.
+            reader = await sqlite3.open(file);
+            await reader.exec('BEGIN');
+            await reader.get('SELECT count(*) AS c FROM t');
+            await db.exec("INSERT INTO t VALUES ('held')");
+
+            const bytes = await db.serializeToBytes();
+            // The image is rollback-journal format (header bytes 18/19),
+            // openable without a -wal file.
+            assert.strictEqual(bytes[18], 0x01);
+            assert.strictEqual(bytes[19], 0x01);
+
+            const copy = await sqlite3.deserializeFromBytes(bytes, {
+                readOnly: true,
+            });
+            assert.deepStrictEqual(await copy.all('SELECT a FROM t'), [
+                { a: 1 },
+                { a: 'held' },
+            ]);
+            await copy.close();
+
+            // The live database is untouched: still WAL, still complete.
+            assert.strictEqual(
+                (await db.get('PRAGMA journal_mode')).journal_mode,
+                'wal',
+            );
+            assert.strictEqual(
+                (await db.get("SELECT count(*) AS c FROM t WHERE a = 'held'"))
+                    .c,
+                1,
+            );
+        } finally {
+            if (reader) {
+                // The read transaction may already have ended if the body
+                // failed partway; either way the close below is what matters.
+                await reader.exec('ROLLBACK').catch(() => {
+                    /* already rolled back */
+                });
+                await reader.close();
+            }
+            await db.close();
+            removeDb(file);
+        }
+    });
+
+    it('a non-WAL snapshot keeps its bytes exactly (no header rewrite)', async function () {
+        const db = await sqlite3.open(':memory:');
+        await db.exec('CREATE TABLE t (v)');
+        const bytes = await db.serializeToBytes();
+        // A rollback-journal image already reads 0x01/0x01; nothing to
+        // change, and the magic is intact.
+        assert.strictEqual(
+            Buffer.from(bytes.buffer, bytes.byteOffset, 16).toString('latin1'),
+            'SQLite format 3\u0000',
+        );
+        assert.strictEqual(bytes[18], 0x01);
+        assert.strictEqual(bytes[19], 0x01);
         await db.close();
     });
 });

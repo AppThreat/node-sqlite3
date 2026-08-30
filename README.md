@@ -24,7 +24,7 @@ your workload is synchronous and fits `node:sqlite`, use `node:sqlite`**
 — nothing needs installing and nothing needs compiling. This package
 exists for the parts it does not cover.
 
-Verified against `@appthreat/sqlite3` 9.0.1 on **Node v24.18.0 and
+Verified against `@appthreat/sqlite3` 9.0.2 on **Node v24.18.0 and
 v26.7.0**, which expose an identical `node:sqlite` surface and behave
 identically on every point below — so this table holds across the whole
 range this package supports. `node:sqlite` did grow quickly during 24.x
@@ -225,8 +225,13 @@ await using stmt = db2.prepare("SELECT 1"); // finalized the same way
 ```
 
 `each()` stays callback-only — the async iterator is its promise-based
-replacement. `db.prepare()` and `db.backup()` keep their synchronous return
-in every form.
+replacement. `db.backup()` keeps its synchronous return in every form.
+`db.prepare()` returns the statement synchronously in its callback form; the
+no-callback form returns the statement wrapped so that `await db.prepare(sql)`
+resolves only once the prepare has completed and the introspection accessors
+(`columns`, `parameterCount`, `parameterNames`, `readonly`) are populated —
+and yields the statement itself. The wrapper still forwards every statement
+method, so `db.prepare(sql).run(...)` chaining is unchanged.
 
 ## Performance options
 
@@ -421,7 +426,13 @@ A JS function called per row is the wrong tool for bulk filtering —
 fetch and filter in JS (or write the predicate in SQL). A JS collation is
 even sharper: sorting 100k rows costs O(N log N) round trips (~17 s).
 Where they shine is pushing _logic_ into a query — a regexp, a domain
-checksum, a custom aggregate over a bounded group.
+checksum, a custom aggregate over a bounded group. SQLite invokes a
+scalar function per row and needs each result before the next row is
+read, so there is no batched/array form: the per-call cost is
+structural. [docs/performance.md](docs/performance.md#javascript-functions-the-crossover-to-fetch-and-filter)
+works out the crossover — a few thousand candidate rows is where
+fetch-and-filter overtakes a UDF predicate, measured at ~60× on a real
+16k-row scan.
 
 Two deliberate restrictions follow from the threading model:
 
@@ -433,6 +444,17 @@ Two deliberate restrictions follow from the threading model:
   to run entirely (remove it with `removeCollation()` or use the async
   API): a comparison would need the blocked JS thread, and unlike
   functions, a collation callback has no way to report an error.
+  `db.withCollation(name, cmp, fn)` scopes a registration to the awaited
+  body, registering before it runs and removing after — even when the
+  body throws — so the sync methods are only gated for the block:
+
+  ```js
+  const rows = await db.withCollation(
+    "locale",
+    (a, b) => a.localeCompare(b, "de"),
+    () => db.all("SELECT name FROM t ORDER BY name COLLATE locale"),
+  ); // here the collation is removed and getSync() works again
+  ```
 
 Errors: a throwing callback surfaces as a `SQLITE_ERROR` whose message
 names the function, with the original JS error attached as `err.cause`;
@@ -528,10 +550,12 @@ service it). The token form has no such restriction.
 ### Statement and connection introspection
 
 ```js
-const stmt = await db.prepare("SELECT name AS who FROM users WHERE id = ?");
+const stmt = await db.prepare("SELECT name AS who FROM users WHERE id = $id", { $id: 1 });
 stmt.readonly; // true — sqlite3_stmt_readonly
 stmt.parameterCount; // 1
-stmt.parameterNames; // ['?1'] (null entries for positional `?`)
+stmt.parameterNames; // ['$id'] — a fully positional statement (`?`) has
+// no names at all and reports undefined; mixed statements keep null at
+// every positional index so indices stay aligned
 stmt.columns; // [{ name: 'who', declaredType: 'TEXT',
 //    database: 'main', table: 'users', origin: 'name' }]
 stmt.status(sqlite3.STMTSTATUS_FULLSCAN_STEP); // >0: the query scanned
@@ -545,7 +569,9 @@ await db.dbConfig(sqlite3.DBCONFIG_DEFENSIVE, true); // safe db_config switches
 
 The statement accessors serve a snapshot taken when the statement was
 prepared, so reading them never touches the sqlite handle and cannot
-race a running query; fields SQLite reports as absent (an expression
+race a running query; `await db.prepare(sql)` resolves only after that
+snapshot is published, so the accessors are populated at the first read.
+Fields SQLite reports as absent (an expression
 column has no origin, a typeless column no declared type) are omitted
 rather than nulled. Integer modes apply to `changes`/`totalChanges` as
 everywhere else. `tableInfo` runs a `PRAGMA table_info`, so a
@@ -616,12 +642,18 @@ const copy = await sqlite3.deserializeFromBytes(bytes, {
 ```
 
 `serializeToBytes` returns the exact bytes a file copy would contain
-(the FIFO-ordering `db.serialize()` keeps its old meaning). The bytes
-are named deliberately: overloading `serialize()` would be the worst
-API decision available. `deserializeFromBytes` **copies** into
-SQLite-owned memory — handing a JS buffer to SQLite directly is a
-use-after-free waiting to happen — and rejects corrupt input with
-`SQLITE_NOTADB` rather than crashing later.
+(the FIFO-ordering `db.serialize()` keeps its old meaning). The
+snapshot includes every committed transaction — serialization reads
+through the pager, and the pager reads through the WAL — and for a WAL
+database the returned bytes are rewritten to rollback-journal format,
+so the output always round-trips through `deserializeFromBytes` (a
+deserialized copy has no `-wal` file and could not open a WAL-format
+image demanding recovery). The live database's journal mode is
+untouched. The bytes are named deliberately: overloading `serialize()`
+would be the worst API decision available. `deserializeFromBytes`
+**copies** into SQLite-owned memory — handing a JS buffer to SQLite
+directly is a use-after-free waiting to happen — and rejects corrupt
+input with `SQLITE_NOTADB` rather than crashing later.
 
 ## Incremental blob I/O (v9)
 

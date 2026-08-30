@@ -198,4 +198,85 @@ describe('user-defined collations', function () {
             ['c', 'b', 'a'],
         );
     });
+
+    // 9.0.2: a scoped registration — the blast radius of one collation()
+    // call used to be the connection's whole lifetime, silently removing
+    // the sync fast path until an explicit removeCollation().
+    it('withCollation registers for the body and removes it afterwards', async function () {
+        await db.exec(
+            'CREATE TABLE t (w TEXT);\n' +
+                "INSERT INTO t VALUES ('b'), ('a'), ('c')",
+        );
+        const rows = await db.withCollation(
+            'scoped',
+            (a, b) => a.localeCompare(b),
+            (scope) => {
+                assert.strictEqual(scope, db);
+                // The sync gate is active inside the block.
+                assert.throws(() => db.getSync('SELECT 1'), /collation/);
+                return db.all('SELECT w FROM t ORDER BY w COLLATE scoped');
+            },
+        );
+        assert.deepStrictEqual(
+            rows.map((r) => r.w),
+            ['a', 'b', 'c'],
+        );
+        // Outside the block the collation is gone and the sync methods
+        // work again.
+        assert.strictEqual(db.getSync('SELECT 1 AS v').v, 1);
+    });
+
+    it('withCollation removes the collation when the body throws', async function () {
+        const boom = new Error('body explosion');
+        await assert.rejects(
+            () =>
+                db.withCollation(
+                    'scoped',
+                    (a, b) => a.localeCompare(b),
+                    () => {
+                        throw boom;
+                    },
+                ),
+            (err) => err === boom,
+        );
+        assert.strictEqual(db.getSync('SELECT 1 AS v').v, 1);
+    });
+
+    it('withCollation awaits an async body before removing', async function () {
+        const rows = await db.withCollation(
+            'scoped',
+            (a, b) => a.localeCompare(b),
+            async () => {
+                await db.exec('CREATE TABLE IF NOT EXISTS w (v TEXT)');
+                return db.all(
+                    "SELECT 'b' AS v UNION ALL SELECT 'a' ORDER BY 1 COLLATE scoped",
+                );
+            },
+        );
+        assert.deepStrictEqual(
+            rows.map((r) => r.v),
+            ['a', 'b'],
+        );
+        assert.strictEqual(db.getSync('SELECT 1 AS v').v, 1);
+    });
+
+    it('withCollation validates its arguments', function () {
+        assert.throws(
+            () => db.withCollation('x', (_a, _b) => 0),
+            /body function/,
+        );
+        assert.throws(
+            () =>
+                db.withCollation(
+                    '',
+                    (_a, _b) => 0,
+                    () => 'body',
+                ),
+            /non-empty name/,
+        );
+        assert.throws(
+            () => db.withCollation('x', 'nope', () => 'body'),
+            /comparator function/,
+        );
+    });
 });

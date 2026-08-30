@@ -568,4 +568,98 @@ describe('prepare', function () {
             db.close(done);
         });
     });
+
+    // 9.0.2: the no-callback form resolves its await only once the worker
+    // has completed the prepare (and any bind). Before, `await
+    // db.prepare(sql)` settled one microtask later — long before the
+    // prepare landed — so `columns`, `parameterCount`, `parameterNames`
+    // and `readonly` read as `undefined` and only recovered after an
+    // arbitrary turn of the event loop.
+    describe('prepare() completion gate', function () {
+        let db;
+        before(function (_t, done) {
+            db = new sqlite3.Database(':memory:', done);
+        });
+
+        it('populates the introspection accessors right after the await', async function () {
+            await db.exec('CREATE TABLE t (v TEXT, n INT)');
+            const stmt = await db.prepare('SELECT v, n FROM t WHERE n = ?');
+            assert.strictEqual(stmt.parameterCount, 1);
+            assert.deepStrictEqual(
+                stmt.columns.map((c) => c.name),
+                ['v', 'n'],
+            );
+            assert.strictEqual(stmt.parameterNames, undefined);
+            assert.strictEqual(stmt.readonly, true);
+            await stmt.finalize();
+        });
+
+        it('gates the bind form on prepare and bind completing', async function () {
+            const stmt = await db.prepare('SELECT v, n FROM t WHERE n = ?', 1);
+            assert.strictEqual(stmt.parameterCount, 1);
+            const rows = await stmt.all();
+            assert.deepStrictEqual(rows, []);
+            await stmt.finalize();
+        });
+
+        it('keeps the synchronous chaining surface before the await', async function () {
+            const stmt = db.prepare('INSERT INTO t VALUES (?, ?)');
+            // Same object identity across chained callback methods, and
+            // native methods run against the statement itself.
+            assert.ok(stmt instanceof sqlite3.Statement);
+            const out = stmt.run('a', 1, function (err) {
+                if (err) throw err;
+            });
+            assert.strictEqual(out, stmt);
+            await stmt.finalize();
+            const after = await db.get('SELECT count(*) AS c FROM t');
+            assert.strictEqual(after.c, 1);
+        });
+
+        it('yields the statement itself after the await', async function () {
+            const awaited = await db.prepare('SELECT 40 + 2 AS answer');
+            assert.ok(awaited instanceof sqlite3.Statement);
+            assert.strictEqual(awaited.sql, 'SELECT 40 + 2 AS answer');
+            assert.strictEqual(awaited.parameterCount, 0);
+            assert.strictEqual((await awaited.get()).answer, 42);
+            await awaited.finalize();
+        });
+
+        it('rejects the await on invalid SQL', async function () {
+            await assert.rejects(
+                () => db.prepare('SELECT * FROM no_such_table'),
+                (err) => {
+                    assert.strictEqual(err.code, 'SQLITE_ERROR');
+                    return true;
+                },
+            );
+            await db.wait();
+        });
+
+        it('reports a failure once: the await rejects, the event fires for listeners', async function () {
+            const events = [];
+            const stmt = db.prepare('SELECT * FROM no_such_table_either');
+            stmt.on('error', (err) => events.push(err));
+            await assert.rejects(() => stmt, /no such table/);
+            // One 'error' event for the listener, one rejection for the
+            // await — the same failure, not two.
+            assert.strictEqual(events.length, 1);
+            await db.wait();
+        });
+
+        it('still returns the statement synchronously in the callback form', async function () {
+            const stmt = db.prepare('SELECT 1 AS one', function (err) {
+                if (err) throw err;
+            });
+            assert.ok(stmt instanceof sqlite3.Statement);
+            // Accessors are undefined until the callback fires: the
+            // callback form keeps its historical asynchronous prepare.
+            assert.strictEqual(stmt.parameterCount, undefined);
+            await new Promise((resolve) => stmt.finalize(resolve));
+        });
+
+        after(async function () {
+            await db.close();
+        });
+    });
 });

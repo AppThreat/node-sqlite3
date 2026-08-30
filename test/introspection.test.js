@@ -77,6 +77,18 @@ describe('statement introspection', function () {
         assert.deepStrictEqual(numbered.parameterNames, ['?1', '?2']);
     });
 
+    it('parameterNames is undefined for fully positional statements', async function () {
+        // 9.0.2: a statement with only bare `?` parameters has no names to
+        // report — `undefined` says so plainly where an array of nulls
+        // read like a bug at the call site.
+        const positional = await prepare('SELECT ?, ?');
+        assert.strictEqual(positional.parameterNames, undefined);
+        assert.strictEqual(positional.parameterCount, 2);
+        // Zero parameters keeps the (empty) array.
+        const none = await prepare('SELECT 1');
+        assert.deepStrictEqual(none.parameterNames, []);
+    });
+
     it('columns carries declaredType, database, table and origin', async function () {
         const stmt = await prepare('SELECT name, score FROM user');
         assert.deepStrictEqual(stmt.columns, [
