@@ -1284,8 +1284,10 @@ export declare class Statement extends EventEmitter {
 
     /**
      * The bind parameter names in 1-based order: `':a'`, `'@b'`, `'$c'`,
-     * `'?1'`. Positional `?` parameters have no name; their entries are
-     * null so indices stay aligned.
+     * `'?1'`. `undefined` for a fully positional statement (every
+     * parameter a bare `?`): there are no names to report. A mixed
+     * statement keeps one array entry per parameter, with null at every
+     * positional index so indices stay aligned.
      *
      * @since 9.0.0
      */

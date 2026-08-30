@@ -277,10 +277,22 @@ declare module './native.js' {
             callback: (this: Database, err: SqliteError | null) => void,
         ): this;
 
-        /** Prepares a statement; returns it synchronously in every form. */
+        /**
+         * Prepares a statement. The no-callback form returns the statement
+         * wrapped in a thenable: awaiting it settles only once the native
+         * prepare (and any bind) has completed and the introspection
+         * accessors — `columns`, `parameterCount`, `parameterNames`,
+         * `readonly` — are populated, and yields the statement itself.
+         * Before the await, the wrapper forwards every statement member,
+         * so `db.prepare(sql).run(...)` keeps its synchronous surface. A
+         * prepare failure rejects the await.
+         * @since 9.0.2 the await gates on prepare completion.
+         */
+        prepare(sql: string): Statement & Promise<Statement>;
+        /** Prepares a statement; the callback is an error-only errback. */
         prepare(
             sql: string,
-            callback?: (this: Statement, err: SqliteError | null) => void,
+            callback: (this: Statement, err: SqliteError | null) => void,
         ): Statement;
         /** Prepares a statement with one array/named bind object. */
         prepare(
@@ -288,8 +300,15 @@ declare module './native.js' {
             params: BindParams,
             callback?: (this: Statement, err: SqliteError | null) => void,
         ): Statement;
-        /** Prepares a statement with variadic bind values. */
-        prepare(sql: string, ...params: [...BindValue[]]): Statement;
+        /**
+         * Prepares a statement with variadic bind values; awaiting the
+         * result gates on the prepare and the bind both completing.
+         * @since 9.0.2 the await gates on prepare + bind completion.
+         */
+        prepare(
+            sql: string,
+            ...params: [...BindValue[]]
+        ): Statement & Promise<Statement>;
         /** Prepares a statement with variadic bind values and a callback. */
         prepare(
             sql: string,
@@ -473,6 +492,27 @@ declare module './native.js' {
          * @since 9.0.0
          */
         removeCollation(name: string): this;
+
+        /**
+         * Runs `fn` with a JavaScript collation registered, removing it
+         * again afterwards: the blast radius of the registration is the
+         * awaited block, not the connection's lifetime. Inside the block
+         * the synchronous methods refuse to run, as with `collation()`;
+         * an error thrown by `fn` still removes the collation before the
+         * rejection propagates. Interleaved or nested scopes for the same
+         * name are last-wins — use distinct names for concurrent scopes.
+         *
+         * @since 9.0.2
+         * @example
+         * const rows = await db.withCollation('locale',
+         *     (a, b) => a.localeCompare(b, 'de'),
+         *     () => db.all('SELECT name FROM t ORDER BY name COLLATE locale'));
+         */
+        withCollation(
+            name: string,
+            cmp: (a: string, b: string) => number,
+            fn: (db: Database) => unknown,
+        ): Promise<unknown>;
 
         // ---- Hooks, authorizer, progress, WAL, introspection (v9).
 

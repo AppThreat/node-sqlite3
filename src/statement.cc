@@ -339,30 +339,36 @@ void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
         // Who hears about a failed prepare? Normally the prepare's own
         // callback, which every callback-style entry point supplies.
         //
-        // When there is none -- the promise API's iterate()/fetch() path
-        // -- the error used to go to the statement's 'error' event while
-        // the calls queued behind the prepare were dropped in silence, so
-        // nothing ever settled their promises and the caller hung. That
-        // is the abort-during-prepare hang: sqlite3_interrupt() aborts a
-        // prepare just as readily as a step, so any abort landing in that
-        // window wedged the connection. Fail those calls instead; they
-        // are what the caller is actually waiting on.
-        //
-        // CleanQueue falls back to the 'error' event itself when the
-        // queue turns out to be empty, so nothing goes unreported.
+        // Calls already queued behind the prepare settle no matter what:
+        // they are what the caller is actually awaiting, and dropping them
+        // in silence hangs exactly the abort-during-prepare window this
+        // path exists for (sqlite3_interrupt() aborts a prepare just as
+        // readily as a step). The prepare callback runs before the queue
+        // so the error reaches its call-site context first — the JS layer
+        // shares a once-token between the two slots, so the queued
+        // delivery of the same error is a no-op there — and when there is
+        // no callback the queue is settled before the failure is reported
+        // on the statement's 'error' event, the documented surface for a
+        // prepare given no callback of its own.
+        EXCEPTION(stmt->message, stmt->status, exception);
+        // A user-defined function that threw during the step kept its JS
+        // error on the database as the pending cause of exactly this
+        // failure (Error() did this for the callback-only path).
+        stmt->db->AttachPendingJsError(exception_obj);
         Napi::Function prepare_cb = baton->callback.Value();
-        if ((IS_FUNCTION(prepare_cb)) || stmt->queue.empty()) {
-            Error(baton.get());
-        } else {
-            // Build the error before firing anything: a callback that
-            // throws leaves a pending exception, and constructing an
-            // Error while one is pending is a fatal napi error.
-            EXCEPTION(stmt->message, stmt->status, exception);
-            // Settle the queued calls first -- they are what the caller
-            // awaits -- then still report the failure on the statement
-            // itself, which is the documented surface for a prepare that
-            // was given no callback of its own.
+        if (IS_FUNCTION(prepare_cb)) {
+            Napi::Value argv[] = { exception };
+            TRY_CATCH_CALL(stmt->Value(), prepare_cb, 1, argv);
             stmt->FailQueue(exception, false);
+        }
+        else if (!stmt->queue.empty()) {
+            stmt->FailQueue(exception, false);
+            Napi::Value info[] = {
+                Napi::String::New(env, "error"), exception
+            };
+            EMIT_EVENT(stmt->Value(), 2, info);
+        }
+        else {
             Napi::Value info[] = {
                 Napi::String::New(env, "error"), exception
             };
@@ -1807,6 +1813,20 @@ Napi::Value Statement::ParameterCountGetter(const Napi::CallbackInfo& info) {
 Napi::Value Statement::ParameterNamesGetter(const Napi::CallbackInfo& info) {
     if (!meta_valid) return info.Env().Undefined();
     auto env = info.Env();
+    // A fully positional statement (every parameter a bare `?`) carries no
+    // names at all: `undefined` says so plainly, instead of an array of
+    // nulls that reads like a bug at the call site. Mixed statements
+    // (named and positional) keep the array, with null at every positional
+    // index so the index mapping stays honest. Zero parameters is simply
+    // an empty array.
+    bool any_named = false;
+    for (const auto& name : meta.param_names) {
+        if (!name.empty()) {
+            any_named = true;
+            break;
+        }
+    }
+    if (!meta.param_names.empty() && !any_named) return env.Undefined();
     Napi::Array result = Napi::Array::New(env, meta.param_names.size());
     for (size_t i = 0; i < meta.param_names.size(); i++) {
         // Positional `?` parameters have no name: null keeps the index
