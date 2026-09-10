@@ -1,0 +1,26 @@
+lib/sqlite3.js
+  h_6a4cc5cdf68def 3224-3227,3405,3556
+package.json
+  h_6a4cc5cdf68def 82-94
+src/database.cc
+  h_6a4cc5cdf68def 105-112
+src/function.cc
+  h_6a4cc5cdf68def 577-578,581,584-588
+src/vtab.cc
+  h_6a4cc5cdf68def 402-405,408,411-415,489-490,493,496-500,571-574,604,608,611-616
+test/compat.test.js
+  h_6a4cc5cdf68def 4-6,23-29
+test/vtab.test.js
+  h_6a4cc5cdf68def 59-82,213-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "eda73ed5eeb05452d1ba8461f245cd7e7dd8b5e1",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
