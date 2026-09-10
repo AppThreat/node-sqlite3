@@ -1,0 +1,22 @@
+plans/01-project-assessment.md
+  h_6a4cc5cdf68def 1-139
+plans/02-competitor-research.md
+  h_6a4cc5cdf68def 1-307
+plans/03-feature-gap-matrix.md
+  h_6a4cc5cdf68def 1-139
+plans/04-roadmap.md
+  h_6a4cc5cdf68def 1-256
+plans/README.md
+  h_6a4cc5cdf68def 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "23da680cd968be05434873f9376085c3e682bd5b",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
