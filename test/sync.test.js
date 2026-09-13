@@ -685,12 +685,12 @@ describe('sync read paths: rowMode array', function () {
         stmt.finalize();
     });
 
-    it('rejects a rowMode that is not object or array', function () {
+    it('rejects a rowMode that is not object, array or pluck', function () {
         assert.throws(
             () => db.getSync('SELECT i FROM m', { rowMode: 'bogus' }),
             (err) =>
                 err instanceof TypeError &&
-                err.message === "rowMode must be 'object' or 'array'",
+                err.message === "rowMode must be 'object', 'array' or 'pluck'",
         );
         assert.throws(
             () => db.allSync('SELECT i FROM m', { rowMode: 7 }),

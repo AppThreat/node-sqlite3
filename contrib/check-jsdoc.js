@@ -86,10 +86,12 @@ function signatureFrom(lines, i) {
 // Count top-level commas in a balanced parameter list (angles included so
 // generic parameter defaults with `<K = string>` do not confuse depth).
 function countParams(list) {
+    // A trailing comma is formatting, not a parameter.
+    const trimmed = list.replace(/,\s*$/, '');
     let depth = 0;
     let count = 0;
     let seen = false;
-    for (const c of list) {
+    for (const c of trimmed) {
         if (c === '(' || c === '<' || c === '[' || c === '{') depth++;
         else if (c === ')' || c === '>' || c === ']' || c === '}') {
             depth--;

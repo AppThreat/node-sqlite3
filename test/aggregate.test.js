@@ -212,14 +212,33 @@ describe('user-defined aggregates', function () {
         );
     });
 
-    it('refuses invocation from the sync methods instead of deadlocking', {
+    it('runs aggregates directly from the sync methods (re-entrant)', {
         timeout: 5000,
     }, async function () {
         db.aggregate('total', totalAggregate());
-        await db.exec('CREATE TABLE t (x INT); INSERT INTO t VALUES (1)');
-        assert.throws(
-            () => db.getSync('SELECT total(x) AS v FROM t'),
-            /deadlock/,
+        await db.exec(
+            'CREATE TABLE t (x INT); INSERT INTO t VALUES (1), (2), (3)',
+        );
+        assert.strictEqual(db.getSync('SELECT total(x) AS v FROM t').v, 6);
+        // Window functions (inverse) take the same direct path.
+        db.aggregate('winsum', {
+            start: () => 0,
+            step: (acc, v) => acc + v,
+            result: (acc) => acc,
+            inverse: (acc, v) => acc - v,
+        });
+        const rows = db.allSync(
+            'SELECT winsum(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING ' +
+                'AND CURRENT ROW) AS s FROM t',
+        );
+        assert.deepStrictEqual(
+            rows.map((r) => r.s),
+            [1, 3, 5],
+        );
+        // An empty group still evaluates start()+result().
+        assert.strictEqual(
+            db.getSync('SELECT total(x) AS v FROM t WHERE 0').v,
+            0,
         );
     });
 

@@ -56,6 +56,28 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("_applyChangeset", &Database::ApplyChangeset, napi_default_method),
         InstanceMethod("_serializeToBytes", &Database::SerializeToBytes, napi_default_method),
         InstanceMethod("_deserialize", &Database::Deserialize, napi_default_method),
+        // JavaScript virtual tables (Phase 4): internal entry points
+        // wrapped by lib/sqlite3.js, which validates the definition and
+        // flushes the statement cache.
+        InstanceMethod("_registerVtab", &Database::RegisterVtab, napi_default_method),
+        InstanceMethod("_removeVtab", &Database::RemoveVtab, napi_default_method),
+        // Phase 1/6 introspection and ops: transaction state, db status
+        // counters, memory release, run-time limits, attached-file paths.
+        InstanceAccessor("inTransaction", &Database::InTransactionGetter, nullptr),
+        InstanceAccessor("txnState", &Database::TxnStateGetter, nullptr),
+        InstanceMethod("_dbStatus", &Database::DbStatus, napi_default_method),
+        InstanceMethod("_releaseMemory", &Database::ReleaseMemory, napi_default_method),
+        InstanceMethod("_getLimit", &Database::GetLimit, napi_default_method),
+        InstanceMethod("_dbLocation", &Database::DbLocation, napi_default_method),
+        // True while the JS thread is inside a sqlite call on this
+        // connection — i.e. while a user callback (function, aggregate,
+        // virtual-table generator) invoked from a *Sync method is on the
+        // stack. lib/sqlite3.js consults it to refuse the operations that
+        // would finalize the statement sqlite is stepping (every
+        // registration flushes the statement cache) BEFORE they touch any
+        // state; the native entry points refuse too, but by then the
+        // flush has already happened.
+        InstanceAccessor("_inSyncCall", &Database::InSyncCallGetter, nullptr),
         InstanceAccessor("open", &Database::Open, nullptr),
         InstanceAccessor("integerMode", &Database::IntegerModeGetter, nullptr),
         InstanceAccessor("state", &Database::StateGetter, nullptr),
@@ -88,6 +110,14 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
 void Database::Process() {
     auto env = this->Env();
     Napi::HandleScope scope(env);
+
+    // Virtual-table instance references queued by xDisconnect (a DROP or
+    // a module replacement can disconnect on a worker) are napi work, so
+    // this — the JS-thread point every completion and exclusive handler
+    // funnels through — is where they are deleted. Until now they waited
+    // for ~Database, leaking one strong generator reference per dropped
+    // factory instance for the connection's lifetime.
+    DrainVtabRefs();
 
     if (db_state == DbState::Closed && !queue.empty()) {
         // Work queued behind a *failed open* fails with the open's own
@@ -184,6 +214,7 @@ void Database::Schedule(Work_Callback callback, Baton* baton, bool exclusive) {
 
 Database::Database(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Database>(info) {
     auto env = info.Env();
+    uv_mutex_init(&vtab_refs_mutex);
 
     if (info.Length() <= 0 || !info[0].IsString()) {
         Napi::TypeError::New(env, "String expected").ThrowAsJavaScriptException();
@@ -211,6 +242,17 @@ Database::Database(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Database>(
 
     // Start opening the database.
     auto* baton = new OpenBaton(this, callback, filename.c_str(), mode);
+    if (info.Length() > pos && info[pos].IsBoolean()
+            && info[pos].As<Napi::Boolean>().Value()) {
+        // Synchronous open (the node:sqlite compat shim's DatabaseSync):
+        // a fresh connection has nothing in flight or queued, so opening
+        // inline on this thread is safe, and the connection is usable the
+        // moment the constructor returns — node:sqlite's semantics. The
+        // same Work_Open/Work_AfterOpen pair the async path runs.
+        Work_Open(env, baton);
+        Work_AfterOpen(env, napi_ok, baton);
+        return;
+    }
     Work_BeginOpen(baton);
 }
 
@@ -327,6 +369,14 @@ Napi::Value Database::IntegerModeGetter(const Napi::CallbackInfo& info) {
         case INTEGER_MIXED:  return Napi::String::New(env, "mixed");
         default:             return Napi::String::New(env, "number");
     }
+}
+
+// True while this thread is inside sqlite on this connection: the *Sync
+// methods' guard, observable from JavaScript because a callback they
+// invoke re-entrantly must not perform the operations that finalize the
+// stepping statement. See lib/sqlite3.js's assertNotInSyncCallback.
+Napi::Value Database::InSyncCallGetter(const Napi::CallbackInfo& info) {
+    return Napi::Boolean::New(info.Env(), sync_sqlite_depth > 0);
 }
 
 Napi::Value Database::StateGetter(const Napi::CallbackInfo& info) {
@@ -557,6 +607,18 @@ Napi::Value Database::Configure(const Napi::CallbackInfo& info) {
         Baton* baton = new LimitBaton(db, handle, id, value);
         db->Schedule(SetLimit, baton);
     }
+    else if (info[0].StrictEquals(
+            Napi::String::New(env, "walAutocheckpoint"))) {
+        if (!info[1].IsNumber()) {
+            Napi::TypeError::New(env,
+                "walAutocheckpoint value must be an integer"
+            ).ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        auto* baton = new Baton(db, handle);
+        baton->timeout = info[1].As<Napi::Number>().Int32Value();
+        db->Schedule(SetWalAutocheckpoint, baton);
+    }
     else if (info[0].StrictEquals(Napi::String::New(env, "integerMode"))) {
         // Pure JS-side marshalling state: applied immediately, no sqlite
         // handle access, so unlike the other options it needs no baton.
@@ -668,6 +730,27 @@ void Database::SetLimit(Baton* b) {
     assert(!baton->db->MayBlockOnWorkerRoundTrip());
 
     sqlite3_limit(baton->db->_handle, baton->id, baton->value);
+
+    baton->db->exclusiveHeld = false;
+    baton->db->Process();
+}
+
+// configure('walAutocheckpoint', n): sqlite3_wal_autocheckpoint. The value
+// rides the same baton slot busyTimeout uses (an int with no sqlite-side
+// interpretation until the worker applies it).
+void Database::SetWalAutocheckpoint(Baton* b) {
+    auto baton = std::unique_ptr<Baton>(b);
+
+    if (baton->db->MayBlockOnWorkerRoundTrip()) {
+        baton->db->Schedule(SetWalAutocheckpoint, baton.release(), true);
+        return;
+    }
+
+    assert(baton->db->IsOpen());
+    assert(baton->db->_handle);
+    assert(!baton->db->MayBlockOnWorkerRoundTrip());
+
+    sqlite3_wal_autocheckpoint(baton->db->_handle, baton->timeout);
 
     baton->db->exclusiveHeld = false;
     baton->db->Process();
@@ -2111,6 +2194,111 @@ Napi::Value Database::TotalChangesGetter(const Napi::CallbackInfo& info) {
     }
     return ConvertInt64ToJS(env, sqlite3_total_changes64(_handle),
         integer_mode, "db.totalChanges");
+}
+
+// --- Transaction state, db status, memory and limit introspection ------
+//
+// All of these read live sqlite state, so they follow the db.changes
+// pattern: refuse while a worker could be blocked mid-round-trip holding
+// the connection mutex; everything else merely serializes on the
+// (recursive) mutex inside sqlite, the ordinary main-thread sqlite cost.
+
+// Shared open/refusal prelude for the live sqlite readers. Returns true
+// when the caller may touch _handle.
+bool Database::LiveReadGate(Napi::Env env, const char* who) {
+    if (!IsOpen() || _handle == NULL) {
+        Napi::Error::New(env, "Database is not open")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    if (MayBlockOnWorkerRoundTrip()) {
+        std::string what = std::string(who) +
+            " cannot be read while a JavaScript function, collation, "
+            "progress callback or virtual-table generator is mid-call on "
+            "this connection; read it from a callback or after the query";
+        Napi::Error::New(env, what).ThrowAsJavaScriptException();
+        return false;
+    }
+    return true;
+}
+
+Napi::Value Database::InTransactionGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (!LiveReadGate(env, "db.inTransaction")) return env.Null();
+    // sqlite3_get_autocommit: 0 inside an explicit transaction.
+    return Napi::Boolean::New(env,
+        sqlite3_get_autocommit(_handle) == 0);
+}
+
+Napi::Value Database::TxnStateGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (!LiveReadGate(env, "db.txnState")) return env.Null();
+    switch (sqlite3_txn_state(_handle, "main")) {
+        case SQLITE_TXN_NONE: return Napi::String::New(env, "none");
+        case SQLITE_TXN_READ:  return Napi::String::New(env, "read");
+        case SQLITE_TXN_WRITE: return Napi::String::New(env, "write");
+        default: return env.Undefined();
+    }
+}
+
+// _dbStatus(op, reset?) -> { current, highwater }: sqlite3_db_status
+// counters (cache hits/misses, schema usage, statement memory...). Note
+// that SQLITE_DEFAULT_MEMSTATUS=0 in this build zeroes the process-wide
+// memory counters; the per-database cache and schema counters work.
+Napi::Value Database::DbStatus(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    REQUIRE_ARGUMENT_INTEGER(0, op);
+    bool reset = false;
+    if (info.Length() > 1 && !info[1].IsUndefined()) {
+        if (!info[1].IsBoolean()) {
+            Napi::TypeError::New(env, "reset flag must be a boolean")
+                .ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        reset = info[1].As<Napi::Boolean>().Value();
+    }
+    if (!LiveReadGate(env, "db.status()")) return env.Null();
+    int current = 0;
+    int highwater = 0;
+    int rc = sqlite3_db_status(_handle, op, &current, &highwater,
+        reset ? 1 : 0);
+    if (rc != SQLITE_OK) {
+        EXCEPTION(sqlite3_errmsg(_handle), rc, exception);
+        exception.As<Napi::Error>().ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    Napi::Object result = Napi::Object::New(env);
+    result.Set("current", Napi::Number::New(env, current));
+    result.Set("highwater", Napi::Number::New(env, highwater));
+    return result;
+}
+
+// _releaseMemory() -> bytes freed: sqlite3_db_release_memory, the pool
+// pressure lever (it releases non-essential page cache).
+Napi::Value Database::ReleaseMemory(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (!LiveReadGate(env, "db.releaseMemory()")) return env.Null();
+    int freed = sqlite3_db_release_memory(_handle);
+    return Napi::Number::New(env, freed);
+}
+
+// _getLimit(id) -> current value: sqlite3_limit(id, -1) reads without
+// setting. The JS layer maps names onto ids (db.limits).
+Napi::Value Database::GetLimit(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    REQUIRE_ARGUMENT_INTEGER(0, id);
+    if (!LiveReadGate(env, "db.limits")) return env.Null();
+    return Napi::Number::New(env, sqlite3_limit(_handle, id, -1));
+}
+
+// _dbLocation(dbName) -> filesystem path of an attached database ("" for
+// in-memory or temp schemas): sqlite3_db_filename.
+Napi::Value Database::DbLocation(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    REQUIRE_ARGUMENT_STRING(0, name);
+    if (!LiveReadGate(env, "db.location()")) return env.Null();
+    const char* file = sqlite3_db_filename(_handle, name.c_str());
+    return Napi::String::New(env, file != NULL ? file : "");
 }
 
 Napi::Value Database::Exec(const Napi::CallbackInfo& info) {

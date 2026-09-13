@@ -41,7 +41,7 @@ relying on a ❌ below.
 | Asynchronous API (event loop stays free)     | ✅ callbacks + promises                                         | ❌ synchronous only                      |
 | `async` iteration (`for await`), streams     | ✅ `iterate`, `stream`                                          | ❌ (sync `iterate` only)                 |
 | Worker-thread connection pool                | ✅ `pool()`                                                     | ❌                                       |
-| Transaction helper with savepoints           | ✅ `transaction()`                                              | ❌ hand-rolled `BEGIN`/`COMMIT`          |
+| Transaction helper with savepoints           | ✅ `transaction()`, reusable `createTransaction()`               | ❌ hand-rolled `BEGIN`/`COMMIT`          |
 | Statement cache                              | ✅ `cacheStatements()`, implicit on sync                        | ❌ prepare per call                      |
 | Custom collations                            | ✅ `collation()` / `removeCollation()`                          | ❌                                       |
 | Incremental blob I/O                         | ✅ `openBlob()`                                                 | ❌ read/write whole values               |
@@ -50,44 +50,63 @@ relying on a ❌ below.
 | Query cancellation                           | ✅ `cancellationToken()`, connection-wide                       | ❌                                       |
 | WAL checkpoint control                       | ✅ `checkpoint()`                                               | ❌                                       |
 | Schema introspection                         | ✅ `tableInfo()`, `columns()`, `parameterNames`                 | ⚠️ `columns()` only                      |
-| Changeset utilities                          | ✅ concat / invert / iterate                                    | ⚠️ apply + create only                   |
+| Changeset utilities                          | ✅ concat / invert / iterate / **rebase** / `session.diff()`    | ⚠️ apply + create only                   |
+| JavaScript virtual tables                    | ✅ `db.table()` generator tables + `db.values()` array tables   | ❌                                       |
+| Atomic `batch()`                             | ✅ multi-statement, libsql-style modes                          | ❌                                       |
+| `pragma()` / `explain()` helpers             | ✅ parsed rows, `EXPLAIN QUERY PLAN`                            | ❌                                       |
+| SQL text dump (`.dump`)                      | ✅ `db.dump()`, streaming `iterdump()`                          | ❌                                       |
+| Error token byte offset                      | ✅ `err.offset` on failed prepares                              | ❌                                       |
+| `diagnostics_channel` query spans            | ✅ `subscribeQueries()` + the `sqlite.db.query` mirror          | ⚠️ `sqlite.db.query` only                |
 | Backup control                               | ✅ handle you step yourself (`remaining`, `idle`, retry policy) | ⚠️ one-shot promise (`rate`, `progress`) |
-| Integer read modes                           | ✅ `number` / `mixed` / `bigint`, per connection                | ⚠️ `setReadBigInts()` per statement      |
+| Integer read modes                           | ✅ `number` / `mixed` / `bigint`, per connection or statement   | ⚠️ `setReadBigInts()` per statement      |
 | Electron support                             | ✅ tested in CI, main + utility process                         | ⚠️ works, untested by us                 |
 
 ## What both have
 
 User-defined functions and aggregates (including window functions via
-`inverse`), sessions and changesets, the authorizer, extension loading,
+`inverse`) — on the async paths here through a worker round trip, and on
+the synchronous fast path through a direct re-entrant call (see below) —
+sessions and changesets, the authorizer, extension loading,
 `serialize`/`deserialize`, incremental online backup with progress
 reporting, `readOnly` and busy-timeout connection options, array row
-mode, bare and unknown named-parameter control, and extended result
-codes on errors. Both also **refuse to truncate** an INTEGER outside the
-safe range rather than silently losing precision — they differ only in
-how you opt into `BigInt`.
+mode, bare and unknown named-parameter control, tagged-template queries
+(`createTagStore()` here is promise-native and carries the
+`raw`/`join`/`identifier` composition helpers), `inTransaction`, and
+extended result codes on errors. Both also **refuse to truncate** an
+INTEGER outside the safe range rather than silently losing precision —
+they differ only in how you opt into `BigInt`.
 
 ## What only `node:sqlite` has
 
-| Capability                                                             | Why it matters                                                |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------- |
-| **Zero install** — built in, no compiler, no prebuild, no supply chain | Usually the deciding factor                                   |
-| **UDFs callable from synchronous queries**                             | See below — a real architectural difference, not an oversight |
-| Tagged-template queries (`createTagStore`)                             | Ergonomic SQL literals                                        |
-| `enableDefensive()`                                                    | Hardening for untrusted SQL                                   |
+| Capability                                                             | Why it matters                   |
+| ---------------------------------------------------------------------- | -------------------------------- |
+| **Zero install** — built in, no compiler, no prebuild, no supply chain | Usually the deciding factor      |
+| `enableDefensive()` as a method                                        | ⚠️ this package has `dbConfig()` |
 
-The UDF difference is worth understanding before choosing. `node:sqlite`
-runs SQLite on the main thread, so a JavaScript callback can run inline
-while a query is stepping. This package runs asynchronous queries on a
-worker, and a JS callback fires safely there — but calling a UDF from
-the _synchronous_ fast path would mean SQLite blocking the JS thread
-that has to run the callback, which deadlocks. It refuses instead, with
-an error saying so. So: **UDFs, aggregates and window functions work on
-the async API here, not on `getSync`/`allSync`/`runSync`.** If you need
-custom functions inside otherwise-synchronous code, `node:sqlite` is the
-better fit.
+### The UDF story
+
+`node:sqlite` runs SQLite on the main thread, so a JavaScript callback
+runs inline while a query is stepping. This package runs asynchronous
+queries on a worker, and a JS callback fires safely there — one blocking
+round trip to the JS thread per call (a few microseconds; fine for
+bounded-row logic, wrong for per-row bulk predicates). Since 9.1 the
+**synchronous fast path runs UDFs directly**: on `getSync`/`allSync`/
+`runSync` the JS thread is the one executing SQL, so the callback is
+invoked re-entrantly on that same thread — exactly like `node:sqlite` —
+with the one hard rule preserved (a UDF cannot drive *its own* statement
+re-entrantly; other statements on the connection work). A throwing
+callback surfaces through the step error with the thrown value as
+`cause`, and JS collations/progress callbacks still refuse on the sync
+path (they have no error channel).
+
+The cost model in one line: **sync-path UDFs are direct calls; async-path
+UDFs pay one worker→JS round trip each.**
 
 Migrating from `node:sqlite` is mostly mechanical — `DatabaseSync` maps
-to `Database` plus the `*Sync` methods. See
+to `Database` plus the `*Sync` methods — and since 9.1 there is a
+drop-in shim: `import { DatabaseSync } from '@appthreat/sqlite3/compat'`
+maps the `node:sqlite` surface onto this package's sync fast path (with
+the documented divergences where a synchronous form cannot exist). See
 [MIGRATING-TO-V9.md](MIGRATING-TO-V9.md) for the value-marshalling
 differences, which are where the surprises live.
 
@@ -101,9 +120,11 @@ npm install @appthreat/sqlite3
 pnpm add @appthreat/sqlite3
 # or
 yarn add @appthreat/sqlite3
-# or
-bun add @appthreat/sqlite3
 ```
+
+On the Bun runtime use Bun's built-in `bun:sqlite` — this package's
+addon needs N-API behaviour Bun 1.4 does not provide (see
+[docs/install.md](docs/install.md#bun-install-works-runtime-does-not-yet)).
 
 - GitHub's `master` branch: `npm install https://github.com/AppThreat/node-sqlite3/tarball/master`
 
@@ -437,9 +458,17 @@ fetch-and-filter overtakes a UDF predicate, measured at ~60× on a real
 Two deliberate restrictions follow from the threading model:
 
 - A JS function reached from a **synchronous method**
-  (`getSync`/`runSync`/`allSync`/`prepareSync`) fails with an explicit
-  error instead of deadlocking: the JS thread is the one blocked inside
-  SQLite there and cannot run the callback. Use the async API.
+  (`getSync`/`runSync`/`allSync`/`prepareSync` steps) runs **directly**:
+  the JS thread is the one executing SQL there, so the callback is
+  invoked re-entrantly on that same thread — same-thread, no round
+  trip, like `node:sqlite`. (Since 9.1; before that this refused.) The
+  one rule: such a callback cannot drive *its own* statement
+  re-entrantly — use another statement or the async API. Nor can it do
+  anything that flushes the statement cache mid-step, since the cache
+  holds the executing statement: registering or removing a function,
+  aggregate, collation, virtual table or authorizer policy, clearing a
+  tag store, or closing the connection all refuse with a message saying
+  so. Do those before or after the query.
 - While a JS **collation** is registered, the synchronous methods refuse
   to run entirely (remove it with `removeCollation()` or use the async
   API): a comparison would need the blocked JS thread, and unlike
@@ -605,6 +634,32 @@ const inverse = sqlite3.invertChangeset(changeset); // undoes the apply
 const both = sqlite3.concatChangeset(a, b); // a then b
 ```
 
+### Rebasing (9.1): the fork-free sync loop
+
+Apply with `{ rebase: true }` to harvest a **rebase buffer** — the
+record of which conflicting changes were omitted or replaced — then
+rebase later local changesets against it before applying them remotely.
+Together with `session.diff()` (a changeset of the differences between
+an attached database's table and this one, without recording anything)
+this is a complete offline-first sync toolkit on stock SQLite; no other
+JS driver has rebasing (rusqlite is the only binding anywhere):
+
+```js
+// one round of sync: apply the server's changes, remember the conflicts
+const rebase = await serverDb.applyChangeset(serverChangeset, {
+  conflict: "omit",
+  rebase: true, // resolves the rebase buffer (null if no conflicts)
+});
+// later: rebase the client's new work against those resolutions and push
+const rebased = sqlite3.rebaseChangeset(clientChangeset, rebase);
+await serverDb.applyChangeset(rebased);
+```
+
+`session.diff('t', 'other')` records the changes that transform the
+attached database `other`'s table into this connection's — the
+"what changed between these two databases" primitive for verification
+and sync tooling.
+
 `applyChangeset` wraps the apply in one savepoint: either every change
 lands or the whole apply rolls back. `conflict` decides what happens on
 a collision — `'abort'` (the default) rolls back, `'omit'` skips the
@@ -682,6 +737,135 @@ cannot grow through the handle: size the column first (e.g.
 through a blob handle surfaces as a `'preupdate'` delete event (the new
 values are not yet available inside `sqlite3_blob_write`).
 
+## Ergonomics, virtual tables and migrations (9.1)
+
+The sync-first drivers make a set of small things trivial; 9.1 adds the
+whole bundle, promise-native:
+
+```js
+// pragmas with parsed results (the recommended way to run them)
+await db.pragma("journal_mode = WAL");
+const version = await db.pragma("user_version", { simple: true });
+
+// the query planner's own account, without executing
+const plan = await db.explain("SELECT * FROM users WHERE id = ?");
+
+// atomic multi-statement batches (migrations, seeding)
+await db.batch([
+  "CREATE TABLE t (a)",
+  { sql: "INSERT INTO t VALUES (?)", args: 1 },
+]);
+
+// reusable transactions with begin-mode variants
+const move = db.createTransaction((tx, from, to, n) => /* ... */);
+await move.immediate(1, 2, 50);
+
+// .dump-style SQL export (streaming form: sqlite3.iterdump(db)) —
+// AUTOINCREMENT counters, user_version and virtual-table content included
+const sqlText = await db.dump();
+
+// live state
+db.inTransaction; // true inside BEGIN
+db.txnState;      // 'none' | 'read' | 'write'
+db.limits;        // the run-time limits
+db.status("cacheHit"); // { current, highwater }
+db.location();    // the attached file's path
+
+// array/pluck row modes on the async paths too
+const ids = await db.all("SELECT id FROM t", { rowMode: "pluck" });
+
+// failed prepares carry the failing token's byte offset
+try { db.prepareSync("SELECT * FRUM t"); }
+catch (err) { err.offset; } // 9
+
+// per-statement integer mode
+const stmt = db.prepareSync(sql, { integerMode: "bigint" });
+```
+
+**JavaScript virtual tables** — generator-computed, read-only, working
+from both the async paths (rows are pulled in batches through the worker
+round trip) and the sync methods (direct re-entrant calls):
+
+```js
+db.table("sequence", {
+  columns: ["value", "count"],
+  parameters: ["count"], // HIDDEN → a table-valued function's argument
+  rows: function* (count) {
+    for (let i = 0; i < count; i++) yield [i, count];
+  },
+});
+await db.all("SELECT value FROM sequence(5)");
+```
+
+Rows are pulled as the query consumes them (64 at first, growing to
+1024), so an **unbounded generator is fine** — `SELECT … LIMIT 3` over an
+infinite sequence stops after the first batch, and a table larger than
+memory streams. A scan that stops early leaves the generator suspended
+and never resumes it, so generator `finally` blocks are not a place to
+release resources. An unconstrained HIDDEN parameter reaches the
+generator as `undefined`; one the query constrained is also reported as
+that column's value, so `SELECT count FROM sequence(5)` works without the
+generator echoing it.
+
+`db.values(array)` exposes any JS array as a queryable table — the
+rusqlite `rarray()` ergonomics no JS driver had: `JOIN` against
+in-memory data instead of building IN-lists. `drop()` the handle when you
+are done (anonymous registrations are capped at 32 per connection, the
+oldest being dropped to make room).
+
+**Tagged templates** — node:sqlite's tag store, promise-native, with
+the composition helpers ORMs need (the ones Bun notably lacks):
+
+```js
+const store = db.createTagStore();
+const table = store.identifier("users");
+await store.all`SELECT * FROM ${table} WHERE id = ${id}`;
+await store.all`SELECT * FROM ${table} WHERE id IN (${store.join(ids)})`;
+```
+
+Every interpolated value binds as a parameter unless it came from
+`raw`/`identifier`/`identifierPath`/`join`/`empty` — a look-alike object
+(`{ text, params }` out of `JSON.parse`) binds like anything else rather
+than becoming SQL. `join()` takes values as well as fragments, which is
+what an IN-list of user data needs. Creating a store turns the connection
+statement cache on if it was off, since reusing statements is the point.
+
+**Migrations** — `PRAGMA user_version`-based, sequential, each in one
+transaction; from a directory of `NNN-name.sql` files or a list:
+
+```js
+await sqlite3.migrate(db, "migrations/");
+```
+
+**Observability** — finished-statement spans on diagnostics channels,
+armed only while subscribed:
+
+```js
+const unsubscribe = sqlite3.subscribeQueries(({ sql, durationMs }) => {
+  apm.record(sql, durationMs); // also mirrored to node's sqlite.db.query
+});
+```
+
+**node:sqlite drop-in** — code written against the built-in module can
+switch without rewriting:
+
+```js
+import { DatabaseSync } from "@appthreat/sqlite3/compat";
+const db = new DatabaseSync(":memory:"); // opens synchronously
+db.exec("CREATE TABLE t (a)");
+const row = db.prepare("SELECT * FROM t WHERE a = ?").get(1);
+```
+
+The shim maps onto the sync fast path (re-entrant UDFs included) and
+exposes the full async surface through `db.native`. The places a
+synchronous form cannot exist keep this package's async signatures and
+are listed at the top of [lib/compat.js](lib/compat.js): sessions,
+`serialize`, and `close()`, which starts the close rather than completing
+it (`await using`, or `await db.native.close()`, when a caller must know
+the file is free — deleting or reopening it on Windows).
+`StatementSync.iterate()` materialises its rows, because the sync path has
+no mid-cursor suspension.
+
 ## Worker threads and the connection pool (v9)
 
 The addon is context-aware: it loads cleanly in every `worker_threads`
@@ -734,6 +918,32 @@ result sets pay a copy — the pool is for many small queries, not bulk
 reads. See [docs/concurrency.md](docs/concurrency.md) for the full
 picture: `serialize()`/`parallelize()` semantics, WAL, busy timeouts,
 and when to use one connection, several, or the pool.
+
+## Using with Kysely and Drizzle
+
+Both major ORMs need only what this package already has — no separate
+dialect package. For **Kysely** (async-native, the natural fit) a
+working dialect is ~40 lines over one connection:
+`acquireConnection`/`releaseConnection` hand out the database, the
+transaction verbs are raw `BEGIN`/`COMMIT`/`ROLLBACK`, and Kysely's own
+`SqliteAdapter`/`SqliteIntrospector`/`SqliteQueryCompiler` fill the
+rest —
+[examples/kysely-dialect.mjs](examples/kysely-dialect.mjs) is a
+zero-dependency template:
+
+```js
+import { kyselyFor } from "./examples/kysely-dialect.mjs";
+const kysely = kyselyFor(db, {
+  onCreateConnection: (c) => c.pragma("journal_mode = WAL"),
+});
+const rows = await kysely.selectFrom("users").selectAll().execute();
+```
+
+For **Drizzle** (whose SQLite dialect is synchronous), map onto the
+sync fast path: `prepare` → `db.prepareSync`, `run`/`all`/`get` → the
+`*Sync` methods, `transaction` → `db.transaction(fn, { mode: "immediate" })`.
+Drizzle's better-sqlite3 driver is ~100 lines; the deltas are those
+three substitutions plus reading `lastInsertRowid` from the run result.
 
 ## Source install
 

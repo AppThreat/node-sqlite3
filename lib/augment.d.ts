@@ -38,6 +38,7 @@ import type {
     CheckpointMode,
     CheckpointOptions,
     CheckpointResult,
+    Database,
     FunctionOptions,
     OpenBlobOptions,
     Row,
@@ -55,6 +56,109 @@ import type {
     SignalOptions,
     TransactionOptions,
 } from './promises.js';
+
+/**
+ * The tagged-template statement store `db.createTagStore()` returns: an
+ * LRU of prepared statements driven by template literals, with the
+ * composition helpers ORMs need.
+ *
+ * @since 9.1.0
+ */
+export interface TagStore {
+    /**
+     * Template tag resolving the first row.
+     * @param templates the template strings.
+     * @param values the interpolated values.
+     * @returns the first row, or undefined.
+     */
+    get(
+        templates: TemplateStringsArray,
+        ...values: unknown[]
+    ): Promise<Row | undefined>;
+    /**
+     * Template tag resolving every row.
+     * @param templates the template strings.
+     * @param values the interpolated values.
+     * @returns the rows.
+     */
+    all(templates: TemplateStringsArray, ...values: unknown[]): Promise<Row[]>;
+    /**
+     * Template tag returning the backpressured async iterator.
+     * @param templates the template strings.
+     * @param values the interpolated values.
+     * @returns the async iterator.
+     */
+    iterate(
+        templates: TemplateStringsArray,
+        ...values: unknown[]
+    ): AsyncIterableIterator<Row>;
+    /**
+     * Template tag running the statement.
+     * @param templates the template strings.
+     * @param values the interpolated values.
+     * @returns the run result.
+     */
+    run(
+        templates: TemplateStringsArray,
+        ...values: unknown[]
+    ): Promise<import('./promises.js').PromiseRunResult>;
+    /**
+     * Drops every cached SQL key, and the connection statements they
+     * name.
+     * @returns nothing.
+     */
+    clear(): void;
+    /** The number of composed SQL keys the store is holding. */
+    readonly size: number;
+    /** The maximum number of SQL keys the store holds. */
+    readonly capacity: number;
+    /** The connection. */
+    readonly db: Database;
+    /**
+     * Builds a raw-SQL fragment.
+     * @param text the SQL text.
+     * @returns the fragment.
+     */
+    raw(text: string): SqlFragment;
+    /**
+     * Joins fragments and/or plain values with a separator (IN-lists and
+     * friends). A fragment contributes its SQL text; anything else binds
+     * as a parameter, which is what an IN-list of user data needs.
+     * @param items the fragments or values.
+     * @param separator the joining text.
+     * @returns the joined fragment.
+     */
+    join(items: (SqlFragment | unknown)[], separator?: string): SqlFragment;
+    /**
+     * Quotes one SQL identifier for safe interpolation.
+     * @param name the identifier.
+     * @returns the quoted fragment.
+     */
+    identifier(name: string): SqlFragment;
+    /**
+     * Quotes a dotted identifier path part by part.
+     * @param dotted the dot-separated path.
+     * @returns the quoted fragment.
+     */
+    identifierPath(dotted: string): SqlFragment;
+    /**
+     * Builds the empty fragment.
+     * @returns the fragment.
+     */
+    empty(): SqlFragment;
+}
+
+/**
+ * One composed piece of SQL: literal text plus bind parameters.
+ *
+ * @since 9.1.0
+ */
+export interface SqlFragment {
+    /** The SQL text. */
+    text: string;
+    /** The bind parameters, in text order. */
+    params: unknown[];
+}
 
 declare module './native.js' {
     interface Database {
@@ -679,6 +783,158 @@ declare module './native.js' {
          * supports the getSync/runSync/allSync fast path.
          */
         prepareSync(sql: string): Statement;
+        /**
+         * Prepares synchronously with a per-statement integer-mode
+         * override (node:sqlite's `readBigInts`, better-sqlite3's
+         * `safeIntegers`, as a one-shot option).
+         * @since 9.1.0
+         */
+        prepareSync(
+            sql: string,
+            options: { integerMode?: 'number' | 'bigint' | 'mixed' },
+        ): Statement;
+
+        /**
+         * Runs a `PRAGMA` and resolves its parsed rows; `{ simple: true }`
+         * resolves the first column of the first row.
+         * @since 9.1.0
+         */
+        pragma(
+            source: string,
+            options?: { simple?: boolean },
+        ): Promise<Record<string, unknown>[] | unknown>;
+        /**
+         * Resolves the `EXPLAIN QUERY PLAN` rows (or, with
+         * `{ full: true }`, the VDBE program) without executing the
+         * statement.
+         * @since 9.1.0
+         */
+        explain(
+            sql: string,
+            options?: { full?: boolean },
+        ): Promise<Record<string, unknown>[]>;
+        /**
+         * Runs an array of statements atomically in one transaction;
+         * read-shaped statements resolve their rows, others their run
+         * result.
+         * @since 9.1.0
+         */
+        batch(
+            statements: Array<
+                | string
+                | { sql: string; args?: BindParams }
+                | [string, ...BindValue[]]
+            >,
+            options?: {
+                mode?: 'write' | 'read' | 'deferred' | 'exclusive';
+            },
+        ): Promise<unknown[]>;
+        /**
+         * Serializes the database to `.dump`-style SQL text.
+         * @since 9.1.0
+         */
+        dump(): Promise<string>;
+        /**
+         * Reads one `sqlite3_db_status` counter, by friendly name
+         * (`'cacheHit'`) or DBSTATUS_* constant.
+         * @since 9.1.0
+         */
+        status(
+            op: string | number,
+            options?: { reset?: boolean },
+        ): { current: number; highwater: number };
+        /**
+         * Releases non-essential page-cache memory; returns the bytes
+         * freed.
+         * @since 9.1.0
+         */
+        releaseMemory(): number;
+        /**
+         * The current run-time limits, by friendly name.
+         * @since 9.1.0
+         */
+        readonly limits: Record<string, number>;
+        /**
+         * The filesystem path of an attached database (empty for
+         * in-memory/temp schemas).
+         * @since 9.1.0
+         */
+        location(dbName?: string): string;
+        /**
+         * Registers a read-only virtual table computed by a JavaScript
+         * generator (eponymous form). `parameters` names the subset of
+         * `columns` declared HIDDEN — the table-valued function's
+         * arguments. Rows are pulled in batches as the query consumes
+         * them, so an unbounded generator works with `LIMIT`; a scan that
+         * stops early leaves the generator suspended without resuming it.
+         * @since 9.1.0
+         */
+        table(
+            name: string,
+            definition: {
+                columns: Array<string | { name: string; type?: string }>;
+                parameters?: string[];
+                rows: (
+                    this: undefined,
+                    ...args: unknown[]
+                ) => Iterable<unknown[] | Record<string, unknown>>;
+            },
+        ): this;
+        /**
+         * Registers a named virtual-table module instantiated per
+         * `CREATE VIRTUAL TABLE ... USING name(args)`; the factory
+         * declares its columns as `factory.columns` and receives the
+         * DDL argument strings.
+         * @since 9.1.0
+         */
+        table(
+            name: string,
+            factory: ((...args: string[]) => unknown) & {
+                columns: Array<string | { name: string; type?: string }>;
+                parameters?: string[];
+            },
+        ): this;
+        /**
+         * Removes a virtual-table module registered with `db.table()`.
+         * @since 9.1.0
+         */
+        removeTable(name: string): this;
+        /**
+         * Exposes one JS array (or iterable) as a queryable table with
+         * `key`/`value` columns; returns `{ name, drop() }`. Anonymous
+         * registrations are capped at 32 per connection (the oldest is
+         * dropped), so `drop()` each handle when done or pass an explicit
+         * `{ name }`, which opts out of the cap.
+         * @since 9.1.0
+         */
+        values(
+            iterable: Iterable<unknown>,
+            options?: { name?: string },
+        ): { name: string; drop(): void };
+        /**
+         * Builds a tagged-template statement store (an LRU keyed on the
+         * joined SQL) with `get`/`all`/`iterate`/`run` tags and the
+         * `raw`/`join`/`identifier`/`identifierPath`/`empty` composition
+         * helpers. Enables the connection statement cache if it is not
+         * already on; only a fragment from those helpers is spliced in as
+         * SQL text, every other interpolated value binds.
+         * @since 9.1.0
+         */
+        createTagStore(maxSize?: number): TagStore;
+        /**
+         * Builds a reusable transaction wrapper carrying
+         * `.deferred()`/`.immediate()`/`.exclusive()` begin-mode
+         * variants.
+         * @since 9.1.0
+         */
+        createTransaction(
+            fn: (tx: Database, ...args: unknown[]) => unknown,
+            options?: TransactionOptions,
+        ): ((...args: unknown[]) => Promise<unknown>) & {
+            deferred(...args: unknown[]): Promise<unknown>;
+            immediate(...args: unknown[]): Promise<unknown>;
+            exclusive(...args: unknown[]): Promise<unknown>;
+        };
 
         /** Backs the database up to a file, returned synchronously. */
         backup(
@@ -758,6 +1014,14 @@ declare module './native.js' {
         _statementForSync(sql: string): Statement;
         /** Finalizes every cached statement, emptying the cache. @internal */
         _drainStatementCache(): void;
+        /**
+         * True while the JavaScript thread is inside SQLite on this
+         * connection — i.e. inside a callback a synchronous method invoked
+         * re-entrantly. The operations that finalize the executing
+         * statement (every registration, which flushes the statement
+         * cache) refuse then. @internal
+         */
+        readonly _inSyncCall: boolean;
 
         // ---- Sessions, changesets, serialization and blob I/O
         // (Deliverable 08).
@@ -1020,6 +1284,19 @@ declare module './native.js' {
     }
 
     interface Session {
+        /**
+         * Records the differences between `fromDb`'s table and this
+         * session's table into the session (sqlite3session_diff),
+         * without either database being written; harvest with
+         * `changeset()`. @since 9.1.0
+         */
+        diff(table: string, fromDb: string): Promise<void>;
+        /** session.diff, callback form. @since 9.1.0 */
+        diff(
+            table: string,
+            fromDb: string,
+            callback: (this: Session, err: SqliteError | null) => void,
+        ): this;
         /** Harvests the recorded changes as a changeset. @since 9.0.0 */
         changeset(): Promise<Uint8Array>;
         /** Harvests the recorded changes, callback form. */

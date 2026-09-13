@@ -633,6 +633,97 @@ export declare class Database extends EventEmitter {
      * @since 9.0.0
      */
     readonly totalChanges: number | bigint;
+
+    /**
+     * True while an explicit transaction is open on the connection
+     * (`sqlite3_get_autocommit` == 0). Refuses (throws) while a JS
+     * callback round trip could hold the connection mutex.
+     *
+     * @since 9.1.0
+     */
+    readonly inTransaction: boolean;
+
+    /**
+     * The main schema's transaction state (`sqlite3_txn_state`):
+     * `'none'`, `'read'` or `'write'`.
+     *
+     * @since 9.1.0
+     */
+    readonly txnState: 'none' | 'read' | 'write';
+
+    /**
+     * Reads one `sqlite3_db_status` counter. `_dbStatus(op, reset?)`
+     * resolves `{ current, highwater }`; the friendly-name wrapper is
+     * `db.status()`.
+     *
+     * @param op a DBSTATUS_* constant.
+     * @param reset zero the counters after reading.
+     * @returns the counter values.
+     * @since 9.1.0
+     */
+    _dbStatus(
+        op: number,
+        reset?: boolean,
+    ): { current: number; highwater: number };
+
+    /**
+     * Releases non-essential page-cache memory
+     * (`sqlite3_db_release_memory`).
+     *
+     * @returns the bytes freed.
+     * @since 9.1.0
+     */
+    _releaseMemory(): number;
+
+    /**
+     * Reads one run-time limit (`sqlite3_limit(id, -1)`); the friendly
+     * wrapper is the `db.limits` getter.
+     *
+     * @param id a LIMIT_* constant.
+     * @returns the current value.
+     * @since 9.1.0
+     */
+    _getLimit(id: number): number;
+
+    /**
+     * The filesystem path of an attached database
+     * (`sqlite3_db_filename`); empty for in-memory/temp schemas.
+     *
+     * @param dbName the attached database name.
+     * @returns the path.
+     * @since 9.1.0
+     */
+    _dbLocation(dbName: string): string;
+
+    /**
+     * Registers a JavaScript virtual-table module (the wrapped form is
+     * `db.table()`).
+     *
+     * @param name the module name.
+     * @param columns the declared column names.
+     * @param params the HIDDEN parameter names (a subset of columns).
+     * @param factory the factory (named-module form), or null.
+     * @param rows the row generator (eponymous form), or null.
+     * @returns this database.
+     * @since 9.1.0
+     */
+    _registerVtab(
+        name: string,
+        columns: string[],
+        params: string[],
+        factory: ((...args: string[]) => unknown) | null,
+        rows: (() => Iterable<unknown>) | null,
+    ): this;
+
+    /**
+     * Removes a virtual-table module (the wrapped form is
+     * `db.removeTable()`).
+     *
+     * @param name the module name.
+     * @returns this database.
+     * @since 9.1.0
+     */
+    _removeVtab(name: string): this;
 }
 
 /**
@@ -931,6 +1022,13 @@ export interface ApplyChangesetOptions {
     onConflict?: ApplyChangesetOptions['conflict'];
     /** Receives each affected table name; return false to skip it. */
     filter?: (table: string) => boolean;
+    /**
+     * Harvest the conflict-resolution rebase buffer alongside the apply
+     * (sqlite3changeset_apply_v2): promise mode resolves the buffer to
+     * rebase later changesets with (null when no conflicts occurred).
+     * @since 9.1.0
+     */
+    rebase?: boolean;
 }
 
 /**
@@ -1320,6 +1418,31 @@ export declare class Statement extends EventEmitter {
      * const fullscanSteps = stmt.status(sqlite3.STMTSTATUS_FULLSCAN_STEP);
      */
     status(op: number, reset?: boolean): number;
+
+    /**
+     * The statement's SQL with the most recent bound values substituted
+     * (`sqlite3_expanded_sql`).
+     * @since 9.1.0
+     */
+    readonly expandedSQL: string;
+
+    /**
+     * The statement's SQL with literals folded to `?`
+     * (`sqlite3_normalized_sql`; this build compiles with
+     * SQLITE_ENABLE_NORMALIZE).
+     * @since 9.1.0
+     */
+    readonly normalizedSQL: string;
+
+    /**
+     * Applies a per-statement integer-mode override (the
+     * `prepare(..., { integerMode })` plumbing).
+     *
+     * @param mode the integer mode.
+     * @returns this statement.
+     * @since 9.1.0
+     */
+    _setIntegerMode(mode: 'number' | 'bigint' | 'mixed'): this;
 }
 
 /**
@@ -1414,6 +1537,36 @@ declare const binding: {
      * @since 9.0.0
      */
     invertChangeset(changeset: ChangesetBytes): Uint8Array;
+    /**
+     * Rebases a changeset against the conflict resolutions harvested by
+     * `applyChangeset(..., { rebase: true })` — the client-server sync
+     * primitive (sqlite3rebaser_*).
+     *
+     * @param changeset the changeset to rebase.
+     * @param rebase the harvested rebase buffer.
+     * @returns the rebased changeset bytes.
+     * @since 9.1.0
+     */
+    rebaseChangeset(
+        changeset: ChangesetBytes,
+        rebase: ChangesetBytes,
+    ): Uint8Array;
+    /**
+     * True when a SQL string is a complete statement
+     * (`sqlite3_complete`) — the REPL/CLI helper.
+     *
+     * @param sql the SQL string.
+     * @returns whether the statement is complete.
+     * @since 9.1.0
+     */
+    complete(sql: string): boolean;
+    /**
+     * The build's SQLITE_COMPILE_OPTIONS (sqlite3_compileoption_get).
+     *
+     * @returns the compile-time options.
+     * @since 9.1.0
+     */
+    compileOptions(): string[];
 
     /**
      * Installs the generator the addon uses to compile a row builder for

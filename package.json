@@ -79,5 +79,17 @@
     ],
     "type": "module",
     "main": "./lib/sqlite3.js",
-    "types": "./lib/sqlite3.d.ts"
+    "types": "./lib/sqlite3.d.ts",
+    "exports": {
+        ".": {
+            "types": "./lib/sqlite3.d.ts",
+            "default": "./lib/sqlite3.js"
+        },
+        "./compat": {
+            "types": "./lib/compat.d.ts",
+            "default": "./lib/compat.js"
+        },
+        "./package.json": "./package.json",
+        "./*": "./*"
+    }
 }

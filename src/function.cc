@@ -10,9 +10,12 @@
 //    makes a blocking round trip through the per-database
 //    ThreadSafeFunction: the JS thread converts, runs the user's JS,
 //    marshals the result back and signals a condition variable.
-//  - On the JS thread (Database::sync_sqlite_depth > 0), a round trip
-//    would deadlock — the JS thread is the one blocked inside sqlite —
-//    so the call is refused with an explicit error instead.
+//  - On the JS thread (Database::sync_sqlite_depth > 0), the JS thread is
+//    the one executing SQL, so the implementation is invoked directly —
+//    re-entrantly, same-thread, like node:sqlite (Phase 2; see
+//    RunDirectOnJsThread). Collations and the JS progress callback keep
+//    refusing: they have no error channel, and the sync gate blocks them
+//    up front.
 //
 // Lifetime answers (the checklist items this file must have settled):
 //
@@ -39,8 +42,8 @@
 //    reachable only at teardown.
 //  - FuncCall ownership: the worker allocates; for waited calls it also
 //    frees (after the wake); fire-and-forget cleanups are freed by the JS
-//    thread. Enqueue failure (environment shutting down) leaves ownership
-//    with the worker.
+//    thread. Direct re-entrant calls are stack-disciplined: allocated and
+//    freed by the same sqlite callback frame, never crossing threads.
 
 #include <cstring>
 #include <string>
@@ -58,17 +61,6 @@
 using namespace node_sqlite3;
 
 namespace {
-
-// The error a user-defined function reached from a sync-path statement
-// reports instead of deadlocking. prepareSync is not listed because it is
-// not gated (and should not be): preparing never invokes a function.
-std::string SyncRefusalMessage(const std::string& name) {
-    return "user-defined function '" + name + "' cannot be invoked from a "
-        "synchronous method (getSync/runSync/allSync): the "
-        "JavaScript thread is blocked inside SQLite and cannot run the "
-        "callback, which would deadlock. Use the asynchronous get/run/all/"
-        "each instead, or express the logic in SQL.";
-}
 
 std::string RemovedMidFlightMessage(const std::string& name) {
     return "user-defined function '" + name + "' was removed while a call "
@@ -566,6 +558,45 @@ static void ReportRegistrationError(Database* db, int rc) {
 
 } // namespace node_sqlite3
 
+namespace {
+
+// The re-entrant path for user functions invoked from the synchronous
+// methods (Phase 2). sync_sqlite_depth > 0 can only be observed on the JS
+// thread inside a *Sync call — this thread is the one executing SQL — so
+// the implementation can be invoked directly, exactly like node:sqlite
+// does, with no round trip. A throw inside the callback is reported
+// through sqlite3_result_error (the error channel functions have); the
+// thrown value is kept on the database as the step failure's `cause` by
+// SetCallError, as on the async path.
+//
+// `call` is owned by the caller (deleted after this returns).
+void RunDirectOnJsThread(sqlite3_context* ctx, FuncCall* call,
+        bool has_result) {
+    node_sqlite3::UserFunctionOps::ExecuteOnJsThread(call->db->Env(), call);
+    // No exception may escape into sqlite's C frames (and beyond, into the
+    // sync caller's napi transition); always clear a stray one — the same
+    // rule as TsfnCallJs, and the check must be napi_is_exception_pending.
+    bool stray_exception = false;
+    napi_is_exception_pending(call->db->Env(), &stray_exception);
+    if (stray_exception) {
+        napi_value pending = NULL;
+        napi_get_and_clear_last_exception(call->db->Env(), &pending);
+        if (!call->errored) {
+            call->errored = true;
+            call->error = "internal error while invoking a user-defined "
+                "function";
+        }
+    }
+    if (call->errored) {
+        sqlite3_result_error(ctx, call->error.c_str(), -1);
+    }
+    else if (has_result) {
+        ApplyCell(ctx, call->result);
+    }
+}
+
+} // namespace
+
 // --- sqlite callbacks (worker thread, or the JS thread under the sync guard)
 
 void Database::JsScalarFunc(sqlite3_context* ctx, int argc,
@@ -574,7 +605,16 @@ void Database::JsScalarFunc(sqlite3_context* ctx, int argc,
     Database* db = fn->db;
 
     if (db->sync_sqlite_depth > 0) {
-        sqlite3_result_error(ctx, SyncRefusalMessage(fn->name).c_str(), -1);
+        // Re-entrant direct call (Phase 2): this is the JS thread inside
+        // a *Sync call, so the implementation runs right here.
+        FuncCall* call = new FuncCall(fn, FuncCall::kScalar);
+        call->args.reserve(argc);
+        for (int i = 0; i < argc; i++) {
+            call->args.emplace_back();
+            ValueToCell(&call->args.back(), argv[i]);
+        }
+        RunDirectOnJsThread(ctx, call, true);
+        delete call;
         return;
     }
 
@@ -593,10 +633,28 @@ void Database::JsAggregateStep(sqlite3_context* ctx, int argc,
     JsFunc* fn = static_cast<JsFunc*>(sqlite3_user_data(ctx));
     Database* db = fn->db;
 
-    if (db->sync_sqlite_depth > 0 || fn->dead) {
-        const std::string& refusal = (db->sync_sqlite_depth > 0)
-            ? SyncRefusalMessage(fn->name) : RemovedMidFlightMessage(fn->name);
-        sqlite3_result_error(ctx, refusal.c_str(), -1);
+    if (db->sync_sqlite_depth > 0) {
+        FuncCall* call = new FuncCall(fn, FuncCall::kStep);
+        call->agg_slot = static_cast<AggState**>(
+            sqlite3_aggregate_context(ctx, sizeof(AggState*)));
+        if (call->agg_slot == NULL) {
+            delete call;
+            sqlite3_result_error(ctx, "out of memory", -1);
+            return;
+        }
+        call->args.reserve(argc);
+        for (int i = 0; i < argc; i++) {
+            call->args.emplace_back();
+            ValueToCell(&call->args.back(), argv[i]);
+        }
+        RunDirectOnJsThread(ctx, call, false);
+        delete call;
+        return;
+    }
+
+    if (fn->dead) {
+        sqlite3_result_error(ctx,
+            RemovedMidFlightMessage(fn->name).c_str(), -1);
         return;
     }
 
@@ -630,12 +688,34 @@ void Database::JsAggregateFinal(sqlite3_context* ctx) {
         sqlite3_aggregate_context(ctx, 0));
     AggState* agg = (slot != NULL && *slot != NULL) ? *slot : NULL;
 
-    if (db->sync_sqlite_depth > 0 || fn->dead) {
-        // Reached from a main-thread sqlite3_finalize (the sync methods,
-        // Statement::Finalize_, the GC safety net) or after removal. A
-        // round trip would deadlock (or touch freed state); free the
-        // accumulator without running JS, off-thread of nothing — the
-        // cleanup itself is what gets deferred.
+    if (db->sync_sqlite_depth > 0) {
+        // Re-entrant direct call (Phase 2): the JS thread can run result()
+        // right here and free the accumulator — no deferred cleanup
+        // needed, unlike a worker-thread xFinal.
+        if (fn->dead) {
+            // Removed under a suspended cursor, and this is the JS thread
+            // (a *Sync call, Statement::Finalize_, the GC safety net), so
+            // the accumulator can be released right here instead of being
+            // enqueued. Running result() against a removed registration
+            // is not on the table: its implementations may be gone.
+            if (agg != NULL) {
+                delete agg;
+                *slot = NULL;
+            }
+            sqlite3_result_null(ctx);
+            return;
+        }
+        FuncCall* call = new FuncCall(fn, FuncCall::kFinal);
+        call->agg_slot = slot;
+        RunDirectOnJsThread(ctx, call, true);
+        delete call;
+        return;
+    }
+
+    if (fn->dead) {
+        // Reached after removal, possibly from a main-thread
+        // sqlite3_finalize (the GC safety net): free the accumulator
+        // without running JS — the cleanup itself is what gets deferred.
         if (agg != NULL) {
             UserFunctionOps::EnqueueAggCleanup(db, fn, agg);
             *slot = NULL;
@@ -663,7 +743,22 @@ void Database::JsAggregateValue(sqlite3_context* ctx) {
     JsFunc* fn = static_cast<JsFunc*>(sqlite3_user_data(ctx));
     Database* db = fn->db;
 
-    if (db->sync_sqlite_depth > 0 || fn->dead) {
+    if (db->sync_sqlite_depth > 0) {
+        if (fn->dead) {
+            // xValue leaves the state for the aborting statement's
+            // xFinal, exactly as the worker path does.
+            sqlite3_result_null(ctx);
+            return;
+        }
+        FuncCall* call = new FuncCall(fn, FuncCall::kValue);
+        call->agg_slot = static_cast<AggState**>(
+            sqlite3_aggregate_context(ctx, 0));
+        RunDirectOnJsThread(ctx, call, true);
+        delete call;
+        return;
+    }
+
+    if (fn->dead) {
         sqlite3_result_null(ctx);
         return;
     }
@@ -681,10 +776,28 @@ void Database::JsAggregateInverse(sqlite3_context* ctx, int argc,
     JsFunc* fn = static_cast<JsFunc*>(sqlite3_user_data(ctx));
     Database* db = fn->db;
 
-    if (db->sync_sqlite_depth > 0 || fn->dead) {
-        const std::string& refusal = (db->sync_sqlite_depth > 0)
-            ? SyncRefusalMessage(fn->name) : RemovedMidFlightMessage(fn->name);
-        sqlite3_result_error(ctx, refusal.c_str(), -1);
+    if (db->sync_sqlite_depth > 0) {
+        FuncCall* call = new FuncCall(fn, FuncCall::kInverse);
+        call->agg_slot = static_cast<AggState**>(
+            sqlite3_aggregate_context(ctx, sizeof(AggState*)));
+        if (call->agg_slot == NULL) {
+            delete call;
+            sqlite3_result_error(ctx, "out of memory", -1);
+            return;
+        }
+        call->args.reserve(argc);
+        for (int i = 0; i < argc; i++) {
+            call->args.emplace_back();
+            ValueToCell(&call->args.back(), argv[i]);
+        }
+        RunDirectOnJsThread(ctx, call, false);
+        delete call;
+        return;
+    }
+
+    if (fn->dead) {
+        sqlite3_result_error(ctx,
+            RemovedMidFlightMessage(fn->name).c_str(), -1);
         return;
     }
 
@@ -777,6 +890,23 @@ void Database::JsFuncDestroy(void* data) {
 
 // --- JS-visible entry points -----------------------------------------------
 
+// Registrations (and removals) dispatch inline through Database::Process
+// when nothing else is queued — including from inside a user function a
+// *Sync call just invoked, mid-step. Redefining a function while sqlite is
+// running it (or swapping the implementations a stepping VM may still
+// hold) is not a supported sqlite operation, so refuse loudly there; the
+// call site can register after the query completes.
+static bool RegistrationBlockedBySyncCall(Database* db, Napi::Env env) {
+    if (db->sync_sqlite_depth == 0) return false;
+    Napi::Error::New(env,
+        "user functions cannot be registered or removed from inside a "
+        "JavaScript callback invoked by a synchronous method on this "
+        "connection: sqlite is mid-step on the implementation being "
+        "swapped. Register or remove it before or after the query"
+    ).ThrowAsJavaScriptException();
+    return true;
+}
+
 Napi::Value Database::RegisterUserFunction(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     auto* db = this;
@@ -785,6 +915,7 @@ Napi::Value Database::RegisterUserFunction(const Napi::CallbackInfo& info) {
     REQUIRE_ARGUMENT_INTEGER(1, nArg);
     REQUIRE_ARGUMENT_INTEGER(2, flags);
     REQUIRE_ARGUMENT_FUNCTION(3, fn);
+    if (RegistrationBlockedBySyncCall(db, env)) return env.Null();
 
     auto* baton = new FunctionBaton(db, Napi::Function(), name.c_str(),
         nArg, flags);
@@ -806,6 +937,7 @@ Napi::Value Database::RegisterUserAggregate(const Napi::CallbackInfo& info) {
     REQUIRE_ARGUMENT_FUNCTION(3, start);
     REQUIRE_ARGUMENT_FUNCTION(4, step);
     REQUIRE_ARGUMENT_FUNCTION(5, result);
+    if (RegistrationBlockedBySyncCall(db, env)) return env.Null();
     Napi::Function inverse;
     if (info.Length() > 6 && !info[6].IsUndefined()) {
         if (!info[6].IsFunction()) {
@@ -834,6 +966,7 @@ Napi::Value Database::RegisterUserCollation(const Napi::CallbackInfo& info) {
 
     REQUIRE_ARGUMENT_STRING(0, name);
     REQUIRE_ARGUMENT_FUNCTION(1, fn);
+    if (RegistrationBlockedBySyncCall(db, env)) return env.Null();
 
     auto* baton = new FunctionBaton(db, Napi::Function(), name.c_str(),
         0, 0);
@@ -849,6 +982,7 @@ Napi::Value Database::RemoveUserFunction(const Napi::CallbackInfo& info) {
     auto* db = this;
 
     REQUIRE_ARGUMENT_STRING(0, name);
+    if (RegistrationBlockedBySyncCall(db, env)) return env.Null();
 
     auto* baton = new RemoveFunctionBaton(db, Napi::Function(), name.c_str());
     baton->collation = false;
@@ -862,6 +996,7 @@ Napi::Value Database::RemoveUserCollation(const Napi::CallbackInfo& info) {
     auto* db = this;
 
     REQUIRE_ARGUMENT_STRING(0, name);
+    if (RegistrationBlockedBySyncCall(db, env)) return env.Null();
 
     auto* baton = new RemoveFunctionBaton(db, Napi::Function(), name.c_str());
     baton->collation = true;

@@ -7,8 +7,17 @@ This is the complete installation guide. Requirements: **Node.js >= 24**
 npm install @appthreat/sqlite3
 pnpm add @appthreat/sqlite3
 yarn add @appthreat/sqlite3
-bun add @appthreat/sqlite3
 ```
+
+### Bun: install works, runtime does not (yet)
+
+The package installs under Bun and the binding loads — but Bun 1.4's
+N-API implementation cannot run this addon's row delivery: synchronous
+reads and async completions fail with `Invalid argument` where every
+supported Node works. This is **not specific to recent versions** —
+v9.0.2 fails identically — and it is tracked as a Bun N-API gap, not a
+package bug. On the Bun runtime, use Bun's own built-in `bun:sqlite`;
+this package is for Node (>= 24) and Electron (>= 35).
 
 Nothing is downloaded at install time and nothing is compiled at install time
 on the platforms below — the prebuilt binaries ship inside the npm tarball
