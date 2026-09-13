@@ -1,0 +1,16 @@
+test/diagnostics.test.js
+  h_6a4cc5cdf68def 115-119,126-128,130-131
+test/vtab.test.js
+  h_6a4cc5cdf68def 351-355,363-366,368-369
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "da241a24e6d5c3025510ed82079eb9b46dd21550",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
