@@ -112,16 +112,23 @@ describe('diagnostics_channel', function () {
             }
             global.gc(); await tick(); global.gc(); await tick(); global.gc();
             await tick();
-            console.log(collected);
+            // String() on purpose: newer Node (24.21+) styles a NUMBER
+            // passed to console.log with ANSI when color is forced (as it
+            // is under pnpm/CI), and the parent Number()-parses this
+            // output. A string prints verbatim.
+            console.log(String(collected));
         `;
         const out = execFileSync(
             process.execPath,
             ['--expose-gc', '--input-type=module', '-e', script],
             { encoding: 'utf8', cwd: new URL('..', import.meta.url) },
         );
+        // Belt and braces: parse the digit run, ignoring any styling
+        // escapes around it.
+        const collectedCount = Number(out.match(/\d+/)?.[0] ?? '0');
         assert.ok(
-            Number(out.trim()) >= 19,
-            `only ${out.trim()} of 20 unclosed connections were collected`,
+            collectedCount >= 19,
+            `only ${collectedCount} of 20 unclosed connections were collected`,
         );
     });
 

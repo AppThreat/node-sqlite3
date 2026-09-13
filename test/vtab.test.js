@@ -348,7 +348,11 @@ describe('virtual tables', function () {
             }
             global.gc(); await tick(); global.gc(); await tick(); global.gc();
             await tick();
-            console.log(collected);
+            // String() on purpose: newer Node (24.21+) styles a NUMBER
+            // passed to console.log with ANSI when color is forced (as it
+            // is under pnpm/CI), and the parent Number()-parses this
+            // output. A string prints verbatim.
+            console.log(String(collected));
             await db.close();
         `;
         const out = execFileSync(
@@ -356,10 +360,13 @@ describe('virtual tables', function () {
             ['--expose-gc', '--input-type=module', '-e', script],
             { encoding: 'utf8', cwd: new URL('..', import.meta.url) },
         );
-        // The last iteration's array is still referenced by the loop body.
+        // Belt and braces: parse the digit run, ignoring any styling
+        // escapes around it. The last iteration's array is still
+        // referenced by the loop body.
+        const collectedCount = Number(out.match(/\d+/)?.[0] ?? '0');
         assert.ok(
-            Number(out.trim()) >= 19,
-            `only ${out.trim()} of 20 dropped values() arrays were collected`,
+            collectedCount >= 19,
+            `only ${collectedCount} of 20 dropped values() arrays were collected`,
         );
     });
 
