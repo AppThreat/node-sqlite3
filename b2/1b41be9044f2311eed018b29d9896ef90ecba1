@@ -1,0 +1,118 @@
+src/database.cc
+  h_6a4cc5cdf68def 59-71,245-246,610-612,738-749,2199-2294
+  h_6a4cc5cdf68def 72-80,114-121,217,247-255,374-381,613-621,750-758,2295-2303
+test/diagnostics.test.js
+  h_6a4cc5cdf68def 1-94
+  h_6a4cc5cdf68def 95-154
+lib/promises.js
+  h_6a4cc5cdf68def 1073-1075,1080,1092-1093,1269-1352,1617
+plans/03-feature-gap-matrix.md
+  h_6a4cc5cdf68def 1-139
+test/aggregate.test.js
+  h_6a4cc5cdf68def 215,219-241
+docs/install.md
+  h_6a4cc5cdf68def 12-21
+src/session.cc
+  h_6a4cc5cdf68def 223-229,239,536,754-755,975-986,1000-1064,1139-1144,1200,1208-1210,1272-1302,1349-1371,1700-1755
+  h_6a4cc5cdf68def 987-999
+test/sync.test.js
+  h_6a4cc5cdf68def 688,693
+plans/01-project-assessment.md
+  h_6a4cc5cdf68def 1-139
+test/vtab.test.js
+  h_6a4cc5cdf68def 1-288
+  h_6a4cc5cdf68def 289-508
+src/function.cc
+  h_6a4cc5cdf68def 13-18,45-46,561-599,608-617,636-657,691-694,708-718,746,753-761,779-800,893-909,918,940,969,985,999
+  h_6a4cc5cdf68def 695-707,747-752
+lib/native.d.ts
+  h_6a4cc5cdf68def 636-726,1025-1031,1421-1445,1540-1569
+contrib/check-jsdoc.js
+  h_6a4cc5cdf68def 89-90,94
+README.md
+  h_6a4cc5cdf68def 44,53-59,61,67-69,72-77,81-103,106-109,125-128,461-467,637-658,740-841
+  h_6a4cc5cdf68def 468-471,659-662,842-868,922-947
+src/statement.cc
+  h_6a4cc5cdf68def 65,74-75,78,84-106,146-154,291,343-346,393-400,454-455,460-461,860-865,874,931-932,1034-1039,1048,1112,1145-1156,1165,1179,1280,1369-1372,1384-1395,1405,1470,1516-1522,1533-1544,1621-1622,1624,1677,1724,1829,2029-2114,2116-2117,2120-2135,2138,2152-2169,2200,2207,2214,2230,2235,2353,2356-2371
+  h_6a4cc5cdf68def 2503-2515
+test/ergonomics.test.js
+  h_6a4cc5cdf68def 1-469
+  h_6a4cc5cdf68def 470-583
+lib/migrate.js
+  h_6a4cc5cdf68def 1-146
+  h_6a4cc5cdf68def 147-157
+test/session_rebase.test.js
+  h_6a4cc5cdf68def 1-202
+src/session.h
+  h_6a4cc5cdf68def 166-181,191-193
+  h_6a4cc5cdf68def 194-195,242
+test/migrate.test.js
+  h_6a4cc5cdf68def 1-105
+  h_6a4cc5cdf68def 106-134
+lib/augment.d.ts
+  h_6a4cc5cdf68def 41,60-159,786-927,1287-1289
+  h_6a4cc5cdf68def 160-162,928-937,1017-1024,1290-1299
+docs/performance.md
+  h_6a4cc5cdf68def 383-402
+src/node_sqlite3.cc
+  h_6a4cc5cdf68def 42-70,89-94,283-298
+src/vtab.h
+  h_6a4cc5cdf68def 1-87
+  h_6a4cc5cdf68def 88-113
+lib/compat.js
+  h_6a4cc5cdf68def 1-569
+  h_6a4cc5cdf68def 570-618
+deps/sqlite3.gyp
+  h_6a4cc5cdf68def 93-95,119-120
+src/database.h
+  h_6a4cc5cdf68def 24,408-410,424,501-506,552-563,820-832,983-991
+  h_6a4cc5cdf68def 528-529,564-565,743-761,764,833-834,992-1000
+plans/04-roadmap.md
+  h_6a4cc5cdf68def 1-256
+binding.gyp
+  h_6a4cc5cdf68def 71-72
+plans/README.md
+  h_6a4cc5cdf68def 1-48
+lib/compat.d.ts
+  h_6a4cc5cdf68def 1-147
+  h_6a4cc5cdf68def 148-157
+test/tagstore.test.js
+  h_6a4cc5cdf68def 1-113
+  h_6a4cc5cdf68def 114-149
+src/vtab.cc
+  h_6a4cc5cdf68def 1-933
+  h_6a4cc5cdf68def 934-1260
+examples/kysely-dialect.mjs
+  h_6a4cc5cdf68def 1-95
+lib/sqlite3.js
+  h_6a4cc5cdf68def 12,17,71-73,735-742,811-824,829-830,835,843,845-851,1209,1214,1224-1232,1266,1641-1643,1720-1722,1994-2036,2043-2045,2049-2066,2343-2344,2648,2650-2664,2667-2668,2670-2690,2692-2694,2697-2702,2704-2705,2707-2709,2711-2714,2716-2729,2731-2739,2741-2764,2766-2767,2769,2772-2780,2784-2799,2801-2803,2806-2810,2812-2815,2817-2819,2821-3649
+  h_6a4cc5cdf68def 2254-2287,2302-2306,2341,2410,2473,2537,2571,2595,3650-4076,4561-4760
+package.json
+  h_6a4cc5cdf68def 82-94
+test/compat.test.js
+  h_6a4cc5cdf68def 1-161
+  h_6a4cc5cdf68def 162-178
+plans/02-competitor-research.md
+  h_6a4cc5cdf68def 1-307
+lib/migrate.d.ts
+  h_6a4cc5cdf68def 1-28
+src/statement.h
+  h_6a4cc5cdf68def 31-32,36,100-103,120-121,143-144,224-226,346-365,379-384,410-411,419,434,499-512,530-547
+test/function.test.js
+  h_6a4cc5cdf68def 192,195-202,208-245
+  h_6a4cc5cdf68def 246-329
+lib/sqlite3.d.ts
+  h_6a4cc5cdf68def 54-61,137-230
+  h_6a4cc5cdf68def 231-232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b21b41be9044f2311eed018b29d9896ef90ecba1",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
