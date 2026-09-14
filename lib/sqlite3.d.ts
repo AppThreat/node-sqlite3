@@ -51,6 +51,14 @@ export type sqlite3 = import('./sqlite3-binding.js').NativeBinding & {
     open: import('./promises.js').OpenFunction;
     deserializeFromBytes: (bytes: Uint8Array | ArrayBuffer | DataView, options?: import('./native.js').DeserializeOptions) => Promise<import('./sqlite3-binding.js').Database>;
     pool: typeof import('./pool.js').pool;
+    iterdump: (db: import('./sqlite3-binding.js').Database) => AsyncGenerator<string, void, void>;
+    migrate: typeof import('./migrate.js').migrate;
+    subscribeQueries: (onMessage: (message: {
+        sql: string;
+        database: import('./sqlite3-binding.js').Database;
+        duration: bigint;
+        durationMs: number;
+    }) => void) => () => void;
 };
 declare const sqlite3: sqlite3;
 declare const NativeDatabase: typeof import("./native.js").Database & DatabaseConstructor;
@@ -126,6 +134,102 @@ declare class DatabaseClass extends NativeDatabase {
      */
     constructor(filename: string, a?: number | OpenOptions | ((this: import('./sqlite3-binding.js').Database, err: import('./native.js').SqliteError | null) => void), b?: ((this: import('./sqlite3-binding.js').Database, err: import('./native.js').SqliteError | null) => void) | OpenOptions);
 }
+export type PragmaOptions = {
+    /**
+     * return only the first column of the first
+     * row (the scalar form better-sqlite3 popularised).
+     */
+    simple?: boolean;
+};
+export type BatchStatement = {
+    /**
+     * one statement.
+     */
+    sql: string;
+    /**
+     * bind parameters: an array of positional
+     * values, an object of named parameters, or a single positional value.
+     * The parameters may also follow the SQL in an array entry
+     * (`[sql, ...params]`).
+     */
+    args?: unknown;
+};
+/**
+ * One composed piece of SQL for the tag store: literal text plus bind
+ * parameters. `sql.raw`/`identifier`/`join` build these; a plain value in
+ * a template hole becomes a bind parameter instead.
+ */
+export type SqlFragment = {
+    /**
+     * the SQL text.
+     */
+    text: string;
+    /**
+     * the bind parameters, in text order.
+     */
+    params: unknown[];
+};
+export type VtabDefinition = {
+    /**
+     *   the row generator: invoked once per query with the table-function
+     *   parameter values; yields arrays (in column order) or objects keyed by
+     *   column name.
+     */
+    rows: (this: undefined, ...args: unknown[]) => Iterable<unknown[] | Record<string, unknown>>;
+    /**
+     * the
+     * result columns (a `'name TYPE'` string or `{ name, type }`; the type
+     * is documentation — SQLite virtual tables are typeless).
+     */
+    columns: (string | {
+        name: string;
+        type?: string;
+    })[];
+    /**
+     * a subset of `columns` to declare
+     * HIDDEN — the table-valued function's arguments
+     * (`SELECT * FROM name(arg)` passes `arg` to `rows`).
+     */
+    parameters?: string[];
+};
+/**
+ * The per-connection registry of db.values() tables: registration order
+ * (for the cap) and the drop handles.
+ */
+export type ValuesRegistry = {
+    /**
+     * the table names, oldest registration first.
+     */
+    order: string[];
+    /**
+     * the handles.
+     */
+    byName: Map<string, {
+        name: string;
+        drop: () => void;
+    }>;
+};
+/**
+ * One finished-statement span, published on the diagnostics channels.
+ */
+export type QuerySpan = {
+    /**
+     * the expanded SQL text.
+     */
+    sql: string;
+    /**
+     * the connection.
+     */
+    database: import('./sqlite3-binding.js').Database;
+    /**
+     * the measured duration in nanoseconds.
+     */
+    duration: bigint;
+    /**
+     * the measured duration in milliseconds.
+     */
+    durationMs: number;
+};
 export default sqlite3;
 export { Backup, Blob, Session, Statement } from './sqlite3-binding.js';
 export { DatabaseClass as Database };

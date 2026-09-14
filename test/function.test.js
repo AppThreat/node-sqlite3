@@ -189,29 +189,142 @@ describe('user-defined functions', function () {
         db.configure('integerMode', 'number');
     });
 
-    it('refuses invocation from the sync methods instead of deadlocking', {
+    it('invokes functions directly from the sync methods (re-entrant)', {
         timeout: 5000,
     }, async function () {
-        db.function('nope', () => 1);
-        for (const sql of ['SELECT nope()', 'SELECT nope() FROM t']) {
-            assert.throws(
-                () => db.getSync(sql),
-                (err) =>
-                    /cannot be invoked from a\s+synchronous method/.test(
-                        err.message,
-                    ) &&
-                    /deadlock/.test(err.message) &&
-                    /getSync\/runSync\/allSync/.test(err.message),
-            );
-            assert.throws(() => db.runSync(sql));
-            assert.throws(() => db.allSync(sql));
-        }
-        // prepareSync statements refuse at step time too.
-        const stmt = db.prepareSync('SELECT nope()');
-        assert.throws(() => stmt.getSync(), /deadlock/);
+        db.function('yep', { varargs: true }, (...xs) => (xs[0] ?? 0) + 1);
+        assert.strictEqual(db.getSync('SELECT yep() AS v').v, 1);
+        assert.strictEqual(db.getSync('SELECT yep(41) AS v').v, 42);
+        assert.strictEqual(db.allSync('SELECT yep(1) AS v')[0].v, 2);
+        db.runSync('SELECT yep(2)');
+        // prepareSync statements call through at step time too.
+        const stmt = db.prepareSync('SELECT yep(5)');
+        assert.strictEqual(stmt.getSync()['yep(5)'], 6);
         stmt.finalize();
         // And the connection is fine afterwards.
         assert.strictEqual(db.getSync('SELECT 7 AS v').v, 7);
+    });
+
+    it('reports a throwing function to the sync caller and keeps the connection usable', {
+        timeout: 5000,
+    }, function () {
+        db.function('boom', () => {
+            throw new Error('sync UDF failure');
+        });
+        assert.throws(
+            () => db.getSync('SELECT boom()'),
+            (err) =>
+                /user-defined function 'boom' threw/.test(err.message) &&
+                err.cause instanceof Error &&
+                err.cause.message === 'sync UDF failure',
+        );
+        assert.throws(() => db.allSync('SELECT boom()'));
+        assert.strictEqual(db.getSync('SELECT 1 AS v').v, 1);
+    });
+
+    it('lets a sync-invoked function drive other statements and refuse its own', {
+        timeout: 5000,
+    }, async function () {
+        await db.exec('CREATE TABLE probe (v)');
+        /** @type {sqlite3.Statement} */
+        let stmt;
+        db.function('reenter', function reenter() {
+            // Other statements on the same connection work...
+            db.runSync('INSERT INTO probe VALUES (1)');
+            // ...but driving this statement's own VM must refuse (the
+            // one re-entrancy rule SQLite has).
+            assert.throws(() => stmt.getSync(), /currently executing/);
+            return 1;
+        });
+        stmt = db.prepareSync('SELECT reenter() AS v');
+        assert.strictEqual(stmt.getSync().v, 1);
+        stmt.finalize();
+        assert.strictEqual(db.getSync('SELECT COUNT(*) AS n FROM probe').n, 1);
+        db.removeFunction('reenter');
+    });
+
+    it('refuses every cache-flushing call from inside a sync-path callback', {
+        timeout: 5000,
+    }, async function () {
+        // Regression: these all flushed the statement cache before the
+        // native refusal ran, finalizing the statement SQLite was stepping
+        // — a use-after-free that segfaulted the process.
+        /** @type {string[]} */
+        const outcomes = [];
+        /** @param {string} label @param {() => unknown} body */
+        const attempt = (label, body) => {
+            try {
+                body();
+                outcomes.push(`${label}: allowed`);
+            } catch (err) {
+                outcomes.push(
+                    `${label}: ${/** @type {Error} */ (err).message}`,
+                );
+            }
+        };
+        const store = db.createTagStore();
+        db.function('meddle', function meddle() {
+            attempt('function', () => db.function('added', () => 1));
+            attempt('aggregate', () =>
+                db.aggregate('agg', {
+                    start: () => 0,
+                    step: (acc) => acc,
+                    result: (acc) => acc,
+                }),
+            );
+            attempt('collation', () => db.collation('coll', () => 0));
+            attempt('removeFunction', () => db.removeFunction('meddle'));
+            attempt('removeCollation', () => db.removeCollation('nope'));
+            attempt('table', () =>
+                db.table('inner', {
+                    columns: ['a'],
+                    rows: function* () {
+                        yield [1];
+                    },
+                }),
+            );
+            attempt('removeTable', () => db.removeTable('inner'));
+            attempt('values', () => db.values([1, 2, 3]));
+            attempt('authorizer', () => db.authorizer(null));
+            attempt('close', () => db.close(() => undefined));
+            attempt('tagStore.clear', () => store.clear());
+            return 1;
+        });
+        await db.wait();
+        assert.strictEqual(db.getSync('SELECT meddle() AS v').v, 1);
+        for (const outcome of outcomes) {
+            assert.match(
+                outcome,
+                /from inside a JavaScript callback invoked by a synchronous method/,
+                outcome,
+            );
+        }
+        assert.strictEqual(outcomes.length, 11);
+        // The connection is intact, and the refused registrations did not
+        // happen.
+        assert.strictEqual(db.getSync('SELECT 1 AS v').v, 1);
+        await assert.rejects(db.get('SELECT added()'), /no such function/);
+        // ... and they work again once the query is over.
+        db.function('added', () => 7);
+        await db.wait();
+        assert.strictEqual(db.getSync('SELECT added() AS v').v, 7);
+    });
+
+    it('refuses to finalize the statement it is executing', function () {
+        /** @type {sqlite3.Statement} */
+        let stmt;
+        db.function('selffinalize', function selfFinalize() {
+            // Finalizing the live VM from its own callback is the same
+            // use-after-free; the native guard refuses it.
+            assert.throws(
+                () => stmt.finalize(() => undefined),
+                /currently executing/,
+            );
+            return 3;
+        });
+        stmt = db.prepareSync('SELECT selffinalize() AS v');
+        assert.strictEqual(stmt.getSync().v, 3);
+        stmt.finalize(() => undefined);
     });
 
     it('keeps the sync methods working for functions they never call', function () {

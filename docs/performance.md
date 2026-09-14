@@ -380,20 +380,26 @@ The same arithmetic applies to aggregates (`step` is one round trip per
 row) and collations (O(n log n) round trips for a sort — sorting in JS
 after `all()` is faster for anything but small or one-off sorts).
 
-### Future direction: UDFs on the synchronous fast path
+### UDFs on the synchronous fast path (shipped in 9.1)
 
-The refusal of JS functions on the sync methods is policy, not the
-structural limit above. On `getSync`/`runSync`/`allSync` the JS thread
-is already the one executing SQL, so a callback could be invoked
-re-entrantly — a direct call with no cross-thread round trip, the way
-`node:sqlite` runs UDFs inline — and unlike collations, a function has
-an error channel (`sqlite3_result_error`), so failures are reportable
-mid-query. The current build refuses instead with an explicit error
-(`src/function.cc`, `SyncRefusalMessage`). Landing inline sync-path
-invocation would make the natural `... AND vers_compare(?, vers)`
-shape genuinely fast, closing the gap the README's comparison table
-attributes to `node:sqlite`. Deliberate follow-up work, out of scope
-for this release.
+The former refusal of JS functions on the sync methods was policy, not a
+structural limit, and 9.1 removed it: on `getSync`/`runSync`/`allSync`
+the JS thread is already the one executing SQL, so the callback is
+invoked re-entrantly — a direct call with no cross-thread round trip,
+the way `node:sqlite` runs UDFs inline — and unlike collations, a
+function has an error channel (`sqlite3_result_error`), so failures are
+reported mid-query with the thrown value attached as `cause`. The
+natural `... AND vers_compare(?, vers)` shape is now a plain function
+call per row on the sync path.
+
+Two guardrails came with it: a UDF cannot drive *its own* statement
+re-entrantly (the one hard rule SQLite has; other statements on the
+connection work, the connection mutex being recursive), and functions
+cannot be registered or removed from inside a sync-invoked callback
+(the registration handlers dispatch inline, and swapping an
+implementation sqlite is mid-stepping on is not a supported sqlite
+operation). JS collations and the JS progress callback still refuse on
+the sync path, as before: they have no error channel.
 
 ## Where this package loses
 

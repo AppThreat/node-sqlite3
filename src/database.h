@@ -21,6 +21,7 @@ namespace node_sqlite3 {
 
 class Database;
 struct JsFunc;
+struct VtabModule;
 struct FunctionBaton;
 struct RemoveFunctionBaton;
 struct UserFunctionOps;
@@ -404,6 +405,9 @@ public:
     bool IsOpen() { return db_state == DbState::Open || db_state == DbState::Closing; }
     // Terminal: a close completed. The old `locked` tombstone.
     bool IsClosed() { return db_state == DbState::Closed; }
+    // The raw mode value for cross-file users (src/vtab.cc's JS-thread
+    // half converts generator arguments with it).
+    int IntegerMode() const { return integer_mode; }
 
     typedef Async<std::string, Database> AsyncTrace;
     typedef Async<ProfileInfo, Database> AsyncProfile;
@@ -417,6 +421,7 @@ public:
     friend class Blob;
     friend struct UserFunctionOps;
     friend struct SessionOps;
+    friend struct VtabOps;
 
     // Marks that the JavaScript thread is itself inside a sqlite call on
     // this connection and therefore cannot service the ThreadSafeFunction
@@ -493,6 +498,12 @@ public:
         sqlite3_close(_handle);
         _handle = NULL;
         db_state = DbState::Closed;
+        // After sqlite3_close every virtual table instance is
+        // disconnected, so the module holders (and their sqlite3_module
+        // structs) can be freed. See src/vtab.cc — last, because
+        // RemoveVtabs drains through the queue this mutex guards.
+        RemoveVtabs();
+        uv_mutex_destroy(&vtab_refs_mutex);
     }
 
 protected:
@@ -514,7 +525,8 @@ protected:
 
     /** Current integerMode as a string: 'number' | 'bigint' | 'mixed'. */
     Napi::Value IntegerModeGetter(const Napi::CallbackInfo& info);
-
+    // sync_sqlite_depth > 0, for the JS-side re-entrancy refusals.
+    Napi::Value InSyncCallGetter(const Napi::CallbackInfo& info);
     // Read-only snapshot of the connection's scheduling state, computed
     // on read from the authoritative fields; diagnostics and tests consume
     // it. The statement cache's hot guard reads the individual accessors
@@ -537,6 +549,20 @@ protected:
 
     static void SetBusyTimeout(Baton* baton);
     static void SetLimit(Baton* baton);
+    static void SetWalAutocheckpoint(Baton* baton);
+
+    // --- Live sqlite introspection (Phase 1/6): transaction state, db
+    // status counters, memory release, run-time limit reads and
+    // attached-file paths. All follow the db.changes reader pattern (see
+    // LiveReadGate): refuse while a worker round trip could hold the
+    // connection mutex, serialize on it otherwise.
+    bool LiveReadGate(Napi::Env env, const char* who);
+    Napi::Value InTransactionGetter(const Napi::CallbackInfo& info);
+    Napi::Value TxnStateGetter(const Napi::CallbackInfo& info);
+    Napi::Value DbStatus(const Napi::CallbackInfo& info);
+    Napi::Value ReleaseMemory(const Napi::CallbackInfo& info);
+    Napi::Value GetLimit(const Napi::CallbackInfo& info);
+    Napi::Value DbLocation(const Napi::CallbackInfo& info);
 
     // Deferred main-thread sqlite work (see MayBlockOnWorkerRoundTrip):
     // exclusive, so each dispatches only once pending == 0 and the
@@ -714,18 +740,28 @@ protected:
 
     // True when a main-thread sqlite call on this connection could block
     // on the connection mutex: a JS function, collation or progress
-    // callback is registered and statement work is in flight, or a
-    // changeset apply carrying JS conflict/filter handlers is queued or
-    // in flight (the apply holds the connection mutex for its whole
-    // run, and its handlers block on this thread) — a worker may be
-    // sitting inside a round trip holding that mutex while it waits for
-    // this very thread. Callers on the JS thread must defer their sqlite
-    // call (the exclusive queue runs it once nothing is in flight)
-    // instead of touching the handle. Without registered callbacks in-flight work never waits on the JS thread, so the mutex
-    // is only ever held briefly and blocking on it is fine — which is why
-    // every pre-existing path is unchanged.
+    // callback is registered, or a JavaScript virtual table is registered,
+    // and statement work is in flight; or a changeset apply carrying JS
+    // conflict/filter handlers is queued or in flight (the apply holds the
+    // connection mutex for its whole run, and its handlers block on this
+    // thread) — a worker may be sitting inside a round trip holding that
+    // mutex while it waits for this very thread. Callers on the JS thread
+    // must defer their sqlite call (the exclusive queue runs it once
+    // nothing is in flight) instead of touching the handle. Without
+    // registered callbacks in-flight work never waits on the JS thread, so
+    // the mutex is only ever held briefly and blocking on it is fine —
+    // which is why every pre-existing path is unchanged.
+    //
+    // js_vtabs belongs in this set for exactly the same reason as
+    // js_functions: a worker inside xFilter/xNext waits on the JS thread
+    // for the generator's next batch while holding the connection mutex.
+    // Leaving it out deadlocked two concurrent queries against a
+    // db.table() (or db.values()) table: the first query's completion
+    // handler called sqlite3_finalize inline, which wants the mutex the
+    // second query's worker is holding while it waits for this thread.
     bool MayBlockOnWorkerRoundTrip() {
         return (!(js_functions.empty() && js_collations.empty()
+                    && js_vtabs.empty()
                     && js_progress == NULL && js_apply_depth == 0))
             && pending > 0;
     }
@@ -780,6 +816,21 @@ protected:
     // registration failure on the connection's 'error' event.
     bool EnsureJsChannel();
     void ReportRegistrationFailure(int rc);
+
+    // --- JavaScript virtual tables (Phase 4). Implementation in
+    // src/vtab.cc; same lifecycle as the user functions above — exclusive
+    // registration, refuse-from-sync-callbacks, teardown at close.
+    Napi::Value RegisterVtab(const Napi::CallbackInfo& info);
+    Napi::Value RemoveVtab(const Napi::CallbackInfo& info);
+    static void Work_RegisterVtab(Baton* baton);
+    static void Work_RemoveVtab(Baton* baton);
+    // Drops every module registration and frees the holders once no
+    // instance can remain (Work_BeginClose orders before the actual
+    // sqlite3_close, which disconnects instances).
+    void RemoveVtabs();
+    // Creates the vtab round-trip channel on demand; reports on 'error'.
+    bool EnsureVtabChannel();
+    void ReleaseVtabChannelIfIdle();
 
     // Releases the callback channel when no registration is left. Only
     // called from live-loop contexts (the removal handlers, Work_BeginClose)
@@ -928,6 +979,24 @@ protected:
     // never keeps the event loop alive) and released only when the last
     // registration is gone and nothing can be in flight.
     napi_threadsafe_function js_channel = NULL;
+
+    // --- JavaScript virtual tables (Phase 4; see src/vtab.cc) ----------
+    // The live registrations, owned here. A holder leaves this list when
+    // sqlite drops its last reference to the module (VtabOps::ModuleDestroy)
+    // and is freed on the JS thread through pending_vtab_modules; what is
+    // still here at ~Database was never handed to sqlite.
+    std::vector<VtabModule*> js_vtabs;
+    napi_threadsafe_function vtab_channel = NULL;
+    // Instance rows-references queued by xDisconnect, cursor iterators
+    // queued by xClose and dead module holders queued by xDestroy (any
+    // thread) for JS-thread deletion — napi reference work is main-thread
+    // work.
+    uv_mutex_t vtab_refs_mutex;
+    std::vector<napi_ref> pending_vtab_refs;
+    std::vector<VtabModule*> pending_vtab_modules;
+    void QueueVtabRef(napi_ref ref);
+    void QueueVtabModule(VtabModule* module);
+    void DrainVtabRefs();
 
     // The JS error thrown inside a user function that caused the current
     // step failure: attached as `cause` on the SQLite error the statement

@@ -220,6 +220,13 @@ struct ApplyBaton : Database::Baton {
     Napi::FunctionReference on_filter;
     napi_threadsafe_function tsfn = NULL;
     ApplyRoundTrip rt;
+    // { rebase: true }: harvest the conflict-resolution rebase buffer
+    // alongside the apply (sqlite3changeset_apply_v2). The buffer records
+    // each OMIT/REPLACE decision so the same conflicts can be replayed
+    // onto other changesets via sqlite3.rebaseChangeset().
+    bool want_rebase = false;
+    int rebase_n = 0;
+    void* rebase = NULL; // sqlite3_malloc'd; freed here or moved to JS
 
     int status = SQLITE_OK;
     std::string message;
@@ -229,6 +236,7 @@ struct ApplyBaton : Database::Baton {
     }
     virtual ~ApplyBaton() override {
         if (data != NULL) sqlite3_free(data);
+        if (rebase != NULL) sqlite3_free(rebase);
         // The tsfn is released in Work_AfterApplyChangeset. If that never
         // ran (environment teardown) there is no sound place to release
         // it from; teardown reclaims it.
@@ -525,6 +533,7 @@ Napi::Object Session::Init(Napi::Env env, Napi::Object exports) {
     auto t = DefineClass(env, "Session", {
         InstanceMethod("changeset", &Session::Changeset, napi_default_method),
         InstanceMethod("patchset", &Session::Patchset, napi_default_method),
+        InstanceMethod("diff", &Session::Diff, napi_default_method),
         InstanceMethod("close", &Session::Close, napi_default_method),
         InstanceAccessor("closed", &Session::ClosedGetter, nullptr),
     });
@@ -742,6 +751,8 @@ void Session::Work_Create(napi_env e, void* data) {
     sqlite3_mutex* mtx = sqlite3_db_mutex(baton->db->_handle);
     sqlite3_mutex_enter(mtx);
 
+    // Remembered for session.diff(), which needs the schema back.
+    session->db_name = baton->dbName;
     int rc = sqlite3session_create(baton->db->_handle,
         baton->dbName.c_str(), &session->_handle);
     if (rc == SQLITE_OK) {
@@ -961,6 +972,96 @@ void Session::Work_AfterChangeset(napi_env e, napi_status status, void* data) {
 
 // --- close ----------------------------------------------------------------------
 
+// diff(table, fromDb): records the differences between this session's
+// table and the same table in the attached database `fromDb` into the
+// session (sqlite3session_diff). Neither database is written; harvest the
+// recorded changes with changeset().
+Napi::Value Session::Diff(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Session* session = this;
+
+    REQUIRE_ARGUMENT_STRING(0, table);
+    REQUIRE_ARGUMENT_STRING(1, fromDb);
+    OPTIONAL_ARGUMENT_FUNCTION(2, callback);
+
+    // sqlite3session_diff compares the named schema's table against the
+    // session's own; the same schema on both sides is a no-op that reads
+    // like a bug at the call site.
+    if (fromDb == session->db_name) {
+        Napi::Error::New(env,
+            "session.diff() needs a different attached database than the "
+            "one the session records ('" + session->db_name + "'): it "
+            "records the changes that would bring that database's table up "
+            "to this one's"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    auto* baton = new DiffBaton(session, callback);
+    baton->table = table;
+    baton->fromDb = fromDb;
+    session->Schedule(Work_BeginDiff, baton);
+
+    return info.This();
+}
+
+void Session::Work_BeginDiff(Baton* baton) {
+    SESSION_BEGIN(Diff);
+}
+
+void Session::Work_Diff(napi_env e, void* data) {
+    auto* baton = static_cast<DiffBaton*>(data);
+    Session* session = baton->session;
+
+    // Same serialization as Work_Changeset: the session's hash tables are
+    // the state being appended to.
+    sqlite3_mutex* mtx = sqlite3_db_mutex(session->db->_handle);
+    sqlite3_mutex_enter(mtx);
+
+    // The session's own schema (recorded at create time) is the
+    // "current" side; the table is compared against the same table in
+    // the attached database `fromDb`. pzErrMsg is sqlite3_malloc'd.
+    char* err = NULL;
+    int rc = sqlite3session_diff(session->_handle,
+        baton->fromDb.c_str(), baton->table.c_str(), &err);
+
+    sqlite3_mutex_leave(mtx);
+
+    session->status = rc;
+    if (rc != SQLITE_OK) {
+        if (err != NULL) {
+            session->message = std::string(err);
+            sqlite3_free(err);
+        }
+        else {
+            session->message =
+                std::string(sqlite3_errmsg(session->db->_handle));
+        }
+    }
+}
+
+void Session::Work_AfterDiff(napi_env e, napi_status status, void* data) {
+    std::unique_ptr<DiffBaton> baton(static_cast<DiffBaton*>(data));
+    AFTER_WORK_TEARDOWN_GUARD(baton);
+    auto* session = baton->session;
+
+    auto env = session->Env();
+    Napi::HandleScope scope(env);
+
+    Session::CallGuard session_call_guard__(session);
+
+    if (session->status != SQLITE_OK) {
+        Error(baton.get());
+        return;
+    }
+
+    Napi::Function cb = baton->callback.Value();
+    if (IS_FUNCTION(cb)) {
+        Napi::Value argv[] = { env.Null() };
+        TRY_CATCH_CALL(session->Value(), cb, 1, argv);
+    }
+}
+
 Napi::Value Session::Close(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Session* session = this;
@@ -1035,10 +1136,12 @@ void Database::CloseLiveSessions(bool owner_dying) {
 }
 
 // _applyChangeset(data, decision, onConflict|null, onFilter|null,
-//                 [callback]). decision is one of the CHANGESET_* return
-// constants used when no JS conflict handler is given; onConflict /
-// onFilter, when non-null, make the blocking round trip from inside
-// sqlite3changeset_apply.
+//                 [callback], [wantRebase]). decision is one of the
+// CHANGESET_* return constants used when no JS conflict handler is given;
+// onConflict / onFilter, when non-null, make the blocking round trip from
+// inside sqlite3changeset_apply. wantRebase harvests the rebase buffer
+// (the apply's conflict decisions) and hands it to the callback as its
+// second argument.
 Napi::Value Database::ApplyChangeset(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     auto* db = this;
@@ -1094,13 +1197,16 @@ Napi::Value Database::ApplyChangeset(const Napi::CallbackInfo& info) {
     }
 
     Napi::Function callback;
-    if (info.Length() > 4 && !info[4].IsUndefined()) {
+    if (info.Length() > 4 && !info[4].IsUndefined() && !info[4].IsNull()) {
         if (!info[4].IsFunction()) {
             delete baton;
             Napi::TypeError::New(env, "Argument 4 must be a function").ThrowAsJavaScriptException();
             return env.Null();
         }
         callback = info[4].As<Napi::Function>();
+    }
+    if (info.Length() > 5 && info[5].IsBoolean()) {
+        baton->want_rebase = info[5].As<Napi::Boolean>().Value();
     }
 
     // The changeset is applied from a private copy: the apply runs later
@@ -1163,13 +1269,37 @@ void Database::Work_BeginApplyChangeset(Baton* baton) {
 void Database::Work_ApplyChangeset(napi_env e, void* data) {
     auto* baton = static_cast<ApplyBaton*>(data);
 
-    int rc = sqlite3changeset_apply(
-        baton->db->_handle,
-        baton->n,
-        baton->data,
-        ApplyFilterTrampoline,
-        ApplyConflictTrampoline,
-        baton);
+    int rc;
+    if (baton->want_rebase) {
+        // apply_v2 with an output rebase buffer: every OMIT/REPLACE
+        // decision the conflict handling made is recorded so the same
+        // resolutions can be replayed onto later changesets (see
+        // sqlite3.rebaseChangeset). With no conflicts sqlite sets
+        // *ppRebase to NULL.
+        int rebase_n = 0;
+        void* rebase = NULL;
+        rc = sqlite3changeset_apply_v2(
+            baton->db->_handle,
+            baton->n,
+            baton->data,
+            ApplyFilterTrampoline,
+            ApplyConflictTrampoline,
+            baton,
+            &rebase,
+            &rebase_n,
+            0);
+        baton->rebase_n = rebase_n;
+        baton->rebase = rebase;
+    }
+    else {
+        rc = sqlite3changeset_apply(
+            baton->db->_handle,
+            baton->n,
+            baton->data,
+            ApplyFilterTrampoline,
+            ApplyConflictTrampoline,
+            baton);
+    }
 
     // A handler error overrides the raw sqlite code as the reported
     // cause of the (rolled-back) apply.
@@ -1214,6 +1344,29 @@ void Database::Work_AfterApplyChangeset(napi_env e, napi_status status, void* da
         EXCEPTION(baton->message, baton->status, exception);
         Napi::Value argv[] = { exception };
         TRY_CATCH_CALL(db->Value(), cb, 1, argv);
+        return;
+    }
+    if (baton->want_rebase) {
+        // No conflicts were omitted or replaced: sqlite produces an empty
+        // buffer. Resolve null rather than a zero-length Uint8Array —
+        // "nothing to rebase against" reads better at the call site.
+        if (baton->rebase_n == 0) {
+            if (baton->rebase != NULL) {
+                sqlite3_free(baton->rebase);
+                baton->rebase = NULL;
+            }
+            Napi::Value argv[] = { env.Null(), env.Null() };
+            TRY_CATCH_CALL(db->Value(), cb, 2, argv);
+            return;
+        }
+        // WrapOwnedBytes takes ownership of the sqlite3_malloc'd buffer
+        // (zero-copy external ArrayBuffer, freed by its finalizer);
+        // NULLing the field keeps the baton destructor from double-freeing.
+        Napi::Value rebase = WrapOwnedBytes(env, baton->rebase,
+            static_cast<size_t>(baton->rebase_n));
+        baton->rebase = NULL;
+        Napi::Value argv[] = { env.Null(), rebase };
+        TRY_CATCH_CALL(db->Value(), cb, 2, argv);
         return;
     }
     Napi::Value argv[] = { env.Null() };
@@ -1543,6 +1696,62 @@ Napi::Value ConcatChangeset(const Napi::CallbackInfo& info) {
         &n_out, &p_out);
     if (rc != SQLITE_OK) {
         EXCEPTION("cannot concatenate the changesets", rc, exception);
+        exception.As<Napi::Error>().ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    return WrapOwnedBytes(env, p_out, static_cast<size_t>(n_out));
+}
+
+// rebaseChangeset(changeset, rebase): rewrites a changeset against the
+// conflict resolutions a previous applyChangeset(..., { rebase: true })
+// harvested — sqlite3_rebaser_configure + sqlite3rebaser_apply. Pure
+// memory function: no connection, no mutex, no worker. This is the
+// client-server sync primitive no other JS driver exposes (rusqlite is
+// the only binding anywhere with it).
+Napi::Value RebaseChangeset(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (info.Length() < 2) {
+        Napi::TypeError::New(env, "Expected 2 arguments").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    BytesView cs, rb;
+    if (!GetBytesView(env, info[0], "rebase a changeset", &cs)) {
+        return env.Null();
+    }
+    if (!GetBytesView(env, info[1], "rebase a changeset", &rb)) {
+        return env.Null();
+    }
+    int rc = ValidateChangeset(static_cast<int>(cs.length), cs.data);
+    if (rc != SQLITE_OK) {
+        EXCEPTION("the changeset is not parseable", rc, exception);
+        exception.As<Napi::Error>().ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    sqlite3_rebaser* rebaser = NULL;
+    rc = sqlite3rebaser_create(&rebaser);
+    if (rc != SQLITE_OK) {
+        EXCEPTION("cannot create a changeset rebaser", rc, exception);
+        exception.As<Napi::Error>().ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    rc = sqlite3rebaser_configure(rebaser,
+        static_cast<int>(rb.length), const_cast<void*>(rb.data));
+    if (rc != SQLITE_OK) {
+        sqlite3rebaser_delete(rebaser);
+        EXCEPTION("the rebase buffer is not parseable", rc, exception);
+        exception.As<Napi::Error>().ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    int n_out = 0;
+    void* p_out = NULL;
+    rc = sqlite3rebaser_rebase(rebaser,
+        static_cast<int>(cs.length), const_cast<void*>(cs.data),
+        &n_out, &p_out);
+    sqlite3rebaser_delete(rebaser);
+    if (rc != SQLITE_OK) {
+        if (p_out != NULL) sqlite3_free(p_out);
+        EXCEPTION("cannot rebase the changeset", rc, exception);
         exception.As<Napi::Error>().ThrowAsJavaScriptException();
         return env.Null();
     }

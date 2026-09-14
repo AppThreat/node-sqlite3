@@ -28,9 +28,12 @@ public:
     // (`{ rowMode: 'array' }`), which skips the per-cell property stores
     // entirely — napi_set_element on a pre-sized array has no shape to
     // transition, which is what makes it the fastest row we can build.
+    // SYNC_ROW_PLUCK (`{ rowMode: 'pluck' }`) serves only the first result
+    // column — better-sqlite3's pluck(), as a per-call option.
     enum SyncRowMode {
         SYNC_ROW_OBJECT = 0,
         SYNC_ROW_ARRAY = 1,
+        SYNC_ROW_PLUCK = 2,
     };
 
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
@@ -94,6 +97,10 @@ public:
             Baton(stmt_, cb_) {}
         Row row;
         Columns columns;
+        // Row shape requested through a trailing `{ rowMode: ... }` options
+        // bag on the asynchronous read paths (Phase 1 ergonomics parity):
+        // the same SYNC_ROW_* values the synchronous paths use.
+        int row_mode = SYNC_ROW_OBJECT;
         virtual ~RowBaton() override = default;
     };
 
@@ -110,6 +117,8 @@ public:
             Baton(stmt_, cb_) {}
         Rows rows;
         Columns columns;
+        // See RowBaton::row_mode.
+        int row_mode = SYNC_ROW_OBJECT;
         virtual ~RowsBaton() override = default;
     };
 
@@ -131,6 +140,8 @@ public:
     struct EachBaton : Baton {
         Napi::FunctionReference completed;
         Async* async; // Isn't deleted when the baton is deleted.
+        // See RowBaton::row_mode (published into the Async watcher).
+        int row_mode = SYNC_ROW_OBJECT;
 
         EachBaton(Statement* stmt_, Napi::Function cb_) :
             Baton(stmt_, cb_) {}
@@ -210,6 +221,9 @@ public:
         // worker thread and read by the main thread, both under the mutex
         // below, so a mid-stream re-prepare cannot be missed.
         Columns columns;
+        // Row shape for the delivered rows (EachBaton::row_mode), set once
+        // before the work starts and read on the JS thread only.
+        int row_mode = SYNC_ROW_OBJECT;
         NODE_SQLITE3_MUTEX_t;
         bool completed;
         int retrieved;
@@ -329,6 +343,26 @@ public:
     Napi::Value ParameterNamesGetter(const Napi::CallbackInfo& info);
     Napi::Value ColumnsGetter(const Napi::CallbackInfo& info);
     Napi::Value Status(const Napi::CallbackInfo& info);
+    // SQL text accessors (Phase 6): the statement's SQL with bound values
+    // substituted (sqlite3_expanded_sql) and with literals normalized to
+    // `?` (sqlite3_normalized_sql, needs SQLITE_ENABLE_NORMALIZE). Both
+    // read the live statement, so they refuse while a worker round trip
+    // could hold the connection mutex.
+    Napi::Value ExpandedSQLGetter(const Napi::CallbackInfo& info);
+    Napi::Value NormalizedSQLGetter(const Napi::CallbackInfo& info);
+    // Shared refusal prelude of the two SQL accessors: true when the live
+    // statement may be read right now.
+    bool SQLAccessorGate(Napi::Env env);
+    // Per-statement integer-mode override (Phase 6 parity): 0 = none
+    // (follow the connection's mode), otherwise one of INTEGER_NUMBER /
+    // INTEGER_BIGINT / INTEGER_MIXED. Applied by the JS layer right after
+    // construction, so it is only ever read on the JS thread (all row
+    // conversion happens there).
+    Napi::Value SetIntegerMode(const Napi::CallbackInfo& info);
+    int EffectiveIntegerMode() const {
+        return has_integer_override ? integer_mode_override
+                                    : db->integer_mode;
+    }
 
 protected:
     static void Work_BeginPrepare(Database::Baton* baton);
@@ -342,7 +376,12 @@ protected:
     void Finalize_();
 
     template <class T> inline std::unique_ptr<Values::Field> BindParameter(const Napi::Value source, T pos);
-    template <class T> T* Bind(const Napi::CallbackInfo& info, int start = 0, int end = -1);
+    // Binds [start, end) of the call into a baton, popping a trailing
+    // callback into the baton unless `preset_callback` carries one
+    // (Get/All/Each/Fetch pop it themselves when a `{ rowMode }` options
+    // bag sits between the bind parameters and the callback).
+    template <class T> T* Bind(const Napi::CallbackInfo& info, int start = 0,
+        int end = -1, Napi::Function preset_callback = Napi::Function());
     // The bind-argument shapes (one array / N positional / one named
     // object), shared by Bind<T> (into a Baton, for the queued async
     // paths) and called directly by the synchronous fast paths, which
@@ -368,7 +407,8 @@ protected:
     // Rebuilds the rooted JS key strings if `columns` differs from the set
     // they were built from. Call once per batch, before RowToJS.
     void SyncColumnKeys(Napi::Env env, const Columns& columns);
-    Napi::Value RowToJS(Napi::Env env, Row* row);
+    Napi::Value RowToJS(Napi::Env env, Row* row,
+        int row_mode = SYNC_ROW_OBJECT);
 
     // The scopeless core of RowToJS, and the asynchronous counterpart of
     // ConvertCurrentRow: converts one already-materialised Row into the
@@ -376,7 +416,7 @@ protected:
     // left a pending exception. Callers must store `*out` into a rooted JS
     // object before their scope closes.
     bool ConvertCellRow(Napi::Env env, Row* row,
-        const std::vector<napi_value>& keys, napi_value* out);
+        const std::vector<napi_value>& keys, int row_mode, napi_value* out);
 
     // Converts a whole materialised result set into a JS array, resolving
     // the column keys once and opening one HandleScope per batch of rows
@@ -391,7 +431,7 @@ protected:
     // Returns false when a row raised the RangeError, leaving it pending
     // for the caller to deliver to the callback.
     bool CellRowsToJS(Napi::Env env, Rows& rows, const Columns& columns,
-        Napi::Array* out);
+        int row_mode, Napi::Array* out);
     // The synchronous counterpart of RowToJS: builds the row object from
     // the live statement, with no intermediate Row. Requires the column
     // keys to have been synced for the current result shape. `row_mode`
@@ -456,6 +496,20 @@ protected:
     // run on the thread blocked inside SQLite. Throws; false means the
     // caller must return env.Null().
     bool SyncGate(Napi::Env env);
+    // RAII marker for "this statement's VM is currently executing on the
+    // JS thread": a user-defined function invoked from the sync path can
+    // call back into the synchronous methods, but not into *this*
+    // statement — re-entering a stepping VM is the one hard rule SQLite
+    // has (node:sqlite enforces the same since v26.8). Other statements
+    // on the same connection stay legal: the connection mutex is
+    // recursive, so a nested step just re-enters it.
+    struct SyncStepGuard {
+        Statement* stmt;
+        explicit SyncStepGuard(Statement* s) : stmt(s) { stmt->sync_in_flight = true; }
+        ~SyncStepGuard() { stmt->sync_in_flight = false; }
+        SyncStepGuard(const SyncStepGuard&) = delete;
+        SyncStepGuard& operator=(const SyncStepGuard&) = delete;
+    };
     // Throws the pending status/message as a JS error with errno/code.
     void ThrowStatementError(Napi::Env env);
 
@@ -472,6 +526,24 @@ protected:
     bool prepared = false;
     bool locked = true;
     bool finalized = false;
+
+    // True while this statement's VM is executing inside a *Sync call on
+    // the JS thread (see SyncStepGuard): a re-entrant sync call from a
+    // user-defined function must refuse rather than corrupt the VDBE.
+    bool sync_in_flight = false;
+
+    // Byte offset of the failing token of the most recent failed prepare,
+    // from sqlite3_error_offset() (-1 when the last error was not a
+    // prepare error or there was no error). Attached to the thrown
+    // SqliteError as `offset` (bun:sqlite exposes the same as byteOffset;
+    // no other Node driver has it). Written under the connection mutex
+    // wherever a prepare fails; read on the JS thread when the error is
+    // built, which the async-work completion ordering serializes.
+    int error_offset = -1;
+
+    // Per-statement integer-mode override (see SetIntegerMode).
+    int integer_mode_override = 0;
+    bool has_integer_override = false;
 
     // Result of the most recent run(), exposed through the lastID,
     // lastIDBigInt and changes accessors.

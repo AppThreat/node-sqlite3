@@ -34,22 +34,53 @@
 // declaration can neither drift from the JSDoc nor be silently dropped.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const tsc = path.join(root, 'node_modules', '.bin', 'tsc');
+// The compiler's own entry point, run through this node — not the
+// node_modules/.bin shim, which on Windows is tsc.CMD and made
+// execFileSync fail with ENOENT *after* the outputs below were deleted.
+// Resolved through the package manifest because TypeScript 7 does not
+// list its bin in `exports`, so require.resolve cannot reach it directly.
+const typescriptManifest = createRequire(import.meta.url).resolve(
+    'typescript/package.json',
+);
+const tsc = path.join(
+    path.dirname(typescriptManifest),
+    JSON.parse(readFileSync(typescriptManifest, 'utf8')).bin.tsc,
+);
 const generated = ['sqlite3.d.ts', 'promises.d.ts', 'trace.d.ts', 'pool.d.ts'];
 
 // Stale outputs first, so resolution during the run sees the sources.
+// Their contents are kept until the emit succeeds: a failed run must not
+// leave the checkout without the declarations it came with.
+/** @type {Map<string, string>} */
+const previous = new Map();
 for (const file of generated) {
-    rmSync(path.join(root, 'lib', file), { force: true });
+    const at = path.join(root, 'lib', file);
+    try {
+        previous.set(at, readFileSync(at, 'utf8'));
+    } catch {
+        // Not generated yet; nothing to restore.
+    }
+    rmSync(at, { force: true });
 }
 
-execFileSync(tsc, ['-p', path.join(root, 'tsconfig.types.json')], {
-    stdio: 'inherit',
-    cwd: root,
-});
+try {
+    execFileSync(
+        process.execPath,
+        [tsc, '-p', path.join(root, 'tsconfig.types.json')],
+        {
+            stdio: 'inherit',
+            cwd: root,
+        },
+    );
+} catch (err) {
+    for (const [at, text] of previous) writeFileSync(at, text);
+    throw err;
+}
 
 const emitDir = path.join(root, 'types-gen');
 const entry = path.join(root, 'lib', 'sqlite3.d.ts');

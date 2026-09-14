@@ -39,6 +39,35 @@ Napi::Value SetRowFactoryGenerator(const Napi::CallbackInfo& info) {
     return env.Undefined();
 }
 
+// complete(sql): sqlite3_complete — true when a SQL string is a complete
+// statement (balanced quotes/semicolons). The REPL/CLI helper; a pure
+// string function with no connection.
+Napi::Value Complete(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "complete() requires a SQL string")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    std::string sql = info[0].As<Napi::String>().Utf8Value();
+    return Napi::Boolean::New(env,
+        sqlite3_complete(sql.c_str()) != 0);
+}
+
+// compileOptions(): the SQLITE_COMPILE_OPTIONS this build was configured
+// with (sqlite3_compileoption_get) — what "is FTS5 compiled in" can be
+// answered from, at runtime.
+Napi::Value CompileOptions(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    Napi::Array result = Napi::Array::New(env);
+    uint32_t i = 0;
+    for (const char* opt = sqlite3_compileoption_get(0); opt != NULL;
+            opt = sqlite3_compileoption_get(++i)) {
+        result.Set(i, Napi::String::New(env, opt));
+    }
+    return result;
+}
+
 Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
     Napi::HandleScope scope(env);
 
@@ -57,6 +86,12 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
         Napi::Function::New(env, ConcatChangeset));
     exports.Set("iterateChangeset",
         Napi::Function::New(env, IterateChangeset));
+    exports.Set("rebaseChangeset",
+        Napi::Function::New(env, RebaseChangeset));
+    exports.Set("complete",
+        Napi::Function::New(env, Complete));
+    exports.Set("compileOptions",
+        Napi::Function::New(env, CompileOptions));
 
     exports.DefineProperties({
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_READONLY, OPEN_READONLY)
@@ -244,6 +279,22 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_RUN, STMTSTATUS_RUN)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_FILTER_MISS, STMTSTATUS_FILTER_MISS)
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_STMTSTATUS_FILTER_HIT, STMTSTATUS_FILTER_HIT)
+
+        // sqlite3_db_status counters (db.status). The process-wide memory
+        // counters read zero in this build (SQLITE_DEFAULT_MEMSTATUS=0);
+        // the cache and schema counters are the useful ones.
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_LOOKASIDE_USED, DBSTATUS_LOOKASIDE_USED)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_CACHE_USED, DBSTATUS_CACHE_USED)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_SCHEMA_USED, DBSTATUS_SCHEMA_USED)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_STMT_USED, DBSTATUS_STMT_USED)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_LOOKASIDE_HIT, DBSTATUS_LOOKASIDE_HIT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_LOOKASIDE_MISS_SIZE, DBSTATUS_LOOKASIDE_MISS_SIZE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_LOOKASIDE_MISS_FULL, DBSTATUS_LOOKASIDE_MISS_FULL)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_CACHE_HIT, DBSTATUS_CACHE_HIT)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_CACHE_MISS, DBSTATUS_CACHE_MISS)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_CACHE_WRITE, DBSTATUS_CACHE_WRITE)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_CACHE_SPILL, DBSTATUS_CACHE_SPILL)
+        DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBSTATUS_DEFERRED_FKS, DBSTATUS_DEFERRED_FKS)
 
         // The sqlite3_db_config subset Database#dbConfig exposes.
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_DBCONFIG_ENABLE_FKEY, DBCONFIG_ENABLE_FKEY)

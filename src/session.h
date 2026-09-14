@@ -163,6 +163,22 @@ protected:
     static void Work_Changeset(napi_env env, void* data);
     static void Work_AfterChangeset(napi_env env, napi_status status, void* data);
 
+    // diff(table, fromDb): sqlite3session_diff — records the differences
+    // between the session's table and the same table in another *attached*
+    // database into the session, without either database being written.
+    // The changeset is harvested with changeset() afterwards, as usual.
+    struct DiffBaton : Baton {
+        std::string table;
+        std::string fromDb;
+        DiffBaton(Session* session_, Napi::Function cb_) :
+                Baton(session_, cb_) {}
+        virtual ~DiffBaton() override = default;
+    };
+    Napi::Value Diff(const Napi::CallbackInfo& info);
+    static void Work_BeginDiff(Baton* baton);
+    static void Work_Diff(napi_env env, void* data);
+    static void Work_AfterDiff(napi_env env, napi_status status, void* data);
+
     Napi::Value Close(const Napi::CallbackInfo& info);
     static void Work_BeginClose(Baton* baton);
     static void Work_Close(napi_env env, void* data);
@@ -172,6 +188,11 @@ protected:
 
     Database* db = NULL;
     sqlite3_session* _handle = NULL;
+    // The attached schema this session records ('main' unless created
+    // with { db: ... }). Kept for diagnostics and for the diff() contract
+    // (the session's schema is diff's "to" side; the argument names the
+    // "from" side, and the two must differ).
+    std::string db_name = "main";
 
     bool inited = false;
     bool locked = false;
@@ -218,6 +239,7 @@ protected:
 Napi::Value InvertChangeset(const Napi::CallbackInfo& info);
 Napi::Value ConcatChangeset(const Napi::CallbackInfo& info);
 Napi::Value IterateChangeset(const Napi::CallbackInfo& info);
+Napi::Value RebaseChangeset(const Napi::CallbackInfo& info);
 
 } // namespace node_sqlite3
 

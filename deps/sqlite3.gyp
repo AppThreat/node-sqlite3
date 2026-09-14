@@ -90,6 +90,9 @@
           # ~30 KB of extra amalgamation code is accepted in exchange for
           # column metadata (stmt.columns) and db.tableInfo().
           'SQLITE_ENABLE_COLUMN_METADATA',
+          # Phase 6 (observability): sqlite3_normalized_sql compiles only
+          # with this define.
+          'SQLITE_ENABLE_NORMALIZE',
           'SQLITE_DEFAULT_MEMSTATUS=0'
         ],
       },
@@ -113,6 +116,8 @@
         'SQLITE_ENABLE_STAT4',
         # See the direct_dependent_settings copy above (Deliverable 07).
         'SQLITE_ENABLE_COLUMN_METADATA',
+        # See the direct_dependent_settings copy above (Phase 6).
+        'SQLITE_ENABLE_NORMALIZE',
         'SQLITE_DEFAULT_MEMSTATUS=0'
       ],
       'conditions': [

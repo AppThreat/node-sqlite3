@@ -62,7 +62,7 @@ bool ParseSyncReadOptions(const Napi::Value& value, int* row_mode) {
     if (mode.IsUndefined()) return false;
     if (!mode.IsString()) {
         Napi::TypeError::New(env,
-            "rowMode must be 'object' or 'array'")
+            "rowMode must be 'object', 'array' or 'pluck'")
             .ThrowAsJavaScriptException();
         return true;
     }
@@ -71,13 +71,38 @@ bool ParseSyncReadOptions(const Napi::Value& value, int* row_mode) {
         *row_mode = Statement::SYNC_ROW_ARRAY;
     } else if (requested == "object") {
         *row_mode = Statement::SYNC_ROW_OBJECT;
+    } else if (requested == "pluck") {
+        *row_mode = Statement::SYNC_ROW_PLUCK;
     } else {
         Napi::TypeError::New(env,
-            "rowMode must be 'object' or 'array'")
+            "rowMode must be 'object', 'array' or 'pluck'")
             .ThrowAsJavaScriptException();
     }
     return true;
 }
+
+namespace {
+
+// Pops the trailing callback (if any) and then a trailing
+// `{ rowMode: 'object' | 'array' }` options bag off an asynchronous read
+// call (Get/All/Each/Fetch). The bag sits between the bind parameters and
+// the callback; a plain object owning `rowMode` could never have been a
+// legal bind argument (named bind keys carry a sigil) — the same
+// discriminator ParseSyncReadOptions uses. Returns the reduced argument
+// count and hands the popped callback back for Bind's preset slot.
+// Throws (pending exception) for an invalid rowMode value.
+int PopAsyncReadOptions(const Napi::CallbackInfo& info,
+        Napi::Function* callback, int* row_mode) {
+    int end = info.Length();
+    if (end > 0 && info[end - 1].IsFunction()) {
+        *callback = info[end - 1].As<Napi::Function>();
+        end--;
+    }
+    if (end > 0 && ParseSyncReadOptions(info[end - 1], row_mode)) end--;
+    return end;
+}
+
+} // namespace
 
 } // namespace
 
@@ -118,6 +143,15 @@ Napi::Object Statement::Init(Napi::Env env, Napi::Object exports) {
           nullptr),
       InstanceAccessor("columns", &Statement::ColumnsGetter, nullptr),
       InstanceMethod("status", &Statement::Status, napi_default_method),
+      // SQL text accessors (Phase 6): expanded SQL with the last bound
+      // values substituted, and normalized SQL with literals folded to `?`
+      // for query-metric dashboards.
+      InstanceAccessor("expandedSQL", &Statement::ExpandedSQLGetter, nullptr,
+          static_cast<napi_property_attributes>(napi_configurable)),
+      InstanceAccessor("normalizedSQL", &Statement::NormalizedSQLGetter,
+          nullptr, static_cast<napi_property_attributes>(napi_configurable)),
+      InstanceMethod("_setIntegerMode", &Statement::SetIntegerMode,
+          napi_default_method),
     });
 
     // Per-env (see Database::AddonData): a worker thread is its own napi
@@ -254,6 +288,7 @@ Statement::Statement(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Statemen
                 sql_str.size(), &_handle, NULL);
             if (status != SQLITE_OK) {
                 message = std::string(sqlite3_errmsg(db->_handle));
+                error_offset = sqlite3_error_offset(db->_handle);
                 _handle = NULL;
             }
             else {
@@ -305,6 +340,10 @@ void Statement::Work_Prepare(napi_env e, void* data) {
 
     if (stmt->status != SQLITE_OK) {
         stmt->message = std::string(sqlite3_errmsg(baton->db->_handle));
+        // Byte offset of the failing token, read while the mutex is still
+        // held and the error is current; -1 when this error has no
+        // position (sqlite only produces offsets for prepare failures).
+        stmt->error_offset = sqlite3_error_offset(baton->db->_handle);
         stmt->_handle = NULL;
     }
     else {
@@ -351,6 +390,14 @@ void Statement::Work_AfterPrepare(napi_env e, napi_status status, void* data) {
         // on the statement's 'error' event, the documented surface for a
         // prepare given no callback of its own.
         EXCEPTION(stmt->message, stmt->status, exception);
+        // Failed-prepare token position (sqlite3_error_offset), captured
+        // on the worker while the error was current. Consumed here so no
+        // later error inherits it.
+        if (stmt->error_offset >= 0) {
+            exception_obj.Set("offset",
+                Napi::Number::New(env, stmt->error_offset));
+            stmt->error_offset = -1;
+        }
         // A user-defined function that threw during the step kept its JS
         // error on the database as the pending cause of exactly this
         // failure (Error() did this for the callback-only path).
@@ -404,13 +451,14 @@ template <class T> std::unique_ptr<Values::Field>
     }
 }
 
-template <class T> T* Statement::Bind(const Napi::CallbackInfo& info, int start, int last) {
+template <class T> T* Statement::Bind(const Napi::CallbackInfo& info, int start,
+        int last, Napi::Function preset_callback) {
     auto env = info.Env();
     Napi::HandleScope scope(env);
 
     if (last < 0) last = info.Length();
-    Napi::Function callback;
-    if (last > start && info[last - 1].IsFunction()) {
+    Napi::Function callback = preset_callback;
+    if (callback.IsEmpty() && last > start && info[last - 1].IsFunction()) {
         callback = info[last - 1].As<Napi::Function>();
         last--;
     }
@@ -809,7 +857,12 @@ Napi::Value Statement::Get(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
 
-    Baton* baton = stmt->Bind<RowBaton>(info);
+    int row_mode = SYNC_ROW_OBJECT;
+    Napi::Function callback;
+    int end = PopAsyncReadOptions(info, &callback, &row_mode);
+    if (env.IsExceptionPending()) return env.Null();
+
+    RowBaton* baton = stmt->Bind<RowBaton>(info, 0, end, callback);
     if (baton == NULL) {
         if (!env.IsExceptionPending()) {
             Napi::TypeError::New(env, "Data type is not supported")
@@ -818,6 +871,7 @@ Napi::Value Statement::Get(const Napi::CallbackInfo& info) {
         return env.Null();
     }
     else {
+        baton->row_mode = row_mode;
         stmt->Schedule(Work_BeginGet, baton);
         return info.This();
     }
@@ -874,7 +928,8 @@ void Statement::Work_AfterGet(napi_env e, napi_status status, void* data) {
             if (stmt->status == SQLITE_ROW) {
                 // Create the result array from the data we acquired.
                 stmt->SyncColumnKeys(env, baton->columns);
-                Napi::Value row = stmt->RowToJS(env, &baton->row);
+                Napi::Value row = stmt->RowToJS(env, &baton->row,
+                    baton->row_mode);
                 if (env.IsExceptionPending()) {
                     // 'number' integer mode and an unsafe int64: deliver
                     // the RangeError to the callback instead of leaving a
@@ -976,7 +1031,12 @@ Napi::Value Statement::All(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
 
-    Baton* baton = stmt->Bind<RowsBaton>(info);
+    int row_mode = SYNC_ROW_OBJECT;
+    Napi::Function callback;
+    int end = PopAsyncReadOptions(info, &callback, &row_mode);
+    if (env.IsExceptionPending()) return env.Null();
+
+    RowsBaton* baton = stmt->Bind<RowsBaton>(info, 0, end, callback);
     if (baton == NULL) {
         if (!env.IsExceptionPending()) {
             Napi::TypeError::New(env, "Data type is not supported")
@@ -985,6 +1045,7 @@ Napi::Value Statement::All(const Napi::CallbackInfo& info) {
         return env.Null();
     }
     else {
+        baton->row_mode = row_mode;
         stmt->Schedule(Work_BeginAll, baton);
         return info.This();
     }
@@ -1048,7 +1109,7 @@ void Statement::Work_AfterAll(napi_env e, napi_status status, void* data) {
             // Create the result array from the data we acquired.
             Napi::Array result;
             const bool failed = !stmt->CellRowsToJS(env, baton->rows,
-                baton->columns, &result);
+                baton->columns, baton->row_mode, &result);
 
             if (failed) {
                 Napi::Value argv[] = { TakePendingError(env) };
@@ -1081,7 +1142,18 @@ Napi::Value Statement::Each(const Napi::CallbackInfo& info) {
         completed = info[--last].As<Napi::Function>();
     }
 
-    auto baton = stmt->Bind<EachBaton>(info, 0, last);
+    // Item callback, then an optional `{ rowMode }` bag before it (the
+    // same shape Get/All accept; PopAsyncReadOptions cannot be reused
+    // here because `last` no longer sits at the end of the call).
+    int row_mode = SYNC_ROW_OBJECT;
+    Napi::Function callback;
+    if (last > 0 && info[last - 1].IsFunction()) {
+        callback = info[--last].As<Napi::Function>();
+    }
+    if (last > 0 && ParseSyncReadOptions(info[last - 1], &row_mode)) last--;
+    if (env.IsExceptionPending()) return env.Null();
+
+    auto baton = stmt->Bind<EachBaton>(info, 0, last, callback);
     if (baton == NULL) {
         if (!env.IsExceptionPending()) {
             Napi::TypeError::New(env, "Data type is not supported")
@@ -1090,6 +1162,7 @@ Napi::Value Statement::Each(const Napi::CallbackInfo& info) {
         return env.Null();
     }
     else {
+        baton->row_mode = row_mode;
         baton->completed.Reset(completed, 1);
         stmt->Schedule(Work_BeginEach, baton);
         return info.This();
@@ -1103,6 +1176,7 @@ void Statement::Work_BeginEach(Baton* baton) {
     each_baton->async = new Async(each_baton->stmt, reinterpret_cast<uv_async_cb>(AsyncEach));
     each_baton->async->item_cb.Reset(each_baton->callback.Value(), 1);
     each_baton->async->completed_cb.Reset(each_baton->completed.Value(), 1);
+    each_baton->async->row_mode = each_baton->row_mode;
 
     STATEMENT_BEGIN(Each);
 }
@@ -1203,7 +1277,7 @@ void Statement::AsyncEach(uv_async_t* handle) {
 
                 napi_value converted = NULL;
                 if (!async->stmt->ConvertCellRow(env, &row, keys,
-                        &converted)) {
+                        async->row_mode, &converted)) {
                     // 'number' integer mode and an unsafe int64: hand the
                     // RangeError to the item callback in place of the row.
                     argv[0] = TakePendingError(env);
@@ -1292,10 +1366,10 @@ void Statement::Work_AfterReset(napi_env e, napi_status status, void* data) {
     }
 }
 
-// fetch(count, [params], [callback]): steps up to `count` rows and hands
-// them back as one batch. Unlike all() the statement is deliberately NOT
-// reset between calls, so successive fetches continue one cursor — this is
-// the native half of the pull-based async iterator.
+// fetch(count, [params], [{rowMode}], [callback]): steps up to `count`
+// rows and hands them back as one batch. Unlike all() the statement is
+// deliberately NOT reset between calls, so successive fetches continue one
+// cursor — this is the native half of the pull-based async iterator.
 Napi::Value Statement::Fetch(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
@@ -1307,7 +1381,18 @@ Napi::Value Statement::Fetch(const Napi::CallbackInfo& info) {
         return env.Null();
     }
 
-    FetchBaton* baton = stmt->Bind<FetchBaton>(info, 1);
+    // The bag/callback scan mirrors PopAsyncReadOptions, offset by the
+    // leading count argument.
+    int end = info.Length();
+    Napi::Function callback;
+    if (end > 1 && info[end - 1].IsFunction()) {
+        callback = info[--end].As<Napi::Function>();
+    }
+    int row_mode = SYNC_ROW_OBJECT;
+    if (end > 1 && ParseSyncReadOptions(info[end - 1], &row_mode)) end--;
+    if (env.IsExceptionPending()) return env.Null();
+
+    FetchBaton* baton = stmt->Bind<FetchBaton>(info, 1, end, callback);
     if (baton == NULL) {
         if (!env.IsExceptionPending()) {
             Napi::TypeError::New(env, "Data type is not supported")
@@ -1317,6 +1402,7 @@ Napi::Value Statement::Fetch(const Napi::CallbackInfo& info) {
     }
     else {
         baton->count = count;
+        baton->row_mode = row_mode;
         stmt->Schedule(Work_BeginFetch, baton);
         return info.This();
     }
@@ -1381,7 +1467,7 @@ void Statement::Work_AfterFetch(napi_env e, napi_status status, void* data) {
         if (baton->rows.size()) {
             Napi::Array result;
             const bool failed = !stmt->CellRowsToJS(env, baton->rows,
-                baton->columns, &result);
+                baton->columns, baton->row_mode, &result);
 
             if (failed) {
                 Napi::Value argv[] = { TakePendingError(env) };
@@ -1427,6 +1513,13 @@ bool Statement::IdleForInline() {
 
 void Statement::ThrowStatementError(Napi::Env env) {
     EXCEPTION(message, status, exception);
+    // Byte offset of the failing token when this error came from a failed
+    // prepare (sqlite3_error_offset; -1 otherwise). Consumed here: a later
+    // error must not inherit a stale prepare position.
+    if (error_offset >= 0) {
+        exception_obj.Set("offset", Napi::Number::New(env, error_offset));
+        error_offset = -1;
+    }
     db->AttachPendingJsError(exception_obj);
     exception.As<Napi::Error>().ThrowAsJavaScriptException();
 }
@@ -1435,6 +1528,18 @@ bool Statement::SyncGate(Napi::Env env) {
     if (finalized) {
         Napi::Error::New(env, "Statement is already finalized")
             .ThrowAsJavaScriptException();
+        return false;
+    }
+    if (sync_in_flight) {
+        // A user-defined function invoked from this statement's sync call
+        // is on the JS stack right now; re-entering the same VM is the one
+        // re-entrancy rule SQLite has (node:sqlite enforces the same since
+        // v26.8). Other statements on the connection remain usable.
+        Napi::Error::New(env,
+            "this statement is currently executing: a user-defined "
+            "function it invoked cannot drive the same statement "
+            "re-entrantly; use another statement or the asynchronous API"
+        ).ThrowAsJavaScriptException();
         return false;
     }
     if (!IdleForInline()) {
@@ -1513,9 +1618,10 @@ Napi::Value Statement::GetSync(const Napi::CallbackInfo& info) {
     const bool bind_supplied = (end > 0);
 
     // While this thread is inside sqlite, a user-defined function invoked
-    // by the statement must refuse to make its round trip (it would wait
-    // for this very thread) — the guard is what its refusal tests.
+    // by the statement runs directly on this thread (see src/function.cc);
+    // the guards are what its re-entrancy checks test.
     Database::SyncSqliteGuard sync_guard(stmt->db);
+    Statement::SyncStepGuard step_guard(stmt);
 
     // Mirrors Work_Get: step unless the cursor is already exhausted and
     // no new parameters were supplied.
@@ -1568,6 +1674,7 @@ Napi::Value Statement::RunSync(const Napi::CallbackInfo& info) {
     const bool bind_supplied = (end > 0);
 
     Database::SyncSqliteGuard sync_guard(stmt->db);
+    Statement::SyncStepGuard step_guard(stmt);
 
     // Mirrors Work_Run, including the explicit reset for parameterless
     // re-execution.
@@ -1614,6 +1721,7 @@ Napi::Value Statement::AllSync(const Napi::CallbackInfo& info) {
     const bool bind_supplied = (end > 0);
 
     Database::SyncSqliteGuard sync_guard(stmt->db);
+    Statement::SyncStepGuard step_guard(stmt);
 
     if (!bind_supplied) {
         sqlite3_reset(stmt->_handle);
@@ -1718,7 +1826,7 @@ void Statement::SyncColumnKeys(Napi::Env env, const Columns& columns) {
 
 Napi::Value Statement::Int64ToJS(Napi::Env env, sqlite3_int64 value,
         const std::string& what) {
-    return ConvertInt64ToJS(env, value, db->integer_mode, what);
+    return ConvertInt64ToJS(env, value, EffectiveIntegerMode(), what);
 }
 
 void Statement::RecordRunResult(sqlite3_int64 id, int changes) {
@@ -1918,14 +2026,116 @@ Napi::Value Statement::Status(const Napi::CallbackInfo& info) {
     return Napi::Number::New(env, value);
 }
 
+// Shared prelude for the SQL accessors: refuse (with a thrown error) when
+// the live statement cannot be safely read right now. Returns true when
+// the caller may touch _handle.
+bool Statement::SQLAccessorGate(Napi::Env env) {
+    if (finalized) {
+        Napi::Error::New(env, "Statement is already finalized")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    if (!prepared) {
+        Napi::Error::New(env,
+            "Statement is not prepared yet").ThrowAsJavaScriptException();
+        return false;
+    }
+    if (db->MayBlockOnWorkerRoundTrip()) {
+        Napi::Error::New(env,
+            "the SQL accessors cannot be read while a JavaScript function, "
+            "collation or progress callback is mid-call on this "
+            "connection; read them from a callback or after the query"
+        ).ThrowAsJavaScriptException();
+        return false;
+    }
+    if (db->_handle == NULL) {
+        Napi::Error::New(env, "Database handle is closed")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    return true;
+}
+
+// The statement's SQL with the most recent bound values substituted
+// (sqlite3_expanded_sql). The result is sqlite3_malloc'd and freed here.
+Napi::Value Statement::ExpandedSQLGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (!SQLAccessorGate(env)) return env.Null();
+    sqlite3_mutex* mtx = sqlite3_db_mutex(db->_handle);
+    sqlite3_mutex_enter(mtx);
+    char* text = sqlite3_expanded_sql(_handle);
+    std::string copy = text != NULL ? text : "";
+    sqlite3_free(text);
+    sqlite3_mutex_leave(mtx);
+    return Napi::String::New(env, copy);
+}
+
+// The statement's SQL with literals folded to `?`
+// (sqlite3_normalized_sql; requires SQLITE_ENABLE_NORMALIZE). The string
+// points into the statement itself and dies with the mutex leave.
+Napi::Value Statement::NormalizedSQLGetter(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    if (!SQLAccessorGate(env)) return env.Null();
+#ifdef SQLITE_ENABLE_NORMALIZE
+    sqlite3_mutex* mtx = sqlite3_db_mutex(db->_handle);
+    sqlite3_mutex_enter(mtx);
+    const char* text = sqlite3_normalized_sql(_handle);
+    std::string copy = text != NULL ? text : "";
+    sqlite3_mutex_leave(mtx);
+    return Napi::String::New(env, copy);
+#else
+    Napi::Error::New(env,
+        "normalizedSQL requires a build with SQLITE_ENABLE_NORMALIZE")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+#endif
+}
+
+// _setIntegerMode(mode | null): per-statement integer-mode override.
+// JS-thread only (all row conversion happens there), applied by the JS
+// layer immediately after construction.
+Napi::Value Statement::SetIntegerMode(const Napi::CallbackInfo& info) {
+    auto env = info.Env();
+    REQUIRE_ARGUMENT_STRING(0, mode);
+    int value;
+    if (mode == "number") value = Database::INTEGER_NUMBER;
+    else if (mode == "bigint") value = Database::INTEGER_BIGINT;
+    else if (mode == "mixed") value = Database::INTEGER_MIXED;
+    else {
+        Napi::TypeError::New(env,
+            "integer mode must be 'number', 'bigint' or 'mixed'")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    integer_mode_override = value;
+    has_integer_override = true;
+    return info.This();
+}
+
 bool Statement::ConvertCellRow(Napi::Env env, Row* row,
-        const std::vector<napi_value>& keys, napi_value* out) {
-    const int mode = db->integer_mode;
+        const std::vector<napi_value>& keys, int row_mode, napi_value* out) {
+    const int mode = EffectiveIntegerMode();
     const size_t key_count = keys.size();
+
+    // Pluck serves the first column alone; no row container is built.
+    if (row_mode == SYNC_ROW_PLUCK) {
+        if (row->empty()) {
+            napi_value undef = NULL;
+            napi_get_undefined(env, &undef);
+            *out = undef;
+            return true;
+        }
+        bool raised = false;
+        Napi::Value value = CellToJS(env, (*row)[0], mode,
+            ValueOrigin(&column_keys_source, 0), true, &raised);
+        if (raised) return false;
+        *out = value;
+        return true;
+    }
 
     // Same one-call-per-row build as the synchronous path; see
     // ConvertCurrentRow for why the store loop below is the slow shape.
-    napi_value factory = RowFactoryForShape(env, SYNC_ROW_OBJECT);
+    napi_value factory = RowFactoryForShape(env, row_mode);
     if (factory != NULL && row->size() == column_keys_source.size()) {
         const int cols = static_cast<int>(row->size());
         std::vector<napi_value> cells(row->size());
@@ -1937,6 +2147,24 @@ bool Statement::ConvertCellRow(Napi::Env env, Row* row,
             if (raised) return false;
         }
         return CallRowFactory(env, factory, cells, cols, out);
+    }
+
+    // No factory (codegen unavailable, too many columns, or a shape
+    // mismatch): the store loops, in the requested shape.
+    if (row_mode == SYNC_ROW_ARRAY) {
+        napi_value arr;
+        napi_create_array_with_length(env, row->size(), &arr);
+        size_t i = 0;
+        for (auto& cell : *row) {
+            bool raised = false;
+            Napi::Value value = CellToJS(env, cell, mode,
+                ValueOrigin(&column_keys_source, i), true, &raised);
+            if (raised) return false;
+            napi_set_element(env, arr, static_cast<uint32_t>(i), value);
+            i++;
+        }
+        *out = arr;
+        return true;
     }
 
     napi_value result;
@@ -1969,21 +2197,21 @@ bool Statement::ConvertCellRow(Napi::Env env, Row* row,
     return true;
 }
 
-Napi::Value Statement::RowToJS(Napi::Env env, Row* row) {
+Napi::Value Statement::RowToJS(Napi::Env env, Row* row, int row_mode) {
     Napi::EscapableHandleScope scope(env);
 
     std::vector<napi_value> keys;
     ResolveColumnKeys(&keys);
 
     napi_value result = NULL;
-    if (!ConvertCellRow(env, row, keys, &result)) {
+    if (!ConvertCellRow(env, row, keys, row_mode, &result)) {
         return scope.Escape(env.Null());
     }
     return scope.Escape(Napi::Value(env, result));
 }
 
 bool Statement::CellRowsToJS(Napi::Env env, Rows& rows,
-        const Columns& columns, Napi::Array* out) {
+        const Columns& columns, int row_mode, Napi::Array* out) {
     SyncColumnKeys(env, columns);
 
     Napi::Array result(Napi::Array::New(env, rows.size()));
@@ -1999,12 +2227,12 @@ bool Statement::CellRowsToJS(Napi::Env env, Rows& rows,
 
     for (size_t start = 0; start < rows.size(); start += kBatch) {
         Napi::HandleScope batch(env);
-        ResolveColumnKeys(&keys);
+        if (row_mode == SYNC_ROW_OBJECT) ResolveColumnKeys(&keys);
 
         const size_t end = std::min(start + kBatch, rows.size());
         for (size_t i = start; i < end; i++) {
             napi_value row = NULL;
-            if (!ConvertCellRow(env, &rows[i], keys, &row)) {
+            if (!ConvertCellRow(env, &rows[i], keys, row_mode, &row)) {
                 // 'number' integer mode and an unsafe int64: the RangeError
                 // is pending for the caller to deliver.
                 return false;
@@ -2122,8 +2350,24 @@ void Statement::ResolveColumnKeys(std::vector<napi_value>* out) {
 bool Statement::ConvertCurrentRow(Napi::Env env,
         const std::vector<napi_value>& keys, int row_mode, int cols,
         napi_value* out) {
-    const int mode = db->integer_mode;
+    const int mode = EffectiveIntegerMode();
     const size_t key_count = keys.size();
+
+    // Pluck serves the first column alone; no row container is built.
+    if (row_mode == SYNC_ROW_PLUCK) {
+        if (cols < 1) {
+            napi_value undef = NULL;
+            napi_get_undefined(env, &undef);
+            *out = undef;
+            return true;
+        }
+        bool raised = false;
+        Napi::Value value = ColumnToJS(env, _handle, 0, mode,
+            ValueOrigin(&column_keys_source, 0), &raised);
+        if (raised) return false;
+        *out = value;
+        return true;
+    }
 
     // The fast shape: convert the cells into a plain argument vector and
     // let a generated monomorphic function build the row in one call.
@@ -2255,6 +2499,19 @@ Napi::Value Statement::Finalize_(const Napi::CallbackInfo& info) {
     auto env = info.Env();
     Statement* stmt = this;
     OPTIONAL_ARGUMENT_FUNCTION(0, callback);
+
+    // Refuse to finalize the statement sqlite is stepping right now: a
+    // user callback invoked re-entrantly from this statement's own
+    // getSync/runSync/allSync is on the stack, and sqlite3_finalize on a
+    // live VM is a use-after-free. Other statements are unaffected.
+    if (stmt->sync_in_flight) {
+        Napi::Error::New(env,
+            "this statement is currently executing: it cannot be "
+            "finalized from a user-defined function it invoked; finalize "
+            "it after the query completes"
+        ).ThrowAsJavaScriptException();
+        return env.Null();
+    }
 
     auto *baton = new Baton(stmt, callback);
     stmt->Schedule(Finalize_, baton);
