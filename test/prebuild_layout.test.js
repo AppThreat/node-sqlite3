@@ -131,7 +131,32 @@ describe('prebuild packaging guards', () => {
     it('rejects an empty prebuilds tree', () => {
         const { status, out } = checkLayout('empty', { 'darwin-arm64': [] });
         assert.strictEqual(status, 1, out);
-        assert.match(out, /the prebuild produced nothing/);
+        assert.match(out, /nothing to check/);
+        // The message must say what shape was expected, since the argument
+        // may as easily have been the wrong directory as an empty build.
+        assert.match(out, /<platform>-<arch>/);
+    });
+
+    it('accepts a package root as well as a prebuilds directory', () => {
+        // `node tools/check-prebuilds.mjs <package root>` used to report
+        // "no *.node files" without hinting that the argument should be
+        // the prebuilds/ directory; it now finds the nested one.
+        const pkg = join(root, 'test', 'tmp', `pkgroot-${process.pid}`);
+        rmSync(pkg, { recursive: true, force: true });
+        mkdirSync(join(pkg, 'prebuilds', 'darwin-arm64'), { recursive: true });
+        writeFileSync(
+            join(pkg, 'prebuilds', 'darwin-arm64', '@appthreat+sqlite3.node'),
+            MACHO64,
+        );
+        const proc = spawnSync(
+            process.execPath,
+            [join(root, 'tools', 'check-prebuilds.mjs'), pkg],
+            { encoding: 'utf8', cwd: root },
+        );
+        rmSync(pkg, { recursive: true, force: true });
+        const out = proc.stdout + proc.stderr;
+        assert.strictEqual(proc.status, 0, out);
+        assert.match(out, /1 binaries/);
     });
 
     it('exposes a native interface version that lib/ and src/ agree on', () => {

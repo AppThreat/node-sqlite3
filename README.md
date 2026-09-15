@@ -851,6 +851,21 @@ generator as `undefined`; one the query constrained is also reported as
 that column's value, so `SELECT count FROM sequence(5)` works without the
 generator echoing it.
 
+A parameter is a real (hidden) column, and `sequence(5)` is exactly
+`WHERE count = 5` — **SQLite re-checks that predicate against every row
+the generator produces**, rather than trusting the generator to have
+applied it. So a row either leaves the parameter's column NULL — filled
+with the argument, as above — or echoes the argument. A row reporting
+anything else in that column contradicts the `WHERE` clause the argument
+came from and is filtered out; put unrelated output in its own column. The
+generator is still free to pre-filter for speed, and should: a generator
+that ignores a constraint it cannot satisfy again produces an endless
+scan (correct, but unbounded — `LIMIT`, or a cancellation token on the
+async path, is the stop). A row shorter than `columns` pads with NULL, so
+a mis-ordered `yield` shows up as NULLs rather than an error, and a
+throwing generator fails the query with a message naming the table and the
+thrown value attached as `err.cause`.
+
 `db.values(array)` exposes any JS array as a queryable table — the
 rusqlite `rarray()` ergonomics no JS driver had: `JOIN` against
 in-memory data instead of building IN-lists. `drop()` the handle when you
@@ -905,6 +920,10 @@ await db.all("SELECT 1");
 sqlite3.flushQuerySpans(); // spans === ['SELECT 1']
 stop();
 ```
+
+Spans are per module instance, so `pool()` traffic is invisible here: a
+pool's queries run in workers, each with its own copy of this module and
+its own channels ([docs/concurrency.md](docs/concurrency.md#the-pool)).
 
 **node:sqlite drop-in** — code written against the built-in module can
 switch without rewriting:

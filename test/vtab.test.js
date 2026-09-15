@@ -60,11 +60,18 @@ describe('virtual tables', function () {
         // Regression: xBestIndex used to hand xFilter the constraints in
         // reverse (argvIndex = size - p), so a two-parameter table
         // function received its arguments swapped.
+        //
+        // The row yields values for the two visible columns only, leaving
+        // the parameter columns to be filled with the arguments. That is
+        // the contract now that constraints are re-checked per row (see
+        // 'a parameter column must report the argument' below): a
+        // parameter column carrying unrelated data contradicts the WHERE
+        // clause it came from, and the row is filtered out.
         db.table('pair', {
             columns: ['first', 'second', 'n', 'm'],
             parameters: ['n', 'm'],
             rows: function* pair(n, m) {
-                yield [n, m, 'seen'];
+                yield [n, m];
             },
         });
         assert.deepStrictEqual(await db.all('SELECT * FROM pair(10, 20)'), [
@@ -81,9 +88,13 @@ describe('virtual tables', function () {
     });
 
     it('runs from the synchronous methods too', function () {
+        // 'count' is the parameter, 'value' the output. Naming one column
+        // both — `columns: ['value'], parameters: ['value']` — means
+        // `sequence(2)` is the constraint `value = 2`, which no generated
+        // row satisfies.
         db.table('sequence', {
-            columns: ['value'],
-            parameters: ['value'],
+            columns: ['value', 'count'],
+            parameters: ['count'],
             rows: function* seq(count) {
                 for (let i = 0; i < count; i++) yield [i];
             },
@@ -92,6 +103,31 @@ describe('virtual tables', function () {
             { value: 0 },
             { value: 1 },
         ]);
+    });
+
+    it('a parameter column must report the argument', async function () {
+        // The rule the re-checked constraint implies, pinned so it is a
+        // decision rather than an accident: a parameter is a real (hidden)
+        // column, and `t(x)` is `WHERE param = x`. A row either leaves that
+        // column NULL — the binding fills it with the argument — or echoes
+        // the argument. A row that reports something else contradicts the
+        // WHERE clause the argument came from and is filtered out.
+        db.table('contradicts', {
+            columns: ['v', 'p'],
+            parameters: ['p'],
+            rows: function* (p) {
+                yield [1, p]; // echoes: kept
+                yield [2]; // NULL, filled with p: kept
+                yield [3, 'something else']; // contradicts: filtered
+            },
+        });
+        assert.deepStrictEqual(
+            await db.all('SELECT v, p FROM contradicts(9)'),
+            [
+                { v: 1, p: 9 },
+                { v: 2, p: 9 },
+            ],
+        );
     });
 
     it('joins against real tables', async function () {
@@ -207,18 +243,33 @@ describe('virtual tables', function () {
     });
 
     it('reports a generator that throws mid-scan and stays usable', async function () {
+        const boom = new Error('mid-scan failure');
         db.table('flaky', {
             columns: ['v'],
             rows: function* () {
                 for (let i = 0; i < 5000; i++) {
                     // Past the first batch, so the failure lands in xNext.
-                    if (i === 100) throw new Error('mid-scan failure');
+                    if (i === 100) throw boom;
                     yield [i];
                 }
             },
         });
-        await assert.rejects(db.all('SELECT v FROM flaky'), /mid-scan failure/);
+        // The thrown value rides along as `cause`, as it does for a
+        // throwing user-defined function — it used to be dropped, leaving
+        // only the message.
+        await assert.rejects(db.all('SELECT v FROM flaky'), (err) => {
+            assert.match(err.message, /mid-scan failure/);
+            assert.strictEqual(err.cause, boom);
+            return true;
+        });
         assert.strictEqual((await db.get('SELECT 1 AS v')).v, 1);
+        await assert.throws(
+            () => db.allSync('SELECT v FROM flaky'),
+            (err) => {
+                assert.strictEqual(err.cause, boom, 'sync path too');
+                return true;
+            },
+        );
     });
 
     it('re-filters a cursor for each row of a correlated subquery', async function () {
@@ -313,6 +364,92 @@ describe('virtual tables', function () {
         );
     });
 
+    it('enforces a hidden-parameter constraint even when the generator ignores it', async function () {
+        // BestIndex used to set aConstraintUsage.omit = 1, promising sqlite
+        // the table had applied the constraint — so sqlite dropped it from
+        // the WHERE clause. But the value is only *delivered* to the
+        // generator, which is free to ignore it: a generator writing its
+        // own values into the parameter's column silently defeated the
+        // query. Every assertion here returned unfiltered rows before.
+        db.table('ignores', {
+            columns: ['n'],
+            parameters: ['n'],
+            rows: function* (_p) {
+                yield [0];
+                yield [1];
+                yield [2];
+            },
+        });
+        assert.deepStrictEqual(
+            await db.all('SELECT n FROM ignores WHERE n = 1'),
+            [{ n: 1 }],
+        );
+        assert.deepStrictEqual(
+            db.allSync('SELECT n FROM ignores WHERE n = 1'),
+            [{ n: 1 }],
+        );
+        // An IN list re-filters the cursor once per value; the rows of each
+        // scan used to be concatenated unfiltered (six rows here).
+        assert.deepStrictEqual(
+            await db.all('SELECT n FROM ignores WHERE n IN (1, 2)'),
+            [{ n: 1 }, { n: 2 }],
+        );
+        // A join constraint is the same mechanism, and its failure mode is
+        // silent row multiplication.
+        await db.exec('CREATE TABLE driver (k, want)');
+        await db.run('INSERT INTO driver VALUES (1, 1), (2, 2)');
+        assert.deepStrictEqual(
+            await db.all(
+                'SELECT d.k, i.n FROM driver d JOIN ignores i ON i.n = d.want ORDER BY d.k',
+            ),
+            [
+                { k: 1, n: 1 },
+                { k: 2, n: 2 },
+            ],
+        );
+        // The control: the same table without the parameter declaration
+        // always filtered correctly.
+        db.table('plain', {
+            columns: ['n'],
+            rows: function* () {
+                yield [0];
+                yield [1];
+                yield [2];
+            },
+        });
+        assert.deepStrictEqual(
+            await db.all('SELECT n FROM plain WHERE n = 1'),
+            [{ n: 1 }],
+        );
+    });
+
+    it('an unbounded generator that ignores its parameter stays interruptible', {
+        timeout: 30000,
+    }, async function () {
+        // With the constraint enforced, the non-matching rows are dropped
+        // instead of accumulating in the result — the shape that used to
+        // exhaust the heap. The scan itself cannot end (only the generator
+        // knows it will never match again), so the escape hatches are the
+        // ordinary ones: LIMIT, or cancellation on the async path.
+        db.table('endless', {
+            columns: ['n'],
+            parameters: ['n'],
+            rows: function* (_p) {
+                let i = 0;
+                while (true) yield [i++];
+            },
+        });
+        assert.deepStrictEqual(
+            db.allSync('SELECT n FROM endless WHERE n = 3 LIMIT 1'),
+            [{ n: 3 }],
+        );
+        const token = db.cancellationToken();
+        const pending = db.all('SELECT n FROM endless WHERE n = 3');
+        setTimeout(() => token.cancel(), 200);
+        await assert.rejects(pending, /SQLITE_INTERRUPT/);
+        await db.wait();
+    });
+
     it('reports a hidden parameter the generator did not yield', async function () {
         db.table('echo', {
             columns: ['value', 'n'],
@@ -371,20 +508,34 @@ describe('virtual tables', function () {
     });
 
     it('propagates generator throws as query errors', async function () {
+        const boom = new Error('generator exploded');
         db.table('broken', {
             columns: ['v'],
             // Throwing before the first yield is the case under test: a
             // generator function that throws on its first next().
             rows: function* () {
-                if (Date.now() > 0) throw new Error('generator exploded');
+                if (Date.now() > 0) throw boom;
                 yield 0;
             },
         });
         await assert.rejects(
             db.all('SELECT v FROM broken'),
             (err) =>
-                /generator exploded/.test(err.message) ||
-                /broken/.test(err.message),
+                (/generator exploded/.test(err.message) ||
+                    /broken/.test(err.message)) &&
+                err.cause === boom,
+        );
+        // A plain function (not a generator) that throws when invoked
+        // reports through the same channel.
+        db.table('brokenFn', {
+            columns: ['v'],
+            rows: () => {
+                throw boom;
+            },
+        });
+        await assert.rejects(
+            db.all('SELECT v FROM brokenFn'),
+            (err) => err.cause === boom,
         );
         // The connection survives.
         assert.strictEqual((await db.get('SELECT 1 AS v')).v, 1);

@@ -187,7 +187,19 @@ await sqlite3.pool("file:/data/vdb.sqlite?mode=ro", { walMode: true }); // TypeE
 
 An in-memory URI (`file::memory:`, `mode=memory`) is refused with
 `readers > 0` for the same reason `:memory:` is — each worker would get
-its own empty database — unless the URI carries `cache=shared`.
+its own empty database — unless the URI carries `cache=shared`. WAL is
+turned off by itself for an in-memory pool (there is no journal to
+switch) and for a read-only URI, so both forms open under the default
+options.
+
+**What the pool does not do: spans.** Each worker loads its own instance
+of this module, so `sqlite3.subscribeQueries()` on the main thread sees
+nothing from `pool.read()`, `pool.write()` or `pool.exec()` — those spans
+are published on the worker's own `diagnostics_channel` (and its
+`sqlite.db.query` mirror), where no main-thread subscriber is listening.
+`flushQuerySpans()` cannot reach them either. If pool traffic must be
+traced, time it at the call site, or use a dedicated worker you control
+(the path handoff above) and subscribe inside it.
 
 ## Terminating a worker
 

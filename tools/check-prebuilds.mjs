@@ -19,16 +19,39 @@
 //      cross build emits, and it fails only at install time on a user's
 //      machine).
 //
-// Usage: node tools/check-prebuilds.mjs [prebuildsDir]
+// Usage: node tools/check-prebuilds.mjs [dir]
+//
+// `dir` is the prebuilds directory itself, or a package root containing
+// one; it defaults to this repo's prebuilds/.
 
 import { closeSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const prebuildsDir = process.argv[2]
-    ? resolve(process.cwd(), process.argv[2])
-    : join(root, 'prebuilds');
+
+/**
+ * Resolves the directory to scan: the argument as given, or its
+ * `prebuilds/` subdirectory when the argument is a package root (which is
+ * what most callers reach for first).
+ *
+ * @param {string | undefined} arg the command-line argument.
+ * @returns {string} the directory to scan.
+ * @private
+ */
+function resolvePrebuildsDir(arg) {
+    if (arg === undefined) return join(root, 'prebuilds');
+    const given = resolve(process.cwd(), arg);
+    try {
+        const nested = join(given, 'prebuilds');
+        if (statSync(nested).isDirectory()) return nested;
+    } catch {
+        // No prebuilds/ inside it: the argument is the directory itself.
+    }
+    return given;
+}
+
+const prebuildsDir = resolvePrebuildsDir(process.argv[2]);
 
 /** Tags node-gyp-build reads as a libc constraint (node-gyp-build.js). */
 const LIBC_TAGS = new Set(['glibc', 'musl']);
@@ -137,7 +160,10 @@ for (const entry of entries) {
 
 if (checked === 0) {
     problems.push(
-        `no *.node files found under ${prebuildsDir} — the prebuild produced nothing.`,
+        `no *.node files found under ${prebuildsDir} — nothing to check. ` +
+            'Expected <platform>-<arch>/ subdirectories holding the addon ' +
+            '(pass either a prebuilds/ directory or the package root that ' +
+            'contains one, and run `pnpm run prebuild` first).',
     );
 }
 

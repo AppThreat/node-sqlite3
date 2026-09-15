@@ -120,6 +120,33 @@ void ApplyCellToResult(sqlite3_context* ctx, const Cell& cell) {
     }
 }
 
+// Consumes the pending JS exception: appends its `message` to `text` (when
+// it has one) and keeps the thrown value on the database as the `cause` of
+// the step failure this is about to produce — the same contract a throwing
+// user-defined function gets (src/function.cc SetCallError), so
+// `err.cause` means the same thing whichever kind of callback threw.
+static void CaptureVtabThrow(Napi::Env env, Database* db, std::string* text) {
+    napi_value pending = NULL;
+    napi_get_and_clear_last_exception(env, &pending);
+    if (pending == NULL) return;
+    Napi::Value err(env, pending);
+    if (err.IsObject()) {
+        Napi::Value msg = err.As<Napi::Object>().Get("message");
+        if (!env.IsExceptionPending()) {
+            if (text != NULL && msg.IsString()) {
+                *text += ": " + msg.As<Napi::String>().Utf8Value();
+            }
+        }
+        else {
+            // Reading .message threw (a hostile getter); the value is
+            // still worth carrying as the cause.
+            napi_value stray = NULL;
+            napi_get_and_clear_last_exception(env, &stray);
+        }
+    }
+    db->SetPendingJsError(err);
+}
+
 // Converts one yielded JS value into a Cell via the shared bind converter
 // (strict marshalling: no [object Object], no silent coercion). Returns
 // false with the call marked errored.
@@ -244,16 +271,7 @@ void PullRows(Napi::Env env, Database* db, VtabCall* call, Napi::Object iter) {
             call->errored = true;
             call->error = "the rows generator of virtual table '" +
                 module->name + "' threw";
-            napi_value pending = NULL;
-            napi_get_and_clear_last_exception(env, &pending);
-            Napi::Value err(env, pending);
-            if (err.IsObject()) {
-                Napi::Value msg = err.As<Napi::Object>().Get("message");
-                if (!env.IsExceptionPending() && msg.IsString()) {
-                    call->error += ": " + msg.As<Napi::String>().Utf8Value();
-                }
-                napi_get_and_clear_last_exception(env, &pending);
-            }
+            CaptureVtabThrow(env, db, &call->error);
             return;
         }
         if (!step.IsObject()) {
@@ -321,18 +339,9 @@ void ExecuteVtabCallOnJsThread(napi_env nenv, VtabCall* call) {
         Napi::Value definition = factory.Call(env.Undefined(), argv);
         if (env.IsExceptionPending()) {
             call->errored = true;
-            napi_value pending = NULL;
-            napi_get_and_clear_last_exception(env, &pending);
-            Napi::Value err(env, pending);
             call->error = "the factory of virtual table module '" +
                 module->name + "' threw";
-            if (err.IsObject()) {
-                Napi::Value msg = err.As<Napi::Object>().Get("message");
-                if (!env.IsExceptionPending() && msg.IsString()) {
-                    call->error += ": " + msg.As<Napi::String>().Utf8Value();
-                }
-                napi_get_and_clear_last_exception(env, &pending);
-            }
+            CaptureVtabThrow(env, db, &call->error);
             return;
         }
         Napi::Value rows = definition.IsObject()
@@ -411,19 +420,14 @@ void ExecuteVtabCallOnJsThread(napi_env nenv, VtabCall* call) {
     Napi::Value iterable_v = rows_fn.Call(env.Undefined(), argv);
     if (env.IsExceptionPending() || !iterable_v.IsObject()) {
         call->errored = true;
-        call->error = "the rows generator of virtual table '" +
-            module->name + "' did not return an iterable";
-        napi_value pending = NULL;
-        napi_get_and_clear_last_exception(env, &pending);
-        Napi::Value err(env, pending);
-        if (err.IsObject()) {
-            Napi::Value msg = err.As<Napi::Object>().Get("message");
-            if (!env.IsExceptionPending() && msg.IsString()) {
-                call->error = "the rows generator of virtual table '" +
-                    module->name + "' threw: " +
-                    msg.As<Napi::String>().Utf8Value();
-            }
-            napi_get_and_clear_last_exception(env, &pending);
+        if (env.IsExceptionPending()) {
+            call->error = "the rows generator of virtual table '" +
+                module->name + "' threw";
+            CaptureVtabThrow(env, db, &call->error);
+        }
+        else {
+            call->error = "the rows generator of virtual table '" +
+                module->name + "' did not return an iterable";
         }
         return;
     }
@@ -637,11 +641,20 @@ static int BestIndex(sqlite3_vtab* vtab, sqlite3_index_info* info) {
     // `WHERE b = ?` on a later parameter and any duplicate constraint on
     // one parameter.
     //
-    // A second constraint on an already-supplied parameter is left for
-    // sqlite to check against the column value (not omitted): omitting it
-    // would claim `count = 3 AND count = 4` holds. xFilter fills HIDDEN
-    // columns the generator left NULL with the argument value, so that
-    // check sees what the caller passed.
+    // Nothing is omitted. `aConstraintUsage[i].omit = 1` promises sqlite
+    // the virtual table applied the constraint itself, and sqlite then
+    // drops it from the WHERE clause entirely — but the constraint value
+    // is only *delivered* to the generator as an argument, and a generator
+    // is free to ignore it. A generator that writes its own values into a
+    // parameter's column therefore defeated the query silently:
+    // `WHERE n = 1` returned every row it yielded, `WHERE n IN (1,2)`
+    // concatenated one unfiltered scan per IN value, and a join on that
+    // column multiplied rows. Leaving omit at 0 costs one comparison per
+    // row against the column value xColumn reports and makes *any*
+    // generator correct — including the well-behaved shape, where xFilter
+    // fills the HIDDEN columns the generator left NULL with the argument
+    // (ApplyCursorArgs), so the re-check sees exactly what the caller
+    // passed and passes.
     std::string mapping;
     int argv_n = 0;
     std::vector<bool> taken(module->params.size(), false);
@@ -652,7 +665,6 @@ static int BestIndex(sqlite3_vtab* vtab, sqlite3_index_info* info) {
         if (p < 0 || taken[static_cast<size_t>(p)]) continue;
         taken[static_cast<size_t>(p)] = true;
         info->aConstraintUsage[i].argvIndex = ++argv_n;
-        info->aConstraintUsage[i].omit = 1;
         if (!mapping.empty()) mapping += ",";
         mapping += std::to_string(p);
     }

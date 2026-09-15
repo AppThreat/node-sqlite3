@@ -190,6 +190,13 @@ export type VtabDefinition = {
      * a subset of `columns` to declare
      * HIDDEN — the table-valued function's arguments
      * (`SELECT * FROM name(arg)` passes `arg` to `rows`).
+     *
+     * A parameter is a real (hidden) column, and `name(arg)` is the
+     * predicate `WHERE param = arg`, which SQLite re-checks against every
+     * row the generator yields — the generator is not trusted to have
+     * applied it. A row therefore either leaves that column NULL (it is
+     * filled with the argument) or echoes the argument; a row reporting
+     * anything else there contradicts the predicate and is filtered out.
      */
     parameters?: string[];
 };

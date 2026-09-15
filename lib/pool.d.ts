@@ -272,10 +272,21 @@ declare class SqlitePool {
  * everything runs on the single writer.
  *
  * A `file:` URI is opened as a URI (the workers set `OPEN_URI` for it),
- * so `mode`, `immutable` and `cache` are honoured. A read-only URI
- * (`mode=ro`, `immutable=1`) turns WAL off by itself, since enabling WAL
- * is a write: pass `walMode: true` explicitly on such a URI and pool()
- * refuses rather than failing every worker at `PRAGMA journal_mode`.
+ * so `mode`, `immutable` and `cache` are honoured. A URI that asserts
+ * read-only access (`mode=ro`, `immutable=1`) opens **every** connection
+ * read-only, the writer included: with `OPEN_CREATE` the writer would
+ * create the database the caller declared immutable, so a missing file
+ * fails with `SQLITE_CANTOPEN` instead of coming back as an empty one.
+ * Such a URI, and an in-memory database, also turn the WAL default off by
+ * themselves (a read-only connection cannot switch journal mode, and an
+ * in-memory database has no journal); asking for `walMode: true` there is
+ * refused up front rather than failing every worker at
+ * `PRAGMA journal_mode`.
+ *
+ * Pool queries are **not** visible to {@link sqlite3.subscribeQueries}:
+ * each worker loads its own instance of this module, so spans are
+ * published on the worker's channels and never reach a main-thread
+ * subscriber. See docs/concurrency.md.
  *
  * @param {string} filename the database file, or a `file:` URI.
  * @param {PoolOptions} [options] the pool options.

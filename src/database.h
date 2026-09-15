@@ -485,6 +485,13 @@ public:
 
     Database(const Napi::CallbackInfo& info);
 
+    // Records `err` — a value thrown by a user callback on the JS thread —
+    // as the `cause` the next SQLite error built for this connection will
+    // carry (AttachPendingJsError consumes it). Public because the virtual
+    // table machinery reaches it from free functions on the JS thread; the
+    // user-function path sets the slot directly (it is a friend).
+    void SetPendingJsError(Napi::Value err);
+
     ~Database() {
         RemoveCallbacks();
         RemoveUserFunctions();
