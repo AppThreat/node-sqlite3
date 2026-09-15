@@ -52,6 +52,14 @@ run to completion; its result is dropped. The signal listener is removed
 when the call settles, so one long-lived signal does not accumulate
 listeners.
 
+The rejection is delivered when the signal fires, which is before the
+interrupted statement has finished unwinding on its worker — so the
+connection is not idle yet at that moment and a synchronous method called
+there refuses with "database is busy: sync methods require a fully idle
+database". `await db.wait()` in the catch block drains the teardown. A
+cancellation token's own rejection (`token.cancel()`) arrives after the
+unwind and needs no drain.
+
 ## User-defined functions, aggregates, window functions and collations (new)
 
 `db.function()`, `db.aggregate()`, `db.collation()`, `db.removeFunction()`
@@ -343,6 +351,49 @@ sits inside an `app.asar` archive, the `asarUnpack` configuration that
 fixes it (the original `node-gyp-build` error is preserved as
 `err.cause`). node-webkit support and its build instructions were
 removed. See [docs/electron.md](docs/electron.md).
+
+## Within v9: 9.0 → 9.1 behaviour changes
+
+Small, but they change what working 9.0 code observes:
+
+- **`stmt.parameterNames` on a fully positional statement is now
+  `undefined`.** 9.0 returned an array of `null`s, one per `?`
+  parameter. A statement with no named parameters at all has no names to
+  report, so it reports none; a **mixed** statement still carries `null`
+  at each positional index, so indices stay aligned with
+  `parameterCount`:
+
+  ```js
+  db.prepareSync("SELECT * FROM t WHERE a = ? AND b = ?").parameterNames;
+  // 9.0: [null, null]   9.1: undefined
+  db.prepareSync("SELECT * FROM t WHERE a = ? AND b = $b").parameterNames;
+  // [null, '$b'] in both
+  ```
+
+  Code that iterated the array unconditionally needs a `?? []`.
+
+- **`db.close()` refuses while a statement is unfinalized.** This is
+  unchanged behaviour, called out here because it is the first thing that
+  bites code ported from `node:sqlite` or `better-sqlite3`, where a
+  garbage-collected statement is finalized for you:
+
+  ```js
+  const stmt = db.prepareSync("SELECT 1");
+  await db.close(); // SQLITE_BUSY: unable to close due to unfinalized statements
+  ```
+
+  Finalize the statement (`await stmt.finalize()`, or `using stmt = ...`
+  for scope-bound disposal) before closing. The statement cache and the
+  `*Sync` fast paths manage their own statements, so this only concerns
+  statements you prepared explicitly. The `/compat` shim's
+  `DatabaseSync.close()` finalizes the statements it prepared for you, as
+  `node:sqlite` does — since 9.1, where it previously discarded the
+  resulting `SQLITE_BUSY` and left the connection open.
+
+- **Query spans are delivered asynchronously**, and `sqlite3.flushQuerySpans()`
+  is the new drain point — see the observability section of the README.
+  9.0 code that read collected spans immediately after an awaited query
+  was seeing nothing; `unsubscribe()` now drains before it detaches.
 
 ## Minor notes
 

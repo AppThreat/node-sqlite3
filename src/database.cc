@@ -31,6 +31,7 @@ Napi::Object Database::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("parallelize", &Database::Parallelize, napi_default_method),
         InstanceMethod("configure", &Database::Configure, napi_default_method),
         InstanceMethod("interrupt", &Database::Interrupt, napi_default_method),
+        InstanceMethod("_flushProfile", &Database::FlushProfile, napi_default_method),
         InstanceMethod("_queueBusy", &Database::QueueBusy, napi_default_method),
         // User-defined functions (Deliverable 06): internal entry points
         // wrapped by lib/sqlite3.js, which parses options and flushes the
@@ -862,6 +863,25 @@ void Database::RegisterProfileCallback(Baton* b) {
     // Release only after the sqlite call; see RegisterTraceCallback.
     db->exclusiveHeld = false;
     db->Process();
+}
+
+// _flushProfile(): delivers the profile batons already queued for this
+// connection right now, instead of on whichever loop turn the uv_async
+// callback runs. SQLITE_TRACE_PROFILE fires on the worker thread as a
+// statement finishes, before that statement's own completion reaches JS,
+// so a caller that has awaited its query has a span waiting in the queue
+// — this is what lets lib/sqlite3.js drain it before dropping a
+// subscribeQueries() subscriber rather than losing it.
+//
+// Safe to call at any time: the queue is swapped out under its mutex, so
+// a listener that calls back in sees an empty queue rather than
+// re-entering the same items, and a connection with tracing off has no
+// queue at all.
+Napi::Value Database::FlushProfile(const Napi::CallbackInfo& info) {
+    if (debug_profile != NULL) {
+        debug_profile->flush();
+    }
+    return info.Env().Undefined();
 }
 
 void Database::ProfileCallback(Database *db, ProfileInfo* i) {

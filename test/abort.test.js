@@ -67,6 +67,35 @@ describe('abort', function () {
         await db.close();
     });
 
+    it('a sync method needs one drain after an in-flight abort', {
+        timeout: 30000,
+    }, async function () {
+        // Documented in the README and MIGRATING-TO-V9: an AbortSignal
+        // rejection is delivered when the signal fires, before the
+        // interrupted statement has finished unwinding on its worker, so
+        // the connection is not idle at that instant. `await db.wait()`
+        // (or any awaited query) drains the teardown.
+        const db = await sqlite3.open(':memory:');
+        const controller = new AbortController();
+        const pending = db.all(HEAVY, { signal: controller.signal });
+        setTimeout(() => controller.abort('drain me'), 5);
+        await assert.rejects(pending, (reason) => reason === 'drain me');
+        try {
+            db.allSync('SELECT 1');
+            // The abort may have lost its race with the worker (see HEAVY
+            // above), in which case the connection really is idle and the
+            // sync call legitimately works. Nothing to assert then.
+        } catch (err) {
+            assert.match(
+                /** @type {Error} */ (err).message,
+                /sync methods require a fully idle database/,
+            );
+        }
+        await db.wait();
+        assert.deepStrictEqual(db.allSync('SELECT 1 AS x'), [{ x: 1 }]);
+        await db.close();
+    });
+
     it('the signal option never collides with named parameters', async function () {
         const db = await sqlite3.open(':memory:');
         await db.exec('CREATE TABLE t (a INT)');

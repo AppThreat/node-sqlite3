@@ -165,6 +165,47 @@ describe('diagnostics_channel', function () {
         }
     });
 
+    it('flushQuerySpans() delivers the span of a query just awaited', async function () {
+        // Spans ride a uv_async queue, so `await db.all(...)` returns
+        // before the span for that query has been dispatched: reading the
+        // collected spans right there saw nothing at all. The flush is the
+        // documented drain point.
+        /** @type {string[]} */
+        const spans = [];
+        const unsubscribe = sqlite3.subscribeQueries((span) =>
+            spans.push(span.sql),
+        );
+        try {
+            await db.all('SELECT 11 AS v');
+            sqlite3.flushQuerySpans();
+            assert.deepStrictEqual(spans, ['SELECT 11 AS v']);
+            // Idempotent: a second flush has nothing left to deliver.
+            sqlite3.flushQuerySpans();
+            assert.deepStrictEqual(spans, ['SELECT 11 AS v']);
+        } finally {
+            unsubscribe();
+        }
+        // A no-op with nothing subscribed.
+        sqlite3.flushQuerySpans();
+    });
+
+    it('unsubscribe delivers pending spans instead of losing them', async function () {
+        /** @type {string[]} */
+        const spans = [];
+        const unsubscribe = sqlite3.subscribeQueries((span) =>
+            spans.push(span.sql),
+        );
+        await db.all('SELECT 12 AS v');
+        // The reported race: unsubscribing immediately after the await
+        // used to drop the span for the awaited query.
+        unsubscribe();
+        assert.deepStrictEqual(spans, ['SELECT 12 AS v']);
+        // And nothing arrives afterwards.
+        await db.all('SELECT 13 AS v');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.deepStrictEqual(spans, ['SELECT 12 AS v']);
+    });
+
     it('validates the listener', function () {
         assert.throws(() => sqlite3.subscribeQueries(7), TypeError);
     });

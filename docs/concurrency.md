@@ -171,6 +171,24 @@ Error's own properties.
 transaction finishes or rolls back), closes every connection and waits
 for every worker's exit. `await using pool` works.
 
+**`file:` URI filenames** work in the pool as they do on a single
+connection: the workers set `OPEN_URI` when the filename starts with
+`file:`, so `mode`, `immutable` and `cache` are honoured (before 9.1 the
+URI reached SQLite as a literal path and every worker failed with
+`SQLITE_CANTOPEN`). Two consequences worth knowing:
+
+```js
+// Read-only over a shipped database — WAL is a write, so the pool's WAL
+// default is dropped for a read-only URI rather than failing the open.
+const ro = await sqlite3.pool("file:/data/vdb.sqlite?mode=ro", { readers: 2 });
+// Asking for WAL explicitly on such a URI is refused up front:
+await sqlite3.pool("file:/data/vdb.sqlite?mode=ro", { walMode: true }); // TypeError
+```
+
+An in-memory URI (`file::memory:`, `mode=memory`) is refused with
+`readers > 0` for the same reason `:memory:` is — each worker would get
+its own empty database — unless the URI carries `cache=shared`.
+
 ## Terminating a worker
 
 `worker.terminate()` while a query is in flight used to abort the whole

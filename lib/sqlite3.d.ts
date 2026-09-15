@@ -59,6 +59,7 @@ export type sqlite3 = import('./sqlite3-binding.js').NativeBinding & {
         duration: bigint;
         durationMs: number;
     }) => void) => () => void;
+    flushQuerySpans: () => void;
 };
 declare const sqlite3: sqlite3;
 declare const NativeDatabase: typeof import("./native.js").Database & DatabaseConstructor;

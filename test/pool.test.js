@@ -373,11 +373,79 @@ describe('pool', function () {
         assert.ok(true, 'await using disposed without hanging');
     });
 
+    it('opens a file: URI filename in every worker', {
+        timeout: 30000,
+    }, async function () {
+        // Without OPEN_URI in the workers' flags SQLite read the whole
+        // URI as a literal path and every worker failed with a bare
+        // SQLITE_CANTOPEN, even though pool() documents the URI form.
+        file = join(TMP_DIR, `pool-uri-${process.pid}-${Date.now()}.db`);
+        removeDb(file);
+        const seed = await sqlite3.pool(file, { readers: 0 });
+        await seed.exec('CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)');
+        await seed.write('INSERT INTO t (b) VALUES (?)', ['uri']);
+        await seed.close();
+
+        pool = await sqlite3.pool(`file:${file}`, { readers: 2 });
+        assert.strictEqual((await pool.get('SELECT b FROM t')).b, 'uri');
+        // A read-write URI is still writable through the writer.
+        await pool.write('INSERT INTO t (b) VALUES (?)', ['second']);
+        assert.strictEqual(
+            (await pool.get('SELECT COUNT(*) AS n FROM t')).n,
+            2,
+        );
+    });
+
+    it('honours a read-only URI and drops the WAL default for it', {
+        timeout: 30000,
+    }, async function () {
+        // The canonical read-only form. WAL is a write, so the default
+        // must not be applied here — otherwise the writer worker's
+        // `PRAGMA journal_mode = WAL` fails and the whole pool refuses
+        // to open.
+        file = join(TMP_DIR, `pool-uri-ro-${process.pid}-${Date.now()}.db`);
+        removeDb(file);
+        const seed = await sqlite3.pool(file, { readers: 0, walMode: false });
+        await seed.exec('CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)');
+        await seed.write('INSERT INTO t (b) VALUES (?)', ['ro']);
+        await seed.close();
+
+        pool = await sqlite3.pool(`file:${file}?mode=ro`, { readers: 2 });
+        assert.strictEqual((await pool.get('SELECT b FROM t')).b, 'ro');
+        await assert.rejects(
+            pool.write('INSERT INTO t (b) VALUES (?)', ['nope']),
+            /readonly|SQLITE_READONLY/i,
+            'mode=ro must actually be read-only',
+        );
+    });
+
+    it('refuses walMode: true on a read-only URI instead of failing every worker', {
+        timeout: 30000,
+    }, async function () {
+        await assert.rejects(
+            sqlite3.pool('file:/tmp/whatever.db?mode=ro', {
+                readers: 1,
+                walMode: true,
+            }),
+            /cannot enable WAL on the read-only URI/,
+        );
+    });
+
     it('refuses :memory: and unknown options loudly', {
         timeout: 30000,
     }, async function () {
         await assert.rejects(
             sqlite3.pool(':memory:'),
+            /in-memory one cannot be shared across workers/,
+        );
+        // The URI spellings of the same thing: separate memory databases
+        // per worker is the silent-wrong-answer version of this error.
+        await assert.rejects(
+            sqlite3.pool('file::memory:'),
+            /in-memory one cannot be shared across workers/,
+        );
+        await assert.rejects(
+            sqlite3.pool('file:anything?mode=memory'),
             /in-memory one cannot be shared across workers/,
         );
         await assert.rejects(

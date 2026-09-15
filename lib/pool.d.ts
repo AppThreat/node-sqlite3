@@ -271,7 +271,13 @@ declare class SqlitePool {
  * docs/concurrency.md). With `readers: 0` a `:memory:` pool is fine:
  * everything runs on the single writer.
  *
- * @param {string} filename the database file.
+ * A `file:` URI is opened as a URI (the workers set `OPEN_URI` for it),
+ * so `mode`, `immutable` and `cache` are honoured. A read-only URI
+ * (`mode=ro`, `immutable=1`) turns WAL off by itself, since enabling WAL
+ * is a write: pass `walMode: true` explicitly on such a URI and pool()
+ * refuses rather than failing every worker at `PRAGMA journal_mode`.
+ *
+ * @param {string} filename the database file, or a `file:` URI.
  * @param {PoolOptions} [options] the pool options.
  * @returns {Promise<SqlitePool>} the opened pool.
  * @throws {TypeError} when the filename is missing or malformed, or an
@@ -285,6 +291,11 @@ declare class SqlitePool {
  * const rows = await pool.read('SELECT * FROM t WHERE a = ?', [1]);
  * await pool.write('INSERT INTO t (a) VALUES (?)', [2]);
  * await pool.close();
+ * @example
+ * // A read-only pool over a shipped database, canonical URI form:
+ * const ro = await sqlite3.pool('file:/data/vdb.sqlite?mode=ro', {
+ *     readers: 2,
+ * });
  */
 declare function pool(filename: string, options?: PoolOptions): Promise<SqlitePool>;
 export { pool, SqlitePool };

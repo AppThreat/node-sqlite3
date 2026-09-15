@@ -13,6 +13,18 @@
 
 using namespace node_sqlite3;
 
+// The native-interface revision. lib/sqlite3-binding.js requires this
+// exact number (NATIVE_INTERFACE_EXPECTED there) and throws when the
+// binary it loaded reports another one, or none at all.
+//
+// Bump both, in the same commit, whenever lib/ starts depending on
+// something this addon did not export before. That turns "a stale .node
+// was resolved ahead of the current build" — which otherwise presents as
+// unexplained missing APIs on the namespace, e.g. a 9.0 binary shadowing
+// a 9.1 checkout and reporting `rebaseChangeset === undefined` — into a
+// load-time error naming the file.
+#define NODE_SQLITE3_NATIVE_INTERFACE 1
+
 namespace {
 
 // setRowFactoryGenerator(fn): installs the JS half of the row builder.
@@ -92,6 +104,8 @@ Napi::Object RegisterModule(Napi::Env env, Napi::Object exports) {
         Napi::Function::New(env, Complete));
     exports.Set("compileOptions",
         Napi::Function::New(env, CompileOptions));
+    exports.Set("NATIVE_INTERFACE_VERSION",
+        Napi::Number::New(env, NODE_SQLITE3_NATIVE_INTERFACE));
 
     exports.DefineProperties({
         DEFINE_CONSTANT_INTEGER(exports, SQLITE_OPEN_READONLY, OPEN_READONLY)

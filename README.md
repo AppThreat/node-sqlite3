@@ -567,6 +567,26 @@ reaches every statement running on the connection. While a token exists,
 each query pays one relaxed atomic load per `period` VM instructions
 (default 1000) — within measurement noise in the benchmark suite.
 
+One timing detail worth knowing: an `AbortSignal` rejection is delivered
+as soon as the signal fires, which is *before* the interrupted statement
+has finished unwinding on its worker. The connection is therefore not yet
+idle at the moment the rejection is observed, so a synchronous method
+called right there refuses with "database is busy: sync methods require a
+fully idle database". `await db.wait()` (or any awaited query) drains the
+teardown:
+
+```js
+try {
+  await db.all(longRunningSql, { signal });
+} catch (err) {
+  await db.wait(); // the interrupted statement has finished unwinding
+  db.allSync("SELECT 1"); // now the sync path is available again
+}
+```
+
+A cancellation token's own rejection (`token.cancel()` with no signal)
+arrives with the statement already unwound, so it needs no drain.
+
 A JavaScript callback form exists for progress reporting —
 `db.progress(10000, () => shouldStop)` calls the callback every 10,000
 VM instructions and aborts the statement when it returns truthy — but
@@ -637,23 +657,43 @@ const both = sqlite3.concatChangeset(a, b); // a then b
 ### Rebasing (9.1): the fork-free sync loop
 
 Apply with `{ rebase: true }` to harvest a **rebase buffer** — the
-record of which conflicting changes were omitted or replaced — then
-rebase later local changesets against it before applying them remotely.
+record of which conflicting changes this database omitted or replaced —
+then rebase the changesets you recorded *before* that apply, so they
+land upstream without anyone resolving the same conflicts twice.
 Together with `session.diff()` (a changeset of the differences between
 an attached database's table and this one, without recording anything)
 this is a complete offline-first sync toolkit on stock SQLite; no other
 JS driver has rebasing (rusqlite is the only binding anywhere):
 
 ```js
-// one round of sync: apply the server's changes, remember the conflicts
-const rebase = await serverDb.applyChangeset(serverChangeset, {
-  conflict: "omit",
+// This database is at S0 and records its own work (S0 → S1):
+const session = db.session({ table: "t" });
+await db.run("UPDATE t SET v = ? WHERE id = ?", "mine", 1);
+const local = await session.changeset();
+await session.close();
+
+// A changeset based on S0 arrives from the peer. Apply it *here*,
+// resolving conflicts, and keep the record of those resolutions:
+const rebase = await db.applyChangeset(incoming, {
+  conflict: "omit", // this database's row wins
   rebase: true, // resolves the rebase buffer (null if no conflicts)
 });
-// later: rebase the client's new work against those resolutions and push
-const rebased = sqlite3.rebaseChangeset(clientChangeset, rebase);
-await serverDb.applyChangeset(rebased);
+
+// Rebasing rewrites the local changeset's old values to the ones the
+// peer holds, so pushing it needs no conflict handling at all:
+await peer.applyChangeset(sqlite3.rebaseChangeset(local, rebase));
 ```
+
+The matching rule, because it is easy to get backwards: the rebaser
+finds a buffer entry **by primary key** and rewrites the change's
+`old.*` values to the values the buffer carries (for an omitted remote
+UPDATE, the values that remote left in place). It does not check when
+the change was recorded — so a changeset recorded *after* the apply is
+rewritten just the same, and its old values then describe a state the
+peer has already moved past. **One buffer belongs to the changesets
+recorded before its apply**; later work gets its own round of the loop.
+The direction matters too: the buffer must come from the apply performed
+on the database whose changeset you are rebasing.
 
 `session.diff('t', 'other')` records the changes that transform the
 attached database `other`'s table into this connection's — the
@@ -780,6 +820,10 @@ catch (err) { err.offset; } // 9
 
 // per-statement integer mode
 const stmt = db.prepareSync(sql, { integerMode: "bigint" });
+
+// connection-free namespace helpers
+sqlite3.complete("SELECT 1;"); // true — a complete statement (REPL input)
+sqlite3.compileOptions(); // ['ENABLE_FTS5', 'ENABLE_SESSION', …]
 ```
 
 **JavaScript virtual tables** — generator-computed, read-only, working
@@ -846,6 +890,22 @@ const unsubscribe = sqlite3.subscribeQueries(({ sql, durationMs }) => {
 });
 ```
 
+Spans are delivered **asynchronously**: SQLite reports a statement's
+timing on the thread that ran it, and the span crosses to the JS thread
+through a queue drained on a later event-loop turn — so right after
+`await db.all(sql)` the span for that query has usually not arrived yet.
+`sqlite3.flushQuerySpans()` delivers everything pending, synchronously,
+which is what a test or a shutdown flush wants; `unsubscribe()` drains
+first as well, so nothing recorded before it is lost.
+
+```js
+const spans = [];
+const stop = sqlite3.subscribeQueries((s) => spans.push(s.sql));
+await db.all("SELECT 1");
+sqlite3.flushQuerySpans(); // spans === ['SELECT 1']
+stop();
+```
+
 **node:sqlite drop-in** — code written against the built-in module can
 switch without rewriting:
 
@@ -860,9 +920,10 @@ The shim maps onto the sync fast path (re-entrant UDFs included) and
 exposes the full async surface through `db.native`. The places a
 synchronous form cannot exist keep this package's async signatures and
 are listed at the top of [lib/compat.js](lib/compat.js): sessions,
-`serialize`, and `close()`, which starts the close rather than completing
-it (`await using`, or `await db.native.close()`, when a caller must know
-the file is free — deleting or reopening it on Windows).
+`serialize`, and `close()`, which finalizes the statements it prepared
+(as `node:sqlite` does) and then *starts* the close rather than
+completing it (`await using`, or `await db.native.close()`, when a caller
+must know the file is free — deleting or reopening it on Windows).
 `StatementSync.iterate()` materialises its rows, because the sync path has
 no mid-cursor suspension.
 

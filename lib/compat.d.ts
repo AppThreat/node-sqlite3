@@ -150,8 +150,17 @@ export declare class DatabaseSync {
     ): Promise<void>;
     /** Serializes the database (async divergence). */
     serialize(): Promise<Uint8Array>;
-    /** Closes the connection (asynchronously under the hood). */
+    /**
+     * Closes the connection, finalizing the statements prepared through
+     * it (as node:sqlite does). The close itself is queued: the
+     * connection refuses further work at once, the handle is released a
+     * turn later. A close that still fails is reported on the underlying
+     * connection's 'error' event.
+     */
     close(): void;
-    /** `await using` support. */
+    /**
+     * `await using` support: finalizes outstanding statements, then waits
+     * for the close to complete.
+     */
     [Symbol.asyncDispose](): Promise<void>;
 }

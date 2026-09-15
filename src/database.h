@@ -522,6 +522,14 @@ protected:
     Napi::Value Parallelize(const Napi::CallbackInfo& info);
     Napi::Value Configure(const Napi::CallbackInfo& info);
     Napi::Value Interrupt(const Napi::CallbackInfo& info);
+    // Delivers the profile ('profile' event) batons already queued for
+    // this connection, synchronously. A finished statement's timing is
+    // handed over on the worker thread and dispatched to JS on a later
+    // loop turn, so a caller that has just awaited a query has not seen
+    // its span yet; lib/sqlite3.js drains through this before dropping a
+    // subscribeQueries() subscriber, and exposes it as
+    // sqlite3.flushQuerySpans().
+    Napi::Value FlushProfile(const Napi::CallbackInfo& info);
 
     /** Current integerMode as a string: 'number' | 'bigint' | 'mixed'. */
     Napi::Value IntegerModeGetter(const Napi::CallbackInfo& info);
