@@ -1,0 +1,40 @@
+README.md
+  h_6a4cc5cdf68def 854-868,924-927
+docs/concurrency.md
+  h_6a4cc5cdf68def 190-202
+lib/pool.d.ts
+  h_6a4cc5cdf68def 275-289
+lib/pool.js
+  h_6a4cc5cdf68def 116-125,170,226,1222-1236,1300-1315
+lib/sqlite3.d.ts
+  h_6a4cc5cdf68def 193-199
+lib/sqlite3.js
+  h_6a4cc5cdf68def 3588-3594,3625-3626
+lib/worker.js
+  h_6a4cc5cdf68def 8-9,136-138,143-153,201
+src/database.h
+  h_6a4cc5cdf68def 488-494
+src/function.cc
+  h_6a4cc5cdf68def 1334-1337
+src/vtab.cc
+  h_6a4cc5cdf68def 123-149,274,344,423-430,644-657
+test/pool.test.js
+  h_6a4cc5cdf68def 6,434-512
+test/prebuild_layout.test.js
+  h_6a4cc5cdf68def 134-159
+test/vtab.test.js
+  h_6a4cc5cdf68def 63-69,74,91-94,96-97,108-132,246,252,257-264,266-272,367-452,511,517,524-538
+tools/check-prebuilds.mjs
+  h_6a4cc5cdf68def 22-25,32-54,163-166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e33f1f3bfcd34d8f3e5b97f27dabd596b0da227c",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
