@@ -1,0 +1,70 @@
+.github/workflows/ci.yml
+  h_6a4cc5cdf68def 198-202,205-207
+.github/workflows/electron-asar.yml
+  h_6a4cc5cdf68def 51-52
+MIGRATING-TO-V9.md
+  h_6a4cc5cdf68def 55-62,355-397
+README.md
+  h_6a4cc5cdf68def 570-589,660-662,669-678,681-684,687-697,823-826,893-908,923-926
+docs/concurrency.md
+  h_6a4cc5cdf68def 174-191
+docs/install.md
+  h_6a4cc5cdf68def 47-73,184-187,204-205
+lib/compat.d.ts
+  h_6a4cc5cdf68def 153-159,161-164
+lib/compat.js
+  h_6a4cc5cdf68def 29-31,33-36,96-97,105-106,108,119-123,296,326-340,482-526,663-677,683-686,692-694,700
+lib/native.d.ts
+  h_6a4cc5cdf68def 298-312,1560-1567,1594-1605
+lib/pool.d.ts
+  h_6a4cc5cdf68def 274-280,294-298
+lib/pool.js
+  h_6a4cc5cdf68def 1157-1195,1209-1215,1229-1233,1240-1251,1253,1257-1258,1261-1276
+lib/sqlite3-binding.js
+  h_6a4cc5cdf68def 60-72,100-132
+lib/sqlite3.d.ts
+  h_6a4cc5cdf68def 62
+lib/sqlite3.js
+  h_6a4cc5cdf68def 74,4728-4752,4762-4771,4782-4784,4793-4796,4804-4827
+lib/worker.js
+  h_6a4cc5cdf68def 141,144-157
+package.json
+  h_6a4cc5cdf68def 57-58
+src/async.h
+  h_6a4cc5cdf68def 56-64
+src/database.cc
+  h_6a4cc5cdf68def 34,868-886
+src/database.h
+  h_6a4cc5cdf68def 525-532
+src/node_sqlite3.cc
+  h_6a4cc5cdf68def 16-27,107-108
+test/abort.test.js
+  h_6a4cc5cdf68def 70-98
+test/compat.test.js
+  h_6a4cc5cdf68def 2-3,10,171-254
+test/diagnostics.test.js
+  h_6a4cc5cdf68def 168-208
+test/pool.test.js
+  h_6a4cc5cdf68def 376-433,441-450
+test/prebuild_layout.test.js
+  h_6a4cc5cdf68def 1-225
+test/session_rebase.test.js
+  h_6a4cc5cdf68def 40-43,51,62-92,96-122,124-126,128-129,132-196
+tools/BinaryBuilder.Dockerfile
+  h_6a4cc5cdf68def 29-30
+tools/check-prebuilds.mjs
+  h_6a4cc5cdf68def 1-154
+tools/prebuild.mjs
+  h_6a4cc5cdf68def 1-103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ec718ddf60896376f28d1ffcf67a8f052d3eec63",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
