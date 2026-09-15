@@ -1,0 +1,32 @@
+README.md
+  h_6a4cc5cdf68def 858-863
+docs/concurrency.md
+  h_6a4cc5cdf68def 195-218
+lib/pool.d.ts
+  h_6a4cc5cdf68def 291-297
+lib/pool.js
+  h_6a4cc5cdf68def 1238-1244
+lib/sqlite3.d.ts
+  h_6a4cc5cdf68def 198-201
+lib/sqlite3.js
+  h_6a4cc5cdf68def 3593-3596
+lib/worker.js
+  h_6a4cc5cdf68def 49-54,109,122-198,258
+src/vtab.cc
+  h_6a4cc5cdf68def 509-521,529
+test/pool.test.js
+  h_6a4cc5cdf68def 513-579
+test/vtab.test.js
+  h_6a4cc5cdf68def 453-512
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0216d5eb6a1875dfc494b23d64a472e855e0e13e",
+  "prompts": {},
+  "humans": {
+    "h_6a4cc5cdf68def": {
+      "author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
