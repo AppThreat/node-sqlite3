@@ -54,7 +54,8 @@
     "scripts": {
         "install": "node-gyp-build",
         "install:frozen": "pnpm install --config.strict-dep-builds=true --frozen-lockfile --package-import-method copy",
-        "prebuild": "prebuildify --napi --strip",
+        "prebuild": "node tools/prebuild.mjs",
+        "check:prebuilds": "node tools/check-prebuilds.mjs",
         "rebuild": "node-gyp rebuild",
         "lint": "biome check --write",
         "lint:check": "biome check",

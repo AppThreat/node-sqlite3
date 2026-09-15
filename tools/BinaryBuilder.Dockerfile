@@ -26,6 +26,8 @@ RUN if case $VARIANT in "alpine"*) true;; *) false;; esac; then \
         pnpm run prebuild --tag-libc; \
     fi
 
+RUN pnpm run check:prebuilds
+
 RUN if case $VARIANT in "alpine"*) false;; *) true;; esac; then ldd prebuilds/*/*.node; nm prebuilds/*/*.node | grep \"GLIBC_\" | c++filt || true ; fi
 
 RUN pnpm run test && ls -l prebuilds

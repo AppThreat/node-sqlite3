@@ -44,6 +44,33 @@ which looks in `prebuilds/<platform>/` first, then falls back to a
 `build/Release/` build. (For `--tag-libc` builds the directory stays
 `linux-<arch>` and the libc is carried by the file suffix.)
 
+### The libc tag belongs to linux only
+
+`node-gyp-build` resolves the running libc as `'glibc'` on **every
+non-Alpine platform, macOS and Windows included**, and prefers a
+tag-matching file over an untagged one. So a
+`prebuilds/darwin-arm64/@appthreat+sqlite3.glibc.node` matches the
+platform *and* the libc, outranks the `@appthreat+sqlite3.node` beside it,
+and is loaded in preference to it — even when it comes from an entirely
+different revision. That failure is silent: the addon loads, and only the
+APIs added since are missing.
+
+Three things prevent it:
+
+- `pnpm run prebuild` goes through `tools/prebuild.mjs`, which forwards
+  `--tag-libc` on linux and drops it everywhere else. CI passes the flag
+  for every target; the platform rule lives in the wrapper so a local
+  build cannot recreate the trap either.
+- `pnpm run check:prebuilds` (a CI step after every prebuild) fails when a
+  `darwin-*`/`win32-*` directory contains a `*.glibc.node`/`*.musl.node`,
+  or when a binary's object format contradicts its directory (a Mach-O
+  file in `linux-x64/`).
+- The loader refuses a binding whose `NATIVE_INTERFACE_VERSION` is not the
+  one `lib/` expects, naming the file it loaded and the
+  `rm -rf prebuilds build && pnpm run rebuild` remedy. The two constants
+  live in `src/node_sqlite3.cc` and `lib/sqlite3-binding.js` and are
+  bumped together whenever `lib/` starts using a new native export.
+
 ## pnpm 10+ and the blocked install script
 
 pnpm 10 and later refuse to run a dependency's lifecycle scripts unless the
@@ -154,7 +181,10 @@ Error: No native build was found for platform=linux arch=arm64 runtime=node ...
    `pnpm run rebuild`.
 3. **Stale `prebuilds/` while iterating on C++**: `node-gyp-build` prefers
    `prebuilds/` over `build/`, so your `pnpm run rebuild` output is being
-   shadowed. Delete `prebuilds/` while iterating.
+   shadowed. Delete `prebuilds/` while iterating. Since 9.1 a mismatch
+   between a resolved binary and `lib/` throws at import ("loaded a native
+   binding that does not match this JavaScript"), naming the file — rather
+   than presenting as methods missing from the namespace.
 4. **Runtime below the Node-API floor** (Node < 22, Electron < 35): the
    binding loader refuses with an error naming the floors rather than
    crashing. On Electron the default prebuild needs no rebuild at all; only
@@ -171,7 +201,8 @@ This repo is developed with **pnpm >= 11** (pinned exactly in
 pnpm install                          # strictDepBuilds is on; frozen form: pnpm install --frozen-lockfile
 pnpm run rebuild                      # node-gyp rebuild — always `pnpm run rebuild`
 pnpm run test
-pnpm run prebuild                     # prebuildify --napi --strip
+pnpm run prebuild                     # tools/prebuild.mjs → prebuildify --napi --strip
+pnpm run check:prebuilds              # refuses a prebuilds/ layout that loads the wrong file
 pnpm pack                             # tarball includes prebuilds/ — smoke-test it in a scratch project
 ```
 

@@ -48,6 +48,8 @@ jobs:
           echo "CXXFLAGS=${CXXFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
       - name: Build the shipped prebuild
         run: pnpm run prebuild --tag-libc
+      - name: Verify prebuild layout
+        run: pnpm run check:prebuilds
       - name: Install xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Packaged-ASAR tests (unpacked + sealed-in-archive)

@@ -59,6 +59,7 @@ export type sqlite3 = import('./sqlite3-binding.js').NativeBinding & {
         duration: bigint;
         durationMs: number;
     }) => void) => () => void;
+    flushQuerySpans: () => void;
 };
 declare const sqlite3: sqlite3;
 declare const NativeDatabase: typeof import("./native.js").Database & DatabaseConstructor;
@@ -189,6 +190,15 @@ export type VtabDefinition = {
      * a subset of `columns` to declare
      * HIDDEN — the table-valued function's arguments
      * (`SELECT * FROM name(arg)` passes `arg` to `rows`).
+     *
+     * A parameter is a real (hidden) column, and `name(arg)` is the
+     * predicate `WHERE param = arg`, which SQLite re-checks against every
+     * row the generator yields — the generator is not trusted to have
+     * applied it. A row therefore either leaves that column NULL (it is
+     * filled with the argument) or echoes the argument *as received*: the
+     * column has no affinity, so an echoed `String(5)` is text and no
+     * longer equals the integer `5`. A row reporting anything else there
+     * contradicts the predicate and is filtered out.
      */
     parameters?: string[];
 };

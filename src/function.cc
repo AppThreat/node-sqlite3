@@ -1331,6 +1331,10 @@ int Database::ProgressHandler(void* ctx) {
     }
 }
 
+void Database::SetPendingJsError(Napi::Value err) {
+    pending_js_error = Napi::Persistent(err);
+}
+
 void Database::AttachPendingJsError(Napi::Object err) {
     if (pending_js_error.IsEmpty()) return;
     err.Set("cause", pending_js_error.Value());

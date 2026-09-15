@@ -296,6 +296,21 @@ export declare class Database extends EventEmitter {
     interrupt(): this;
 
     /**
+     * Delivers the `'profile'` events already recorded for this
+     * connection but not yet dispatched, synchronously. A finished
+     * statement's timing is captured on the thread that ran the statement
+     * and crosses to JS through a queue drained on a later loop turn, so
+     * a caller that has just awaited a query has a pending span, not a
+     * delivered one. `sqlite3.subscribeQueries()` drains through this
+     * before dropping a subscriber, and `sqlite3.flushQuerySpans()`
+     * exposes it.
+     *
+     * @returns nothing.
+     * @internal
+     */
+    _flushProfile(): void;
+
+    /**
      * True while an exclusive operation (exec/close/wait/loadExtension)
      * is running or waiting on the queue. Used by the statement cache in
      * lib/sqlite3.js to avoid overtaking it.
@@ -1542,6 +1557,14 @@ declare const binding: {
      * `applyChangeset(..., { rebase: true })` — the client-server sync
      * primitive (sqlite3rebaser_*).
      *
+     * The buffer must come from the apply performed on the database whose
+     * changeset is being rebased, and `changeset` must be one recorded
+     * *before* that apply: entries are matched by primary key and the
+     * change's `old.*` values are rewritten to the ones the buffer
+     * carries, with no check on when the change was recorded. Rebasing
+     * later work against the same buffer therefore produces old values
+     * describing a state the peer has already moved past.
+     *
      * @param changeset the changeset to rebase.
      * @param rebase the harvested rebase buffer.
      * @returns the rebased changeset bytes.
@@ -1567,6 +1590,18 @@ declare const binding: {
      * @since 9.1.0
      */
     compileOptions(): string[];
+
+    /**
+     * The addon's native-interface revision. `lib/sqlite3-binding.js`
+     * refuses to load a binary reporting anything other than the number
+     * it expects, which is what turns "a stale .node was resolved ahead
+     * of the current build" into an error instead of silently missing
+     * methods. Not part of the supported surface; the number carries no
+     * meaning beyond equality.
+     *
+     * @since 9.1.0
+     */
+    readonly NATIVE_INTERFACE_VERSION: number;
 
     /**
      * Installs the generator the addon uses to compile a row builder for

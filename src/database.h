@@ -485,6 +485,13 @@ public:
 
     Database(const Napi::CallbackInfo& info);
 
+    // Records `err` — a value thrown by a user callback on the JS thread —
+    // as the `cause` the next SQLite error built for this connection will
+    // carry (AttachPendingJsError consumes it). Public because the virtual
+    // table machinery reaches it from free functions on the JS thread; the
+    // user-function path sets the slot directly (it is a friend).
+    void SetPendingJsError(Napi::Value err);
+
     ~Database() {
         RemoveCallbacks();
         RemoveUserFunctions();
@@ -522,6 +529,14 @@ protected:
     Napi::Value Parallelize(const Napi::CallbackInfo& info);
     Napi::Value Configure(const Napi::CallbackInfo& info);
     Napi::Value Interrupt(const Napi::CallbackInfo& info);
+    // Delivers the profile ('profile' event) batons already queued for
+    // this connection, synchronously. A finished statement's timing is
+    // handed over on the worker thread and dispatched to JS on a later
+    // loop turn, so a caller that has just awaited a query has not seen
+    // its span yet; lib/sqlite3.js drains through this before dropping a
+    // subscribeQueries() subscriber, and exposes it as
+    // sqlite3.flushQuerySpans().
+    Napi::Value FlushProfile(const Napi::CallbackInfo& info);
 
     /** Current integerMode as a string: 'number' | 'bigint' | 'mixed'. */
     Napi::Value IntegerModeGetter(const Napi::CallbackInfo& info);

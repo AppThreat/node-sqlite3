@@ -1,10 +1,13 @@
 import assert from 'node:assert';
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import { DatabaseSync } from '@appthreat/sqlite3/compat';
 
 import { DatabaseSync as DatabaseSyncRelative } from '../lib/compat.js';
 import sqlite3 from '../lib/sqlite3.js';
+import { TMP_DIR } from './support/db.js';
 
 // Phase 5: the node:sqlite compatibility shim.
 
@@ -163,6 +166,90 @@ describe('node:sqlite compat shim', function () {
         gated.enableLoadExtension(true);
         assert.throws(() => gated.loadExtension('nope', 'entry'), /entry/);
         gated.close();
+    });
+
+    it('close() finalizes leaked statements instead of never closing', async function () {
+        // node:sqlite finalizes outstanding statements on close, and code
+        // ported from it leaks prepares freely. This package refuses to
+        // close while one is unfinalized (SQLITE_BUSY), and the shim used
+        // to discard that error in an empty callback: nothing threw,
+        // nothing was emitted, and the connection stayed open with the
+        // file handle held.
+        const file = join(
+            TMP_DIR,
+            `compat-close-${process.pid}-${Date.now()}.db`,
+        );
+        rmSync(file, { force: true });
+        const leaky = new DatabaseSync(file);
+        leaky.exec('CREATE TABLE t (a)');
+        const leaked = leaky.prepare('SELECT a FROM t');
+        assert.deepStrictEqual(leaked.all(), []);
+        assert.ok(!leaked.finalized);
+
+        /** @type {Error[]} */
+        const errors = [];
+        leaky.native.on('error', (err) => errors.push(err));
+        leaky.close();
+        // The close is queued; wait for it the way the divergence note says.
+        await leaky.native.wait().catch(() => {
+            // A wait that fails says nothing about the close; poll below.
+        });
+        for (let i = 0; i < 20 && leaky.isOpen; i++) {
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        assert.strictEqual(
+            leaky.isOpen,
+            false,
+            'the connection must actually close',
+        );
+        assert.deepStrictEqual(
+            errors.map((e) => e.message),
+            [],
+            'no error should have been needed',
+        );
+        assert.ok(leaked.finalized, 'the leaked statement was finalized');
+        rmSync(file, { force: true });
+    });
+
+    it('close() reports a failure it cannot fix instead of swallowing it', async function () {
+        // A statement prepared directly on db.native is outside the
+        // shim's bookkeeping, so the close genuinely fails. The point of
+        // the test is that the failure is visible.
+        const bare = new DatabaseSync(':memory:');
+        bare.exec('CREATE TABLE t (a)');
+        const native = bare.native.prepareSync('SELECT a FROM t');
+        /** @type {any[]} */
+        const errors = [];
+        bare.native.on('error', (err) => errors.push(err));
+        bare.close();
+        for (let i = 0; i < 20 && errors.length === 0; i++) {
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        assert.strictEqual(errors.length, 1, 'the close error must surface');
+        assert.match(errors[0].message, /unfinalized statements/);
+        assert.strictEqual(errors[0].code, 'SQLITE_BUSY');
+        // Clean up: finalize and close for real.
+        await new Promise((resolve) => native.finalize(() => resolve(null)));
+        await bare.native.close();
+    });
+
+    it('await using closes a connection with statements still open', async function () {
+        const file = join(
+            TMP_DIR,
+            `compat-dispose-${process.pid}-${Date.now()}.db`,
+        );
+        rmSync(file, { force: true });
+        {
+            await using disposed = new DatabaseSync(file);
+            disposed.exec('CREATE TABLE t (a)');
+            disposed.prepare('SELECT a FROM t').all();
+        }
+        // The file is free once the block exits: reopening and dropping
+        // the table proves the handle was released.
+        const reopened = new DatabaseSync(file);
+        reopened.exec('DROP TABLE t');
+        await reopened[Symbol.asyncDispose]();
+        rmSync(file, { force: true });
     });
 
     it('dispose support works', function () {

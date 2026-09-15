@@ -271,7 +271,31 @@ declare class SqlitePool {
  * docs/concurrency.md). With `readers: 0` a `:memory:` pool is fine:
  * everything runs on the single writer.
  *
- * @param {string} filename the database file.
+ * A `file:` URI is opened as a URI (the workers set `OPEN_URI` for it),
+ * so `mode`, `immutable` and `cache` are honoured. A URI that asserts
+ * read-only access (`mode=ro`, `immutable=1`) opens **every** connection
+ * read-only, the writer included: with `OPEN_CREATE` the writer would
+ * create the database the caller declared immutable, so a missing file
+ * fails with `SQLITE_CANTOPEN` instead of coming back as an empty one.
+ * Such a URI, and an in-memory database, also turn the WAL default off by
+ * themselves (a read-only connection cannot switch journal mode, and an
+ * in-memory database has no journal); asking for `walMode: true` there is
+ * refused up front rather than failing every worker at
+ * `PRAGMA journal_mode`.
+ *
+ * Pool queries are **not** visible to {@link sqlite3.subscribeQueries}:
+ * each worker loads its own instance of this module, so spans are
+ * published on the worker's channels and never reach a main-thread
+ * subscriber. See docs/concurrency.md.
+ *
+ * With `cache=shared` (the only way the workers can share an in-memory
+ * database) SQLite locks per table, and a read colliding with the
+ * writer's open transaction fails with `SQLITE_LOCKED_SHAREDCACHE`
+ * outside the busy handler's reach — such a **read** is retried within
+ * the `busyTimeout` budget (`busyTimeout: 0` fails fast); writes and
+ * `exec` are not, since re-running them is not safe.
+ *
+ * @param {string} filename the database file, or a `file:` URI.
  * @param {PoolOptions} [options] the pool options.
  * @returns {Promise<SqlitePool>} the opened pool.
  * @throws {TypeError} when the filename is missing or malformed, or an
@@ -285,6 +309,11 @@ declare class SqlitePool {
  * const rows = await pool.read('SELECT * FROM t WHERE a = ?', [1]);
  * await pool.write('INSERT INTO t (a) VALUES (?)', [2]);
  * await pool.close();
+ * @example
+ * // A read-only pool over a shipped database, canonical URI form:
+ * const ro = await sqlite3.pool('file:/data/vdb.sqlite?mode=ro', {
+ *     readers: 2,
+ * });
  */
 declare function pool(filename: string, options?: PoolOptions): Promise<SqlitePool>;
 export { pool, SqlitePool };

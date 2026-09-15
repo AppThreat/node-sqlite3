@@ -195,7 +195,15 @@ jobs:
           echo "CXXFLAGS=${CXXFLAGS:-} -include ../src/gcc-preinclude.h" >> $GITHUB_ENV
 
       - name: Build binaries
+        # tools/prebuild.mjs forwards --tag-libc on linux and drops it
+        # elsewhere: a libc-tagged binary in a darwin-*/win32-* prebuilds
+        # directory outranks the untagged one at load time (node-gyp-build
+        # reads libc as 'glibc' on every non-Alpine platform), so a stale
+        # copy would be preferred silently.
         run: pnpm run prebuild --arch ${{ env.TARGET }} --tag-libc
+
+      - name: Verify prebuild layout
+        run: pnpm run check:prebuilds
 
       - name: Print binary info
         if: contains(matrix.os, 'ubuntu')

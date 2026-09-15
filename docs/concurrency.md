@@ -171,6 +171,60 @@ Error's own properties.
 transaction finishes or rolls back), closes every connection and waits
 for every worker's exit. `await using pool` works.
 
+**`file:` URI filenames** work in the pool as they do on a single
+connection: the workers set `OPEN_URI` when the filename starts with
+`file:`, so `mode`, `immutable` and `cache` are honoured (before 9.1 the
+URI reached SQLite as a literal path and every worker failed with
+`SQLITE_CANTOPEN`). Two consequences worth knowing:
+
+```js
+// Read-only over a shipped database — WAL is a write, so the pool's WAL
+// default is dropped for a read-only URI rather than failing the open.
+const ro = await sqlite3.pool("file:/data/vdb.sqlite?mode=ro", { readers: 2 });
+// Asking for WAL explicitly on such a URI is refused up front:
+await sqlite3.pool("file:/data/vdb.sqlite?mode=ro", { walMode: true }); // TypeError
+```
+
+An in-memory URI (`file::memory:`, `mode=memory`) is refused with
+`readers > 0` for the same reason `:memory:` is — each worker would get
+its own empty database — unless the URI carries `cache=shared`. WAL is
+turned off by itself for an in-memory pool (there is no journal to
+switch) and for a read-only URI, so both forms open under the default
+options.
+
+**`cache=shared` locks per table, not per file.** It is the only way pool
+workers can share an in-memory database, and its concurrency model is not
+WAL's: while the writer's transaction is open, a reader touching the same
+table gets `SQLITE_LOCKED_SHAREDCACHE` — and the busy timeout does not
+cover it, because SQLite never calls the busy handler for a shared-cache
+table lock (`sqlite3_unlock_notify` is the mechanism there, and it needs a
+compile-time option this build does not carry). The pool therefore
+**retries a read** that hits a table lock, spending the connection's
+`busyTimeout` budget on it, so a read dispatched mid-transaction returns
+the committed data instead of failing. Three consequences:
+
+- `busyTimeout: 0` keeps the fail-fast behaviour — the read rejects with
+  `SQLITE_LOCKED_SHAREDCACHE` immediately.
+- A read outlives its normal latency when it collides with a long
+  transaction; it is waiting, not working. Cancelling it (`{ signal }`)
+  stops the retries.
+- Writes and `exec` are **not** retried: re-running a script, or a
+  statement that may already have landed, is not safe. A shared-cache pool
+  under concurrent writes should keep transactions short.
+
+For a shared database that needs real reader/writer concurrency, use a
+file in WAL mode — that is what the pool is shaped for. `cache=shared` is
+for sharing an in-memory database across the pool's workers at all.
+
+**What the pool does not do: spans.** Each worker loads its own instance
+of this module, so `sqlite3.subscribeQueries()` on the main thread sees
+nothing from `pool.read()`, `pool.write()` or `pool.exec()` — those spans
+are published on the worker's own `diagnostics_channel` (and its
+`sqlite.db.query` mirror), where no main-thread subscriber is listening.
+`flushQuerySpans()` cannot reach them either. If pool traffic must be
+traced, time it at the call site, or use a dedicated worker you control
+(the path handoff above) and subscribe inside it.
+
 ## Terminating a worker
 
 `worker.terminate()` while a query is in flight used to abort the whole

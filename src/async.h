@@ -53,6 +53,15 @@ public:
         uv_close((uv_handle_t*)&watcher, close);
     }
 
+    // Delivers whatever is already queued, now, on the calling thread —
+    // which must be the JS thread, since the callback enters JS. Used by
+    // Database::_flushProfile so a caller that has just awaited a query
+    // can read its span instead of waiting for the loop turn on which the
+    // uv_async callback happens to run.
+    void flush() {
+        listener(&watcher);
+    }
+
     void add(Item* item) {
         NODE_SQLITE3_MUTEX_LOCK(&mutex);
         data.emplace_back(item);
