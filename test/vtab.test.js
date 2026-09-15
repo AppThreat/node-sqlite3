@@ -450,6 +450,66 @@ describe('virtual tables', function () {
         await db.wait();
     });
 
+    it('gives a parameter column no affinity, like every other column', async function () {
+        // sqlite parses a vtab declaration as CREATE TABLE text and only
+        // then strips the `hidden` token from the recorded type, so a bare
+        // `"p" HIDDEN` had already been given NUMERIC affinity (a type
+        // naming no affinity keyword falls through to it). On that column
+        // the text '2' compared equal to the integer 2 and sorted below
+        // '10' — a table-valued function over versions or hashes compared
+        // its parameter numerically. The declaration says BLOB HIDDEN now.
+        db.table('probe', {
+            columns: ['p', 'q'],
+            parameters: ['p'],
+            rows: function* (p) {
+                yield [p, p];
+            },
+        });
+        await db.exec("CREATE TABLE plain (a); INSERT INTO plain VALUES ('2')");
+        const affinity = await db.get(
+            "SELECT p = 2 AS pEq, p < '10' AS pLt, q = 2 AS qEq FROM probe('2')",
+        );
+        const control = await db.get(
+            "SELECT a = 2 AS eq, a < '10' AS lt FROM plain",
+        );
+        assert.deepStrictEqual(affinity, { pEq: 0, pLt: 0, qEq: 0 });
+        assert.deepStrictEqual(control, { eq: 0, lt: 0 });
+        // Text ordering is the ordinary one on both columns.
+        db.table('versions', {
+            columns: ['v', 'name'],
+            parameters: ['name'],
+            rows: function* (name) {
+                yield [name, name];
+            },
+        });
+        assert.deepStrictEqual(
+            await db.all("SELECT v FROM versions('1.10') WHERE v > '1.9'"),
+            [],
+            "'1.10' must not sort above '1.9' numerically",
+        );
+    });
+
+    it('requires an echoed parameter to keep the argument\u2019s type', async function () {
+        // The flip side of the affinity fix: with no affinity on the
+        // column, an echo must be the value as received. Stringifying an
+        // integer argument no longer compares equal, so the row is
+        // filtered — pinned because it used to "work" through NUMERIC
+        // affinity coercing it back.
+        db.table('echoes', {
+            columns: ['v', 'n'],
+            parameters: ['n'],
+            rows: function* (n) {
+                yield [1, n]; // as received: kept
+                yield [2, String(n)]; // stringified: no longer equal
+                yield [3]; // NULL, filled with n: kept
+            },
+        });
+        assert.deepStrictEqual(await db.all('SELECT v FROM echoes(5)'), [
+            { v: 1 },
+            { v: 3 },
+        ]);
+    });
+
     it('reports a hidden parameter the generator did not yield', async function () {
         db.table('echo', {
             columns: ['value', 'n'],

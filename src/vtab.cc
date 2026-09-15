@@ -506,6 +506,19 @@ struct VtabOps {
 // The parameters are a subset of the columns (the better-sqlite3
 // contract): `parameters: ['n']` marks the column `n` HIDDEN, which is
 // what turns the module into a table-valued function.
+//
+// Parameters are declared `BLOB HIDDEN`, not bare `HIDDEN`. sqlite parses
+// a vtab declaration as ordinary CREATE TABLE text and only *afterwards*
+// strips the `hidden` token out of the type it recorded (see
+// sqlite3VtabCallConnect) — the affinity was already computed from the
+// full type string, and a type naming none of INT/CHAR/CLOB/TEXT/BLOB/
+// REAL/FLOA/DOUB gets NUMERIC affinity. So `"n" HIDDEN` gave parameter
+// columns NUMERIC affinity while every other column had none: on that
+// column text '2' compared equal to the integer 2 and '2' sorted below
+// '10', so a table-valued function over a text domain (a version, a
+// hash) silently compared its parameter numerically. `BLOB` names the
+// no-affinity rule explicitly and leaves the HIDDEN token where sqlite
+// looks for it (last, space-separated).
 static std::string BuildDeclareSql(const VtabModule* module) {
     std::string sql = "CREATE TABLE x(";
     for (size_t i = 0; i < module->columns.size(); i++) {
@@ -513,7 +526,7 @@ static std::string BuildDeclareSql(const VtabModule* module) {
         sql += "\"" + module->columns[i] + "\"";
         for (const auto& param : module->params) {
             if (param == module->columns[i]) {
-                sql += " HIDDEN";
+                sql += " BLOB HIDDEN";
                 break;
             }
         }

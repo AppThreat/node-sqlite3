@@ -510,6 +510,73 @@ describe('pool', function () {
         );
     });
 
+    it('waits out a shared-cache table lock instead of failing the read', {
+        timeout: 30000,
+    }, async function () {
+        // Shared cache is the only way pool workers can share an
+        // in-memory database, and it locks per table rather than per
+        // file: a read dispatched while the writer's transaction is open
+        // fails with SQLITE_LOCKED_SHAREDCACHE, and the busy timeout does
+        // not cover it (SQLite never calls the busy handler for a
+        // shared-cache table lock). The reader now retries within that
+        // same budget, so it sees the committed data instead of losing
+        // the race.
+        const shared = await sqlite3.pool('file::memory:?cache=shared', {
+            readers: 2,
+        });
+        try {
+            await shared.exec('CREATE TABLE t (a)');
+            await shared.write('INSERT INTO t VALUES (1)');
+            const tx = shared.transaction(async (t) => {
+                await t.write('INSERT INTO t VALUES (2)');
+                await new Promise((resolve) => setTimeout(resolve, 150));
+                return 'committed';
+            });
+            // Dispatched while the transaction holds the table lock.
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            const reads = [
+                shared.read('SELECT count(*) AS n FROM t'),
+                shared.get('SELECT count(*) AS n FROM t'),
+            ];
+            assert.strictEqual(await tx, 'committed');
+            const [all, one] = await Promise.all(reads);
+            assert.deepStrictEqual(all, [{ n: 2 }]);
+            assert.deepStrictEqual(one, { n: 2 });
+        } finally {
+            await shared.close();
+        }
+    });
+
+    it('surfaces the lock when the busy timeout budget is zero', {
+        timeout: 30000,
+    }, async function () {
+        // The retry spends the caller's busy-timeout budget, so
+        // busyTimeout: 0 keeps the old fail-fast behaviour — the escape
+        // hatch for a caller that would rather see the contention.
+        const shared = await sqlite3.pool('file::memory:?cache=shared', {
+            readers: 1,
+            busyTimeout: 0,
+        });
+        try {
+            await shared.exec('CREATE TABLE t (a)');
+            const tx = shared.transaction(async (t) => {
+                await t.write('INSERT INTO t VALUES (1)');
+                await new Promise((resolve) => setTimeout(resolve, 120));
+            });
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            await assert.rejects(
+                shared.read('SELECT count(*) AS n FROM t'),
+                (err) => {
+                    assert.strictEqual(err.primaryCode, 'SQLITE_LOCKED');
+                    return true;
+                },
+            );
+            await tx;
+        } finally {
+            await shared.close();
+        }
+    });
+
     it('refuses :memory: and unknown options loudly', {
         timeout: 30000,
     }, async function () {

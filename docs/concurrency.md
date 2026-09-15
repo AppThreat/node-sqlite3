@@ -192,6 +192,30 @@ turned off by itself for an in-memory pool (there is no journal to
 switch) and for a read-only URI, so both forms open under the default
 options.
 
+**`cache=shared` locks per table, not per file.** It is the only way pool
+workers can share an in-memory database, and its concurrency model is not
+WAL's: while the writer's transaction is open, a reader touching the same
+table gets `SQLITE_LOCKED_SHAREDCACHE` — and the busy timeout does not
+cover it, because SQLite never calls the busy handler for a shared-cache
+table lock (`sqlite3_unlock_notify` is the mechanism there, and it needs a
+compile-time option this build does not carry). The pool therefore
+**retries a read** that hits a table lock, spending the connection's
+`busyTimeout` budget on it, so a read dispatched mid-transaction returns
+the committed data instead of failing. Three consequences:
+
+- `busyTimeout: 0` keeps the fail-fast behaviour — the read rejects with
+  `SQLITE_LOCKED_SHAREDCACHE` immediately.
+- A read outlives its normal latency when it collides with a long
+  transaction; it is waiting, not working. Cancelling it (`{ signal }`)
+  stops the retries.
+- Writes and `exec` are **not** retried: re-running a script, or a
+  statement that may already have landed, is not safe. A shared-cache pool
+  under concurrent writes should keep transactions short.
+
+For a shared database that needs real reader/writer concurrency, use a
+file in WAL mode — that is what the pool is shaped for. `cache=shared` is
+for sharing an in-memory database across the pool's workers at all.
+
 **What the pool does not do: spans.** Each worker loads its own instance
 of this module, so `sqlite3.subscribeQueries()` on the main thread sees
 nothing from `pool.read()`, `pool.write()` or `pool.exec()` — those spans

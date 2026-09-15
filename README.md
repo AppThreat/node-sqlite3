@@ -855,9 +855,12 @@ A parameter is a real (hidden) column, and `sequence(5)` is exactly
 `WHERE count = 5` — **SQLite re-checks that predicate against every row
 the generator produces**, rather than trusting the generator to have
 applied it. So a row either leaves the parameter's column NULL — filled
-with the argument, as above — or echoes the argument. A row reporting
-anything else in that column contradicts the `WHERE` clause the argument
-came from and is filtered out; put unrelated output in its own column. The
+with the argument, as above — or echoes the argument **as it was
+received**: parameter columns carry no affinity (like every other column
+here), so an echoed `String(5)` is the text `'5'`, which does not equal
+the integer `5`, and the row is filtered out. A row reporting anything
+else in that column contradicts the `WHERE` clause the argument came from
+and is filtered out too; put unrelated output in its own column. The
 generator is still free to pre-filter for speed, and should: a generator
 that ignores a constraint it cannot satisfy again produces an endless
 scan (correct, but unbounded — `LIMIT`, or a cancellation token on the
